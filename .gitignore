@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Local IDE / tooling
+.vscode/
+.idea/
+*.swp
+
+# Claude Code per-project settings (machine-specific proxy / permissions)
+.claude/
+
+# Tool runtime artifacts
+*.log
+plts_smith*.png
+plts_hang.png
