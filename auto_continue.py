@@ -3,7 +3,8 @@ Auto-continue Claude Code after the 5-hour limit hits.
 
 What it does:
   * Polls every Windows Terminal window's scrollback via UI Automation.
-  * Detects the "You've hit your limit · resets <H><am|pm> (<TZ>)" message.
+  * Detects the "You've hit your limit · resets <H>[:<MM>]<am|pm> (<TZ>)"
+    message (both Anthropic wordings of the /upgrade follow-up line).
   * Parses the reset time, waits until that moment (plus a small buffer),
     then types `continue` + Enter into that exact window.
 
@@ -57,20 +58,26 @@ def _force_utf8_console() -> None:
 # Patterns
 # ---------------------------------------------------------------------------
 
-# Matches the full two-line Anthropic limit message:
+# Matches the full two-line Anthropic limit message. Anthropic has shipped
+# more than one wording; both are accepted:
 #
 #     You've hit your limit · resets 11pm (Asia/Shanghai)
 #     /upgrade or /extra-usage to finish what you're working on.
 #
+#     You've hit your limit · resets 2:50pm (Asia/Shanghai)
+#     /upgrade to increase your usage limit.
+#
+# The reset time may or may not carry minutes (`11pm` vs `2:50pm`).
 # Requiring the /upgrade follow-up line is what tells us this is a real
 # rate-limit hit and not e.g. our own test output or this script's source
 # code visible in the user's scrollback. The DOTALL `[\s\S]{0,400}` lets the
 # two lines be separated by terminal padding/whitespace.
 LIMIT_RE = re.compile(
     r"You['’]ve hit your limit\s*[·•‧․\-]?\s*"
-    r"resets\s+(\d{1,2})\s*(am|pm)\s*\(([^)]+)\)"
+    r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)"
     r"[\s\S]{0,400}?"
-    r"/upgrade\s+or\s+/extra[-\s]?usage",
+    r"/upgrade\s+(?:or\s+/extra[-\s]?usage"
+    r"|to\s+increase\s+your\s+usage\s+limit)",
     re.IGNORECASE,
 )
 
@@ -159,11 +166,12 @@ def read_terminal_text(window_ctrl) -> str | None:
 MAX_POST_MATCH_TAIL = 4000
 
 
-def parse_limit_message(text: str) -> tuple[int, str, str] | None:
-    """Return (hour_12, ampm, tz_name) from the *latest* limit line, or None.
+def parse_limit_message(text: str) -> tuple[int, int, str, str] | None:
+    """Return (hour_12, minute, ampm, tz_name) from the *latest* limit line.
 
-    The match must be near the end of the buffer — a stale limit message
-    further back means Claude has already moved on.
+    Returns None if no match. The match must be near the end of the buffer —
+    a stale limit message further back means Claude has already moved on.
+    `minute` is 0 when the message omits minutes (e.g. `resets 11pm`).
     """
     matches = list(LIMIT_RE.finditer(text))
     if not matches:
@@ -171,13 +179,15 @@ def parse_limit_message(text: str) -> tuple[int, str, str] | None:
     m = matches[-1]
     if len(text) - m.end() > MAX_POST_MATCH_TAIL:
         return None
-    return int(m.group(1)), m.group(2).lower(), m.group(3).strip()
+    minute = int(m.group(2)) if m.group(2) else 0
+    return int(m.group(1)), minute, m.group(3).lower(), m.group(4).strip()
 
 
-def next_reset_datetime(hour_12: int, ampm: str, tz_name: str) -> datetime:
+def next_reset_datetime(hour_12: int, minute: int, ampm: str,
+                        tz_name: str) -> datetime:
     """
-    Compute the next wall-clock occurrence of `hour_12 am/pm` in `tz_name`,
-    return it as an aware UTC datetime.
+    Compute the next wall-clock occurrence of `hour_12:minute am/pm` in
+    `tz_name`, return it as an aware UTC datetime.
     """
     try:
         tz = pytz.timezone(tz_name)
@@ -188,7 +198,7 @@ def next_reset_datetime(hour_12: int, ampm: str, tz_name: str) -> datetime:
     hour_24 = hour_12 % 12 + (12 if ampm == "pm" else 0)
     now_local = datetime.now(tz)
     target_local = now_local.replace(
-        hour=hour_24, minute=0, second=0, microsecond=0
+        hour=hour_24, minute=minute, second=0, microsecond=0
     )
     if target_local <= now_local:
         target_local += timedelta(days=1)
@@ -359,13 +369,14 @@ def tick(states: dict[int, WindowState], args,
             st.logged_detection = False
             continue
 
-        hour_12, ampm, tz_name = parsed
-        reset_utc = next_reset_datetime(hour_12, ampm, tz_name)
+        hour_12, minute, ampm, tz_name = parsed
+        reset_utc = next_reset_datetime(hour_12, minute, ampm, tz_name)
         st.pending_reset_utc = reset_utc
         if not st.logged_detection:
             print(
                 f"[detect] {title!r}\n"
-                f"          limit hit; resets {hour_12}{ampm} ({tz_name})\n"
+                f"          limit hit; resets {hour_12}:{minute:02d}{ampm} "
+                f"({tz_name})\n"
                 f"          will fire continue at "
                 f"{fmt_dt_local(reset_utc + buffer)}",
                 flush=True,

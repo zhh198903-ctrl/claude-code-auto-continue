@@ -377,9 +377,9 @@ class Watcher(QObject):
                     st.status = ST_IDLE
                 continue
 
-            hour_12, ampm, tz_name = parsed
+            hour_12, minute, ampm, tz_name = parsed
             try:
-                reset_utc = next_reset_datetime(hour_12, ampm, tz_name)
+                reset_utc = next_reset_datetime(hour_12, minute, ampm, tz_name)
             except Exception as e:
                 self.log.emit("err", f"reset calc failed for {title!r}: {e}")
                 continue
@@ -391,7 +391,7 @@ class Watcher(QObject):
                 local = (reset_utc + buffer).astimezone()
                 self.log.emit(
                     "info",
-                    f"limit on {title!r} → resets {hour_12}{ampm} "
+                    f"limit on {title!r} → resets {hour_12}:{minute:02d}{ampm} "
                     f"({tz_name}); will fire at "
                     f"{local:%Y-%m-%d %H:%M:%S %Z}"
                 )

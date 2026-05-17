@@ -8,8 +8,8 @@ Optionally also sends `/effort <level>` first, configurable per window.
 
 ## How it works
 
-1. **Detect** — Polls every Windows Terminal window's scrollback via UI Automation. When the literal Anthropic limit message appears (both lines: `You've hit your limit · resets <H><am|pm> (<TZ>)` followed by `/upgrade or /extra-usage to finish what you're working on.`), the row turns yellow and a countdown starts.
-2. **Schedule** — Parses the reset time in the named timezone, computes the next occurrence in UTC, adds a small buffer (default 20 s past the hour).
+1. **Detect** — Polls every Windows Terminal window's scrollback via UI Automation. When the literal Anthropic limit message appears (both lines: `You've hit your limit · resets <H>[:<MM>]<am|pm> (<TZ>)` followed by the `/upgrade …` line), the row turns yellow and a countdown starts. Both Anthropic wordings of that follow-up line are recognized — `/upgrade or /extra-usage to finish what you're working on.` and `/upgrade to increase your usage limit.` — and the reset time may carry minutes (`2:50pm`) or not (`11pm`).
+2. **Schedule** — Parses the reset time in the named timezone, computes the next occurrence in UTC, adds a small buffer (default 20 s past the reset).
 3. **Fire** — At fire time, brings the target Windows Terminal window forward, sends `/effort <level>` + Enter (if configured for that row, plus an extra Enter to confirm the "Change effort level?" dialog), then `continue` + Enter. Restores the previously-focused window so the keystrokes don't yank you out of what you were doing.
 
 The watcher runs on a Qt worker thread so UIA reads (which take 100 ms+) never block the UI.
