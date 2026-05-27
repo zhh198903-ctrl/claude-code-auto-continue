@@ -76,8 +76,8 @@ from PyQt6.QtWidgets import (
 
 from auto_continue import (
     LIMIT_RE, SCAN_TAIL_CHARS, find_terminal_windows, find_termcontrol,
-    next_reset_datetime, parse_limit_message, read_terminal_text,
-    send_continue, send_text_lines,
+    next_reset_datetime, parse_limit_message, parse_retry_exhausted,
+    read_terminal_text, send_continue, send_text_lines,
 )
 
 
@@ -115,6 +115,7 @@ ST_FIRING = "firing"      # In the middle of sending keys.
 ST_SENT = "sent"          # Just sent — short-lived display state.
 ST_COOLDOWN = "cooldown"  # Inside post-send cooldown window.
 ST_EXCLUDED = "excluded"  # User chose to ignore this window.
+ST_RETRY = "retry"        # Network retries exhausted, resending continue.
 
 
 @dataclass
@@ -126,6 +127,10 @@ class _WState:
     reset_utc: Optional[datetime] = None
     last_sent_utc: Optional[datetime] = None
     sent_flash_until: Optional[datetime] = None  # show "sent" for ~5s
+    # Network-retry exhaustion bookkeeping. Independent of the rate-limit
+    # fields above.
+    retry_last_sent_utc: Optional[datetime] = None
+    retry_active: bool = False
 
 
 class Watcher(QObject):
@@ -150,6 +155,7 @@ class Watcher(QObject):
 
         self._interval = 30
         self._buffer = 20
+        self._retry_interval = 30
         self._dry_run = False
 
         # User commands accumulated between ticks. Each maps hwnd → True.
@@ -181,6 +187,10 @@ class Watcher(QObject):
     @pyqtSlot(int)
     def set_buffer(self, seconds: int) -> None:
         self._buffer = max(0, int(seconds))
+
+    @pyqtSlot(int)
+    def set_retry_interval(self, seconds: int) -> None:
+        self._retry_interval = max(5, int(seconds))
 
     @pyqtSlot(bool)
     def set_dry_run(self, on: bool) -> None:
@@ -271,6 +281,7 @@ class Watcher(QObject):
         now = datetime.now(pytz.UTC)
         cooldown = timedelta(minutes=15)
         buffer = timedelta(seconds=self._buffer)
+        retry_interval = timedelta(seconds=self._retry_interval)
 
         windows = find_terminal_windows()
         seen: set[int] = set()
@@ -314,6 +325,56 @@ class Watcher(QObject):
                     if st.last_sent_utc and now - st.last_sent_utc < cooldown
                     else ST_IDLE
                 )
+
+            # 0.5. Read scrollback once per tick so both retry and rate-limit
+            # detection share the same view of the terminal.
+            text = read_terminal_text(w)
+            tail = text[-SCAN_TAIL_CHARS:] if text else ""
+
+            # 0.6. Network-retry exhaustion path. Runs *before* the rate-limit
+            # logic and ignores the cooldown — if the API is unreachable in
+            # the middle of a 5h wait we still want to resend 'continue'
+            # every retry_interval seconds until the connection comes back.
+            if tail and parse_retry_exhausted(tail):
+                if (force_fire
+                        or st.retry_last_sent_utc is None
+                        or now - st.retry_last_sent_utc >= retry_interval):
+                    if not st.retry_active:
+                        self.log.emit(
+                            "warn",
+                            f"network retries exhausted on {title!r}; "
+                            f"sending 'continue' every "
+                            f"{self._retry_interval}s until recovery"
+                        )
+                        st.retry_active = True
+                    self.log.emit(
+                        "fire",
+                        f"resending 'continue' (retry path) → {title!r}"
+                    )
+                    ok = send_continue(w, dry_run=self._dry_run)
+                    if ok:
+                        st.retry_last_sent_utc = now
+                        st.status = ST_RETRY
+                    else:
+                        self.log.emit(
+                            "warn",
+                            f"retry send failed for {title!r}; "
+                            f"will try again in {self._interval}s"
+                        )
+                else:
+                    st.status = ST_RETRY
+                continue
+            else:
+                if st.retry_active:
+                    self.log.emit(
+                        "info",
+                        f"retry banner gone on {title!r}; "
+                        f"network recovered"
+                    )
+                    st.retry_active = False
+                    st.retry_last_sent_utc = None
+                    if st.status == ST_RETRY:
+                        st.status = ST_IDLE
 
             # 1. Pending? Decide whether to fire.
             if st.reset_utc is not None or force_fire:
@@ -365,11 +426,9 @@ class Watcher(QObject):
                 st.status = ST_COOLDOWN
                 continue
 
-            # 3. Detect.
-            text = read_terminal_text(w)
-            if not text:
+            # 3. Detect rate-limit (terminal already read at step 0.5).
+            if not tail:
                 continue
-            tail = text[-SCAN_TAIL_CHARS:]
             parsed = parse_limit_message(tail)
             if not parsed:
                 # Drop back to idle if we were here for any other reason.
@@ -413,12 +472,14 @@ class Watcher(QObject):
                 "status": st.status,
                 "reset_utc": st.reset_utc,
                 "last_sent_utc": st.last_sent_utc,
+                "retry_last_sent_utc": st.retry_last_sent_utc,
                 "excluded": st.title in self._excluded_titles,
                 "effort": self._effort_overrides.get(title_key(st.title), ""),
             })
-        # Stable ordering: pending first, then idle, then excluded.
-        order = {ST_FIRING: 0, ST_PENDING: 1, ST_SENT: 2,
-                 ST_IDLE: 3, ST_COOLDOWN: 4, ST_EXCLUDED: 5}
+        # Stable ordering: retry (network down) is the most urgent, then
+        # rate-limit pending, then idle, then excluded.
+        order = {ST_RETRY: 0, ST_FIRING: 1, ST_PENDING: 2, ST_SENT: 3,
+                 ST_IDLE: 4, ST_COOLDOWN: 5, ST_EXCLUDED: 6}
         out.sort(key=lambda r: (order.get(r["status"], 9), r["title"].lower()))
         return out
 
@@ -434,6 +495,7 @@ STATUS_COLORS = {
     ST_SENT:     QColor("#b2f2bb"),  # green
     ST_COOLDOWN: QColor("#dee2e6"),  # gray
     ST_EXCLUDED: QColor("#f8f9fa"),  # very light gray
+    ST_RETRY:    QColor("#ffc9c9"),  # pink — network down / retrying
 }
 STATUS_LABEL = {
     ST_IDLE:     "Idle",
@@ -442,6 +504,7 @@ STATUS_LABEL = {
     ST_SENT:     "✓ Sent",
     ST_COOLDOWN: "Cooldown",
     ST_EXCLUDED: "Excluded",
+    ST_RETRY:    "⚠ Net retry",
 }
 LOG_COLORS = {
     "info": QColor("#212529"),
@@ -478,6 +541,7 @@ class MainWindow(QMainWindow):
     sig_stop = pyqtSignal()
     sig_set_interval = pyqtSignal(int)
     sig_set_buffer = pyqtSignal(int)
+    sig_set_retry_interval = pyqtSignal(int)
     sig_set_dry_run = pyqtSignal(bool)
     sig_set_excluded = pyqtSignal(list)
     sig_fire_now = pyqtSignal(int)
@@ -568,6 +632,20 @@ class MainWindow(QMainWindow):
             lambda v: (self.sig_set_buffer.emit(v), self._save_settings())
         )
 
+        self.retry_spin = QSpinBox()
+        self.retry_spin.setRange(5, 600)
+        self.retry_spin.setValue(30)
+        self.retry_spin.setSuffix(" s")
+        self.retry_spin.setToolTip(
+            "When Claude shows 'attempt 10/10' (network retries exhausted), "
+            "resend 'continue' every N seconds until the connection comes "
+            "back and Claude responds."
+        )
+        self.retry_spin.valueChanged.connect(
+            lambda v: (self.sig_set_retry_interval.emit(v),
+                       self._save_settings())
+        )
+
         header.addWidget(self.status_dot)
         header.addWidget(self.status_text)
         header.addSpacing(6)
@@ -580,6 +658,8 @@ class MainWindow(QMainWindow):
         header.addWidget(self.interval_spin)
         header.addWidget(QLabel("buffer"))
         header.addWidget(self.buffer_spin)
+        header.addWidget(QLabel("retry"))
+        header.addWidget(self.retry_spin)
         header.addStretch()
         root.addLayout(header)
 
@@ -700,6 +780,7 @@ class MainWindow(QMainWindow):
         self.sig_stop.connect(self.worker.stop)
         self.sig_set_interval.connect(self.worker.set_interval)
         self.sig_set_buffer.connect(self.worker.set_buffer)
+        self.sig_set_retry_interval.connect(self.worker.set_retry_interval)
         self.sig_set_dry_run.connect(self.worker.set_dry_run)
         self.sig_set_excluded.connect(self.worker.set_excluded)
         self.sig_fire_now.connect(self.worker.cmd_fire_now)
@@ -722,13 +803,16 @@ class MainWindow(QMainWindow):
         # Block widget signals so that programmatically populating the
         # controls doesn't trigger a chain of valueChanged → _save_settings
         # → sig_set_* before the worker is even ready.
-        widgets = [self.interval_spin, self.buffer_spin, self.dry_run_check,
-                   self.keep_awake_check]
+        widgets = [self.interval_spin, self.buffer_spin, self.retry_spin,
+                   self.dry_run_check, self.keep_awake_check]
         for w in widgets:
             w.blockSignals(True)
         try:
             self.interval_spin.setValue(int(self.settings.value("interval", 30)))
             self.buffer_spin.setValue(int(self.settings.value("buffer", 20)))
+            self.retry_spin.setValue(
+                int(self.settings.value("retry_interval", 30))
+            )
             self.dry_run_check.setChecked(
                 self.settings.value("dry_run", False, type=bool)
             )
@@ -752,6 +836,7 @@ class MainWindow(QMainWindow):
         # Now push the final config to the worker exactly once.
         self.sig_set_interval.emit(self.interval_spin.value())
         self.sig_set_buffer.emit(self.buffer_spin.value())
+        self.sig_set_retry_interval.emit(self.retry_spin.value())
         self.sig_set_dry_run.emit(self.dry_run_check.isChecked())
         self.sig_set_excluded.emit(self._excluded_titles)
         self.sig_set_effort_overrides.emit(self._effort_overrides)
@@ -763,6 +848,7 @@ class MainWindow(QMainWindow):
         import json
         self.settings.setValue("interval", self.interval_spin.value())
         self.settings.setValue("buffer", self.buffer_spin.value())
+        self.settings.setValue("retry_interval", self.retry_spin.value())
         self.settings.setValue("dry_run", self.dry_run_check.isChecked())
         self.settings.setValue("keep_awake", self.keep_awake_check.isChecked())
         self.settings.setValue("excluded", list(self._excluded_titles))

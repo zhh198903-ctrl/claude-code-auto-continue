@@ -59,7 +59,7 @@ def _force_utf8_console() -> None:
 # ---------------------------------------------------------------------------
 
 # Matches the full two-line Anthropic limit message. Anthropic has shipped
-# more than one wording; both are accepted:
+# several wordings; all are accepted:
 #
 #     You've hit your limit · resets 11pm (Asia/Shanghai)
 #     /upgrade or /extra-usage to finish what you're working on.
@@ -67,17 +67,33 @@ def _force_utf8_console() -> None:
 #     You've hit your limit · resets 2:50pm (Asia/Shanghai)
 #     /upgrade to increase your usage limit.
 #
-# The reset time may or may not carry minutes (`11pm` vs `2:50pm`).
-# Requiring the /upgrade follow-up line is what tells us this is a real
-# rate-limit hit and not e.g. our own test output or this script's source
-# code visible in the user's scrollback. The DOTALL `[\s\S]{0,400}` lets the
-# two lines be separated by terminal padding/whitespace.
+#     You've hit your session limit · resets 12am (Asia/Shanghai)
+#     /upgrade to increase your usage limit.
+#
+# The leading "hit your ..." may say `limit`, `session limit`, `usage limit`,
+# `weekly limit`, etc. The reset time may or may not carry minutes (`11pm`
+# vs `2:50pm`). Requiring the /upgrade follow-up line is what tells us this
+# is a real rate-limit hit and not e.g. our own test output or this script's
+# source code visible in the user's scrollback. The DOTALL `[\s\S]{0,400}`
+# lets the two lines be separated by terminal padding/whitespace.
 LIMIT_RE = re.compile(
-    r"You['’]ve hit your limit\s*[·•‧․\-]?\s*"
+    r"You['’]ve hit your (?:\w+\s+)?limit\s*[·•‧․\-]?\s*"
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)"
     r"[\s\S]{0,400}?"
     r"/upgrade\s+(?:or\s+/extra[-\s]?usage"
     r"|to\s+increase\s+your\s+usage\s+limit)",
+    re.IGNORECASE,
+)
+
+# Network-retry banner shown when Claude Code can't reach the API:
+#     Retrying in 0s · attempt 7/10
+# When attempt count hits N/N, Claude has exhausted its automatic retries
+# and the user normally has to type 'continue' to resume after the network
+# is back. We mimic that. Anchoring on the "Retrying in <n>s" prefix avoids
+# matching unrelated occurrences of "attempt N/M" in normal output.
+RETRY_RE = re.compile(
+    r"Retrying\s+in\s+\d+\s*s\s*[·•‧․\-]?\s*"
+    r"attempt\s+(\d+)\s*/\s*(\d+)",
     re.IGNORECASE,
 )
 
@@ -104,6 +120,11 @@ class WindowState:
     last_sent_utc: datetime | None = None
     # Logged-once flags so we don't spam the console.
     logged_detection: bool = False
+
+    # Network-retry exhaustion (attempt N/N) state. Independent of the
+    # rate-limit fields above — both can be active at the same time.
+    retry_last_sent_utc: datetime | None = None
+    retry_logged: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +202,23 @@ def parse_limit_message(text: str) -> tuple[int, int, str, str] | None:
         return None
     minute = int(m.group(2)) if m.group(2) else 0
     return int(m.group(1)), minute, m.group(3).lower(), m.group(4).strip()
+
+
+def parse_retry_exhausted(text: str) -> bool:
+    """True if the most recent network-retry banner shows N == total (e.g.
+    `attempt 10/10`) and the banner sits near the tail of the buffer.
+
+    A retry banner buried far up in scrollback (e.g. from a previous outage
+    the user already cleared manually) is ignored.
+    """
+    matches = list(RETRY_RE.finditer(text))
+    if not matches:
+        return False
+    m = matches[-1]
+    if len(text) - m.end() > MAX_POST_MATCH_TAIL:
+        return False
+    n, total = int(m.group(1)), int(m.group(2))
+    return n >= total > 0
 
 
 def next_reset_datetime(hour_12: int, minute: int, ampm: str,
@@ -299,12 +337,14 @@ def run(args) -> None:
     buffer = timedelta(seconds=args.buffer)
 
     print(f"[boot] auto_continue running; interval={args.interval}s, "
-          f"buffer={args.buffer}s, dry_run={args.dry_run}, "
-          f"match={args.match!r}", flush=True)
+          f"buffer={args.buffer}s, retry_interval={args.retry_interval}s, "
+          f"dry_run={args.dry_run}, match={args.match!r}", flush=True)
+
+    retry_interval = timedelta(seconds=args.retry_interval)
 
     while True:
         try:
-            tick(states, args, cooldown, buffer)
+            tick(states, args, cooldown, buffer, retry_interval)
         except KeyboardInterrupt:
             print("\n[exit] interrupted by user.", flush=True)
             return
@@ -315,7 +355,8 @@ def run(args) -> None:
 
 
 def tick(states: dict[int, WindowState], args,
-         cooldown: timedelta, buffer: timedelta) -> None:
+         cooldown: timedelta, buffer: timedelta,
+         retry_interval: timedelta) -> None:
     now_utc = datetime.now(pytz.UTC)
     windows = find_terminal_windows()
 
@@ -335,6 +376,35 @@ def tick(states: dict[int, WindowState], args,
 
         st = states.setdefault(hwnd, WindowState(title=title))
         st.title = title  # title can change as user switches tabs
+
+        # 0. Network-retry exhaustion runs first and is independent of the
+        # rate-limit pending/cooldown state. If the API is unreachable in
+        # the middle of a 5h wait, we still want to keep re-sending
+        # 'continue' to unstick Claude once the connection comes back.
+        tail_for_retry = None
+        text = read_terminal_text(w)
+        if text:
+            tail_for_retry = text[-SCAN_TAIL_CHARS:]
+        if tail_for_retry and parse_retry_exhausted(tail_for_retry):
+            if (st.retry_last_sent_utc is None
+                    or now_utc - st.retry_last_sent_utc >= retry_interval):
+                if not st.retry_logged:
+                    print(f"[retry-exhausted] {title!r}: attempts hit max; "
+                          f"sending 'continue' (will resend every "
+                          f"{int(retry_interval.total_seconds())}s "
+                          f"until recovery)", flush=True)
+                    st.retry_logged = True
+                ok = send_continue(w, dry_run=args.dry_run)
+                if ok:
+                    st.retry_last_sent_utc = now_utc
+            # Don't also run rate-limit logic this tick — network is dead.
+            continue
+        else:
+            if st.retry_last_sent_utc is not None:
+                print(f"[retry-recovered] {title!r}: retry banner gone, "
+                      f"clearing retry state", flush=True)
+                st.retry_last_sent_utc = None
+                st.retry_logged = False
 
         # 1. If a continue is already pending, check whether time has come.
         if st.pending_reset_utc is not None:
@@ -359,12 +429,10 @@ def tick(states: dict[int, WindowState], args,
         if st.last_sent_utc and now_utc - st.last_sent_utc < cooldown:
             continue
 
-        # 3. Read terminal and look for limit message.
-        text = read_terminal_text(w)
-        if not text:
+        # 3. Look for limit message (text already read at step 0).
+        if not tail_for_retry:
             continue
-        tail = text[-SCAN_TAIL_CHARS:]
-        parsed = parse_limit_message(tail)
+        parsed = parse_limit_message(tail_for_retry)
         if not parsed:
             st.logged_detection = False
             continue
@@ -402,6 +470,10 @@ def parse_args(argv=None):
                    help="Polling interval in seconds (default 30).")
     p.add_argument("--buffer", type=int, default=20,
                    help="Extra seconds to wait past reset time (default 20).")
+    p.add_argument("--retry-interval", type=int, default=30,
+                   help="When the network-retry banner shows attempt N/N "
+                        "(retries exhausted), resend 'continue' every N "
+                        "seconds until Claude responds (default 30).")
     p.add_argument("--match", type=str, default="",
                    help="Only watch WT windows whose title contains this "
                         "substring (case-insensitive). Empty = all.")
