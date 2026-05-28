@@ -113,6 +113,12 @@ class WindowState:
     # Reset moment in UTC for the currently-detected limit hit. None = no
     # limit currently detected.
     pending_reset_utc: datetime | None = None
+    # The (hour_12, minute, ampm, tz) tuple that produced pending_reset_utc.
+    # We compare against this on each detect tick, not against the computed
+    # UTC moment: once the wall-clock target has passed, re-parsing the same
+    # lingering message would roll it forward to "tomorrow at the same
+    # time", which would push out a pending that's about to fire.
+    pending_reset_key: tuple | None = None
     # Last time we sent "continue" to this window. Used to suppress
     # re-detection: the limit message stays in scrollback after we continue,
     # so we'd otherwise loop. We ignore detections for `cooldown_seconds`
@@ -406,7 +412,51 @@ def tick(states: dict[int, WindowState], args,
                 st.retry_last_sent_utc = None
                 st.retry_logged = False
 
-        # 1. If a continue is already pending, check whether time has come.
+        # 1. Detect latest limit message and update pending if it changed.
+        # Skipped during cooldown so the still-visible old message doesn't
+        # retrigger immediately after we just sent continue. Done *before*
+        # the fire check so a new limit (different reset time) appearing
+        # while we're already waiting on an older one correctly replaces
+        # the pending target — otherwise we'd fire at the stale time and
+        # miss the new one.
+        in_cooldown = (st.last_sent_utc is not None
+                       and now_utc - st.last_sent_utc < cooldown)
+        if tail_for_retry and not in_cooldown:
+            parsed = parse_limit_message(tail_for_retry)
+            if parsed and parsed != st.pending_reset_key:
+                # New limit message (different reset tuple). Replace pending.
+                hour_12, minute, ampm, tz_name = parsed
+                new_reset = next_reset_datetime(
+                    hour_12, minute, ampm, tz_name
+                )
+                old = st.pending_reset_utc
+                st.pending_reset_utc = new_reset
+                st.pending_reset_key = parsed
+                if old is None:
+                    print(
+                        f"[detect] {title!r}\n"
+                        f"          limit hit; resets "
+                        f"{hour_12}:{minute:02d}{ampm} ({tz_name})\n"
+                        f"          will fire continue at "
+                        f"{fmt_dt_local(new_reset + buffer)}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[update] {title!r}\n"
+                        f"          reset shifted: "
+                        f"{fmt_dt_local(old + buffer)} → "
+                        f"{fmt_dt_local(new_reset + buffer)}",
+                        flush=True,
+                    )
+                st.logged_detection = True
+            elif parsed is None:
+                # No current limit message. Don't clear pending — the message
+                # may have just scrolled off — but reset the log flag so a
+                # fresh detection on the next tick re-logs.
+                st.logged_detection = False
+
+        # 2. Fire pending if its time has come.
         if st.pending_reset_utc is not None:
             fire_at = st.pending_reset_utc + buffer
             if now_utc >= fire_at:
@@ -416,6 +466,7 @@ def tick(states: dict[int, WindowState], args,
                 if ok:
                     st.last_sent_utc = now_utc
                     st.pending_reset_utc = None
+                    st.pending_reset_key = None
                     st.logged_detection = False
                 else:
                     # Couldn't send (no TermControl?). Push the next attempt
@@ -423,33 +474,6 @@ def tick(states: dict[int, WindowState], args,
                     st.pending_reset_utc = now_utc + timedelta(
                         seconds=args.interval
                     )
-            continue  # don't re-detect on the same tick
-
-        # 2. Cooldown after recent send: skip detection.
-        if st.last_sent_utc and now_utc - st.last_sent_utc < cooldown:
-            continue
-
-        # 3. Look for limit message (text already read at step 0).
-        if not tail_for_retry:
-            continue
-        parsed = parse_limit_message(tail_for_retry)
-        if not parsed:
-            st.logged_detection = False
-            continue
-
-        hour_12, minute, ampm, tz_name = parsed
-        reset_utc = next_reset_datetime(hour_12, minute, ampm, tz_name)
-        st.pending_reset_utc = reset_utc
-        if not st.logged_detection:
-            print(
-                f"[detect] {title!r}\n"
-                f"          limit hit; resets {hour_12}:{minute:02d}{ampm} "
-                f"({tz_name})\n"
-                f"          will fire continue at "
-                f"{fmt_dt_local(reset_utc + buffer)}",
-                flush=True,
-            )
-            st.logged_detection = True
 
     # Clean up state for windows that closed.
     for hwnd in list(states):

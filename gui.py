@@ -125,6 +125,12 @@ class _WState:
     title: str
     status: str = ST_IDLE
     reset_utc: Optional[datetime] = None
+    # The (hour_12, minute, ampm, tz) tuple that produced reset_utc. We
+    # compare against this when re-parsing the scrollback so a still-visible
+    # message whose wall-clock target has just passed doesn't get "rolled
+    # forward" by next_reset_datetime and push out a pending that's about
+    # to fire.
+    reset_key: Optional[tuple] = None
     last_sent_utc: Optional[datetime] = None
     sent_flash_until: Optional[datetime] = None  # show "sent" for ~5s
     # Network-retry exhaustion bookkeeping. Independent of the rate-limit
@@ -311,6 +317,7 @@ class Watcher(QObject):
                     self.log.emit("info",
                                   f"skipped pending continue for {title!r}")
                 st.reset_utc = None
+                st.reset_key = None
                 st.status = ST_IDLE
 
             force_fire = hwnd in self._cmd_fire_now
@@ -376,7 +383,50 @@ class Watcher(QObject):
                     if st.status == ST_RETRY:
                         st.status = ST_IDLE
 
-            # 1. Pending? Decide whether to fire.
+            # 1. Detect rate-limit and update pending if it changed.
+            # Runs *before* the fire decision so a NEW limit message with a
+            # different reset time correctly supersedes an older pending
+            # target. Skipped inside the post-send cooldown window because
+            # the lingering old message would otherwise re-trigger right
+            # after we sent continue.
+            in_cooldown = (st.last_sent_utc is not None
+                           and now - st.last_sent_utc < cooldown)
+            if tail and not in_cooldown:
+                parsed = parse_limit_message(tail)
+                if parsed and parsed != st.reset_key:
+                    hour_12, minute, ampm, tz_name = parsed
+                    new_reset = None
+                    try:
+                        new_reset = next_reset_datetime(
+                            hour_12, minute, ampm, tz_name
+                        )
+                    except Exception as e:
+                        self.log.emit(
+                            "err", f"reset calc failed for {title!r}: {e}"
+                        )
+                    if new_reset is not None:
+                        old = st.reset_utc
+                        st.reset_utc = new_reset
+                        st.reset_key = parsed
+                        local = (new_reset + buffer).astimezone()
+                        if old is None:
+                            self.log.emit(
+                                "info",
+                                f"limit on {title!r} → resets "
+                                f"{hour_12}:{minute:02d}{ampm} ({tz_name}); "
+                                f"will fire at "
+                                f"{local:%Y-%m-%d %H:%M:%S %Z}"
+                            )
+                        else:
+                            old_local = (old + buffer).astimezone()
+                            self.log.emit(
+                                "info",
+                                f"limit on {title!r} reset shifted: "
+                                f"{old_local:%Y-%m-%d %H:%M:%S} → "
+                                f"{local:%Y-%m-%d %H:%M:%S}"
+                            )
+
+            # 2. Pending? Decide whether to fire.
             if st.reset_utc is not None or force_fire:
                 fire_at = (st.reset_utc or now) + buffer
                 if force_fire or now >= fire_at:
@@ -401,6 +451,7 @@ class Watcher(QObject):
                     if ok:
                         st.last_sent_utc = now
                         st.reset_utc = None
+                        st.reset_key = None
                         st.status = ST_SENT
                         st.sent_flash_until = now + timedelta(seconds=5)
                         self.log.emit(
@@ -419,41 +470,11 @@ class Watcher(QObject):
                     st.status = ST_PENDING
                 continue
 
-            # 2. Cooldown after recent send? Skip detection.
-            if (st.last_sent_utc
-                    and now - st.last_sent_utc < cooldown
-                    and st.status != ST_SENT):
+            # 3. No pending. Resolve status: cooldown vs idle.
+            if in_cooldown and st.status != ST_SENT:
                 st.status = ST_COOLDOWN
-                continue
-
-            # 3. Detect rate-limit (terminal already read at step 0.5).
-            if not tail:
-                continue
-            parsed = parse_limit_message(tail)
-            if not parsed:
-                # Drop back to idle if we were here for any other reason.
-                if st.status not in (ST_SENT, ST_FIRING):
-                    st.status = ST_IDLE
-                continue
-
-            hour_12, minute, ampm, tz_name = parsed
-            try:
-                reset_utc = next_reset_datetime(hour_12, minute, ampm, tz_name)
-            except Exception as e:
-                self.log.emit("err", f"reset calc failed for {title!r}: {e}")
-                continue
-            # Avoid log spam when the same limit message stays put.
-            previously_pending = st.reset_utc == reset_utc
-            st.reset_utc = reset_utc
-            st.status = ST_PENDING
-            if not previously_pending:
-                local = (reset_utc + buffer).astimezone()
-                self.log.emit(
-                    "info",
-                    f"limit on {title!r} → resets {hour_12}:{minute:02d}{ampm} "
-                    f"({tz_name}); will fire at "
-                    f"{local:%Y-%m-%d %H:%M:%S %Z}"
-                )
+            elif st.status not in (ST_SENT, ST_FIRING):
+                st.status = ST_IDLE
 
         # Drop closed windows.
         for hwnd in list(self._states):

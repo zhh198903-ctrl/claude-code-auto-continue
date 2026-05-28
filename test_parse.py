@@ -60,6 +60,27 @@ samples = [
     # Hypothetical "usage limit" wording — also matches.
     ("You've hit your usage limit · resets 4pm (Asia/Shanghai)\n" + UP,
      (4, 0, "pm", "Asia/Shanghai")),
+    # --- Different-timezone users (Anthropic renders the user's local tz). ---
+    # West coast US.
+    ("You've hit your session limit · resets 7pm (America/Los_Angeles)\n"
+     + UP2, (7, 0, "pm", "America/Los_Angeles")),
+    # London.
+    ("You've hit your session limit · resets 11pm (Europe/London)\n" + UP2,
+     (11, 0, "pm", "Europe/London")),
+    # Tokyo with minutes.
+    ("You've hit your session limit · resets 8:45am (Asia/Tokyo)\n" + UP2,
+     (8, 45, "am", "Asia/Tokyo")),
+    # Sao Paulo with hyphen in tz name.
+    ("You've hit your session limit · resets 6pm (America/Sao_Paulo)\n"
+     + UP2, (6, 0, "pm", "America/Sao_Paulo")),
+    # UTC.
+    ("You've hit your session limit · resets 12am (UTC)\n" + UP2,
+     (12, 0, "am", "UTC")),
+    # New York with EDT abbrev (Anthropic sometimes uses abbrev, sometimes
+    # IANA). pytz won't recognize "EDT" but parse should still succeed —
+    # next_reset_datetime falls back to Asia/Shanghai gracefully.
+    ("You've hit your session limit · resets 9am (EDT)\n" + UP2,
+     (9, 0, "am", "EDT")),
 ]
 
 failures = 0
