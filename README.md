@@ -6,6 +6,12 @@ Optionally also sends `/effort <level>` first, configurable per window.
 
 > **Windows-only.** Uses Win32 UI Automation to read terminal scrollback and `SendInput` for keystroke delivery. Tested on Windows 11 with Windows Terminal + PowerShell.
 
+## Download
+
+**[⬇️ Auto-Continue.exe (latest release)](https://github.com/zhh198903-ctrl/claude-code-auto-continue/releases/latest)** — single-file Windows executable, ~55 MB, no Python or dependencies required. Double-click to run.
+
+Prefer source? See [Install](#install) below.
+
 ## How it works
 
 1. **Detect** — Polls every Windows Terminal window's scrollback via UI Automation. When the literal Anthropic limit message appears (both lines: `You've hit your limit · resets <H>[:<MM>]<am|pm> (<TZ>)` followed by the `/upgrade …` line), the row turns yellow and a countdown starts. Both Anthropic wordings of that follow-up line are recognized — `/upgrade or /extra-usage to finish what you're working on.` and `/upgrade to increase your usage limit.` — and the reset time may carry minutes (`2:50pm`) or not (`11pm`).
@@ -16,11 +22,19 @@ The watcher runs on a Qt worker thread so UIA reads (which take 100 ms+) never b
 
 ## Install
 
+### Option A — Prebuilt exe (recommended)
+
+Grab **`Auto-Continue.exe`** from the [latest release](https://github.com/zhh198903-ctrl/claude-code-auto-continue/releases/latest) and double-click it. That's it.
+
+### Option B — From source
+
 ```powershell
 git clone https://github.com/zhh198903-ctrl/claude-code-auto-continue.git
 cd claude-code-auto-continue
 pip install -r requirements.txt
 ```
+
+To build your own exe from source: `python -m PyInstaller Auto-Continue.spec --clean --noconfirm` → output at `dist/Auto-Continue.exe`.
 
 ## Run
 
