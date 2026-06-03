@@ -509,15 +509,6 @@ class Watcher(QObject):
 # Main window
 # ===========================================================================
 
-# Cell colors per status.
-STATUS_COLORS = {
-    ST_PENDING:  QColor("#fff3bf"),  # yellow
-    ST_FIRING:   QColor("#ffd8a8"),  # orange
-    ST_SENT:     QColor("#b2f2bb"),  # green
-    ST_COOLDOWN: QColor("#dee2e6"),  # gray
-    ST_EXCLUDED: QColor("#f8f9fa"),  # very light gray
-    ST_RETRY:    QColor("#ffc9c9"),  # pink — network down / retrying
-}
 STATUS_LABEL = {
     ST_IDLE:     "Idle",
     ST_PENDING:  "⏳ Waiting",
@@ -527,12 +518,73 @@ STATUS_LABEL = {
     ST_EXCLUDED: "Excluded",
     ST_RETRY:    "⚠ Net retry",
 }
-LOG_COLORS = {
-    "info": QColor("#212529"),
-    "warn": QColor("#b07a00"),
-    "err":  QColor("#c92a2a"),
-    "fire": QColor("#1864ab"),
-}
+
+
+def _current_color_scheme() -> "Qt.ColorScheme":
+    """Return the OS-level color scheme (Light/Dark/Unknown).
+
+    Falls back to Unknown when running under a Qt build that predates
+    QStyleHints.colorScheme() (added in Qt 6.5). Unknown is treated as
+    Light by `_make_palette`.
+    """
+    app = QApplication.instance()
+    if app is None:
+        return Qt.ColorScheme.Unknown
+    try:
+        return app.styleHints().colorScheme()
+    except (AttributeError, RuntimeError):
+        return Qt.ColorScheme.Unknown
+
+
+def _make_palette(scheme: "Qt.ColorScheme") -> dict:
+    """Color set tuned to the active OS color scheme.
+
+    Cell backgrounds and log text need explicit colors because Qt's auto
+    palette only adjusts widget chrome (base / window / button) — our
+    hard-coded status bg + log text were pale-on-light, which collapses
+    on a dark widget base. Dark mode uses deeper saturated bgs with
+    near-white text so cells stay readable.
+    """
+    if scheme == Qt.ColorScheme.Dark:
+        return {
+            "status_bg": {
+                ST_PENDING:  QColor("#5c4a00"),
+                ST_FIRING:   QColor("#5c3500"),
+                ST_SENT:     QColor("#1f4a2b"),
+                ST_COOLDOWN: QColor("#3a3f44"),
+                ST_EXCLUDED: QColor("#2a2d31"),
+                ST_RETRY:    QColor("#5c1e1e"),
+            },
+            "status_fg": QColor("#f1f3f5"),
+            "log_fg": {
+                "info": QColor("#dee2e6"),
+                "warn": QColor("#ffd43b"),
+                "err":  QColor("#ff8787"),
+                "fire": QColor("#74c0fc"),
+            },
+            "dot_running": "#51cf66",
+            "dot_stopped": "#868e96",
+        }
+    # Light or Unknown → original light palette.
+    return {
+        "status_bg": {
+            ST_PENDING:  QColor("#fff3bf"),
+            ST_FIRING:   QColor("#ffd8a8"),
+            ST_SENT:     QColor("#b2f2bb"),
+            ST_COOLDOWN: QColor("#dee2e6"),
+            ST_EXCLUDED: QColor("#f8f9fa"),
+            ST_RETRY:    QColor("#ffc9c9"),
+        },
+        "status_fg": QColor("#212529"),
+        "log_fg": {
+            "info": QColor("#212529"),
+            "warn": QColor("#b07a00"),
+            "err":  QColor("#c92a2a"),
+            "fire": QColor("#1864ab"),
+        },
+        "dot_running": "#2f9e44",
+        "dot_stopped": "#adb5bd",
+    }
 
 
 def _fmt_local(dt_utc: Optional[datetime]) -> str:
@@ -585,10 +637,25 @@ class MainWindow(QMainWindow):
         self._excluded_titles: list = []
         # Per-window effort overrides keyed by stable title (see title_key).
         self._effort_overrides: dict = {}
+        # Theme-aware color set, plus a ring buffer of recent log entries
+        # so they can be re-rendered when the user flips Win11 dark mode.
+        # Must exist before _load_settings (which may emit log lines via
+        # _apply_keep_awake) and before _build_ui (which doesn't read them
+        # directly but is co-located for clarity).
+        self._palette = _make_palette(_current_color_scheme())
+        self._log_buffer: list = []  # list[tuple[ts, level, msg]]
 
         self._build_ui()
         self._build_worker()
         self._load_settings()
+
+        # React to OS-level theme flips. Safe to skip on older Qt builds.
+        try:
+            QApplication.instance().styleHints().colorSchemeChanged.connect(
+                self._on_color_scheme_changed
+            )
+        except (AttributeError, RuntimeError):
+            pass
 
         # Periodic 1s repaint just for the live countdown column.
         self._tick_timer = QTimer(self)
@@ -608,7 +675,12 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
 
         self.status_dot = QLabel("●")
-        self.status_dot.setStyleSheet("color: #adb5bd; font-size: 16px;")
+        # Initial color comes from the active palette; will be repainted
+        # by _refresh_running_indicator() (called from __init__ tail and
+        # whenever Start/Stop toggles or the theme flips).
+        self.status_dot.setStyleSheet(
+            f"color: {self._palette['dot_stopped']}; font-size: 16px;"
+        )
         self.status_text = QLabel("Stopped")
         self.status_text.setStyleSheet("font-weight: bold;")
 
@@ -889,17 +961,18 @@ class MainWindow(QMainWindow):
     @pyqtSlot(bool)
     def _on_running_changed(self, running: bool) -> None:
         if running:
-            self.status_dot.setStyleSheet(
-                "color: #2f9e44; font-size: 16px;"
-            )
             self.status_text.setText("Running")
             self.start_btn.setText("Stop")
         else:
-            self.status_dot.setStyleSheet(
-                "color: #adb5bd; font-size: 16px;"
-            )
             self.status_text.setText("Stopped")
             self.start_btn.setText("Start")
+        self._refresh_running_indicator()
+
+    def _refresh_running_indicator(self) -> None:
+        running = self.start_btn.text() == "Stop"
+        color = (self._palette["dot_running"] if running
+                 else self._palette["dot_stopped"])
+        self.status_dot.setStyleSheet(f"color: {color}; font-size: 16px;")
 
     @pyqtSlot(list)
     def _on_snapshot(self, rows: list) -> None:
@@ -909,18 +982,39 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str, str)
     def _append_log(self, level: str, message: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
-        line = f"{ts}  [{level}]  {message}"
-        # Color via inline HTML so the highlight is per-line.
-        color = LOG_COLORS.get(level, QColor("black")).name()
-        self.log_view.appendHtml(
-            f'<span style="color:{color}">{line}</span>'
-        )
+        # Keep a parallel buffer (capped to match the QPlainTextEdit's
+        # 500-block limit) so a theme flip can re-render past lines in
+        # the new color set.
+        self._log_buffer.append((ts, level, message))
+        if len(self._log_buffer) > 500:
+            del self._log_buffer[: len(self._log_buffer) - 500]
+        self._render_log_line(ts, level, message)
         # Tray notification on fire so the user notices even when minimized.
         if level == "fire" and self.tray is not None:
             self.tray.showMessage(
                 "Auto-Continue", message,
                 QSystemTrayIcon.MessageIcon.Information, 4000,
             )
+
+    def _render_log_line(self, ts: str, level: str, message: str) -> None:
+        log_fg = self._palette["log_fg"]
+        color = log_fg.get(level, log_fg["info"]).name()
+        line = f"{ts}  [{level}]  {message}"
+        self.log_view.appendHtml(
+            f'<span style="color:{color}">{line}</span>'
+        )
+
+    def _redraw_log_view(self) -> None:
+        self.log_view.clear()
+        for ts, level, msg in self._log_buffer:
+            self._render_log_line(ts, level, msg)
+
+    @pyqtSlot(Qt.ColorScheme)
+    def _on_color_scheme_changed(self, scheme: "Qt.ColorScheme") -> None:
+        self._palette = _make_palette(scheme)
+        self._refresh_running_indicator()
+        self._render_table()
+        self._redraw_log_view()
 
     # ---- Table rendering -------------------------------------------------
 
@@ -937,9 +1031,13 @@ class MainWindow(QMainWindow):
             status_item = QTableWidgetItem(
                 STATUS_LABEL.get(row["status"], row["status"])
             )
-            color = STATUS_COLORS.get(row["status"])
-            if color is not None:
-                status_item.setBackground(color)
+            bg = self._palette["status_bg"].get(row["status"])
+            if bg is not None:
+                status_item.setBackground(bg)
+                # Pair fg with bg so text stays readable on whichever
+                # theme we're tracking (Qt's default text color would
+                # otherwise collide with our explicit cell bg).
+                status_item.setForeground(self._palette["status_fg"])
             self.table.setItem(r, 1, status_item)
 
             self.table.setItem(r, 2, QTableWidgetItem(
