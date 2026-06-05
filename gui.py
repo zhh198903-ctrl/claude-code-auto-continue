@@ -81,18 +81,34 @@ from auto_continue import (
 )
 
 
-# Effort levels offered in the per-window dropdown. The first sentinel
-# means "don't send /effort, just continue as-is".
+# Effort levels offered in the per-window dropdown, matching Claude Code's
+# own `/effort` slider (low → … → ultracode). The first sentinel means
+# "don't send /effort, just continue as-is". `ultracode` (xhigh + workflows)
+# is newer — sessions on Claude Code older than 4.7 won't have it, in which
+# case `/effort ultracode` is simply ignored by that session.
 EFFORT_NONE = ""
-EFFORT_LEVELS = [EFFORT_NONE, "max", "xhigh", "high", "medium", "low", "auto"]
+EFFORT_LEVELS = [EFFORT_NONE, "low", "medium", "high", "xhigh", "max",
+                 "ultracode"]
 EFFORT_LABEL = {
     EFFORT_NONE: "(none)",
-    "max": "max",
-    "xhigh": "xhigh",
-    "high": "high",
-    "medium": "medium",
     "low": "low",
-    "auto": "auto",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+    "ultracode": "ultracode",
+}
+
+# Model levels offered in the per-window dropdown, matching Claude Code's
+# `/model` picker (Default / Sonnet / Haiku). The first sentinel means
+# "don't send /model, leave the session on whatever model it's already on".
+MODEL_NONE = ""
+MODEL_LEVELS = [MODEL_NONE, "default", "sonnet", "haiku"]
+MODEL_LABEL = {
+    MODEL_NONE: "(none)",
+    "default": "default",
+    "sonnet": "sonnet",
+    "haiku": "haiku",
 }
 
 
@@ -156,8 +172,11 @@ class Watcher(QObject):
         self._excluded_titles: set[str] = set()
         # Per-window effort override. Key is the *stable* part of the WT
         # title (leading spinner glyph stripped), value is one of
-        # {max,xhigh,high,medium,low}. Missing/empty value = no override.
+        # {max,xhigh,high,medium,low,ultracode}. Missing/empty = no override.
         self._effort_overrides: dict[str, str] = {}
+        # Per-window model override, same keying. Value ∈ {default,sonnet,
+        # haiku}. Missing/empty = leave the session's current model alone.
+        self._model_overrides: dict[str, str] = {}
 
         self._interval = 30
         self._buffer = 20
@@ -211,6 +230,12 @@ class Watcher(QObject):
         # Filter out empty / "(none)" entries so the worker only stores
         # actionable overrides.
         self._effort_overrides = {
+            str(k): str(v) for k, v in overrides.items() if v
+        }
+
+    @pyqtSlot(dict)
+    def set_model_overrides(self, overrides: dict) -> None:
+        self._model_overrides = {
             str(k): str(v) for k, v in overrides.items() if v
         }
 
@@ -431,8 +456,15 @@ class Watcher(QObject):
                 fire_at = (st.reset_utc or now) + buffer
                 if force_fire or now >= fire_at:
                     st.status = ST_FIRING
+                    model = self._model_overrides.get(title_key(title), "")
                     effort = self._effort_overrides.get(title_key(title), "")
                     lines = []
+                    if model:
+                        lines.append(f"/model {model}")
+                        # A direct `/model <name>` switches immediately. The
+                        # trailing blank Enter confirms a dialog if one ever
+                        # pops; on an empty input box it's a harmless no-op.
+                        lines.append("")
                     if effort:
                         lines.append(f"/effort {effort}")
                         # Every effort level change pops a "Change effort
@@ -457,8 +489,9 @@ class Watcher(QObject):
                         self.log.emit(
                             "info",
                             ("simulated (dry-run)" if self._dry_run else "sent")
-                            + (f" /effort {effort} + " if effort else " ")
-                            + f"continue → {title!r}"
+                            + (f" /model {model} +" if model else "")
+                            + (f" /effort {effort} +" if effort else "")
+                            + f" continue → {title!r}"
                         )
                     else:
                         self.log.emit("warn",
@@ -495,6 +528,7 @@ class Watcher(QObject):
                 "last_sent_utc": st.last_sent_utc,
                 "retry_last_sent_utc": st.retry_last_sent_utc,
                 "excluded": st.title in self._excluded_titles,
+                "model": self._model_overrides.get(title_key(st.title), ""),
                 "effort": self._effort_overrides.get(title_key(st.title), ""),
             })
         # Stable ordering: retry (network down) is the most urgent, then
@@ -623,6 +657,7 @@ class MainWindow(QMainWindow):
     sig_unexclude = pyqtSignal(str)
     sig_clear_cooldown = pyqtSignal(int)
     sig_set_effort_overrides = pyqtSignal(dict)
+    sig_set_model_overrides = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
@@ -637,6 +672,8 @@ class MainWindow(QMainWindow):
         self._excluded_titles: list = []
         # Per-window effort overrides keyed by stable title (see title_key).
         self._effort_overrides: dict = {}
+        # Per-window model overrides, same keying.
+        self._model_overrides: dict = {}
         # Theme-aware color set, plus a ring buffer of recent log entries
         # so they can be re-rendered when the user flips Win11 dark mode.
         # Must exist before _load_settings (which may emit log lines via
@@ -757,10 +794,10 @@ class MainWindow(QMainWindow):
         root.addLayout(header)
 
         # Window table
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
             ["Window", "Status", "Reset", "Countdown", "Last sent",
-             "Effort", "Action"]
+             "Model", "Effort", "Action"]
         )
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(
@@ -772,7 +809,7 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for i in range(1, 7):
+        for i in range(1, 8):
             h.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         root.addWidget(self.table, stretch=2)
 
@@ -882,6 +919,7 @@ class MainWindow(QMainWindow):
         self.sig_unexclude.connect(self.worker.cmd_unexclude)
         self.sig_clear_cooldown.connect(self.worker.cmd_clear_cooldown)
         self.sig_set_effort_overrides.connect(self.worker.set_effort_overrides)
+        self.sig_set_model_overrides.connect(self.worker.set_model_overrides)
 
         # Receive snapshots and logs.
         self.worker.snapshot.connect(self._on_snapshot)
@@ -922,6 +960,11 @@ class MainWindow(QMainWindow):
                 self._effort_overrides = json.loads(raw) if raw else {}
             except Exception:
                 self._effort_overrides = {}
+            raw_m = self.settings.value("model_overrides", "", type=str) or ""
+            try:
+                self._model_overrides = json.loads(raw_m) if raw_m else {}
+            except Exception:
+                self._model_overrides = {}
         finally:
             for w in widgets:
                 w.blockSignals(False)
@@ -933,6 +976,7 @@ class MainWindow(QMainWindow):
         self.sig_set_dry_run.emit(self.dry_run_check.isChecked())
         self.sig_set_excluded.emit(self._excluded_titles)
         self.sig_set_effort_overrides.emit(self._effort_overrides)
+        self.sig_set_model_overrides.emit(self._model_overrides)
         # Apply keep-awake state immediately if the user had it ON before.
         if self.keep_awake_check.isChecked():
             self._apply_keep_awake(True)
@@ -947,6 +991,9 @@ class MainWindow(QMainWindow):
         self.settings.setValue("excluded", list(self._excluded_titles))
         self.settings.setValue(
             "effort_overrides", json.dumps(self._effort_overrides)
+        )
+        self.settings.setValue(
+            "model_overrides", json.dumps(self._model_overrides)
         )
 
     # ---- Slots -----------------------------------------------------------
@@ -1050,6 +1097,29 @@ class MainWindow(QMainWindow):
                 _fmt_local(row["last_sent_utc"])
             ))
 
+            # Model dropdown — sent as `/model <name>` right before the
+            # effort/continue sequence. "(none)" means skip /model and leave
+            # the session on whatever model it's currently using.
+            model_combo = QComboBox()
+            for level in MODEL_LEVELS:
+                model_combo.addItem(MODEL_LABEL[level], userData=level)
+            current_m = row.get("model", "")
+            try:
+                idx_m = MODEL_LEVELS.index(current_m)
+            except ValueError:
+                idx_m = 0
+            model_combo.setCurrentIndex(idx_m)
+            model_combo.setToolTip(
+                "Auto-prefix the next continue with `/model <name>`. "
+                "(none) leaves the session's model unchanged. "
+                "Setting persists per window across restarts."
+            )
+            model_combo.currentIndexChanged.connect(
+                lambda _i, t=row["title"], cb=model_combo:
+                self._on_model_changed(t, cb.currentData())
+            )
+            self.table.setCellWidget(r, 5, model_combo)
+
             # Effort dropdown — sent as `/effort <level>` right before
             # `continue`. "(none)" means skip /effort and just send continue.
             effort_combo = QComboBox()
@@ -1069,7 +1139,7 @@ class MainWindow(QMainWindow):
                 lambda _i, t=row["title"], cb=effort_combo:
                 self._on_effort_changed(t, cb.currentData())
             )
-            self.table.setCellWidget(r, 5, effort_combo)
+            self.table.setCellWidget(r, 6, effort_combo)
 
             # Action buttons
             btn_widget = QWidget()
@@ -1123,7 +1193,7 @@ class MainWindow(QMainWindow):
                     hl.addWidget(cd_btn)
 
             hl.addStretch()
-            self.table.setCellWidget(r, 6, btn_widget)
+            self.table.setCellWidget(r, 7, btn_widget)
 
     def _refresh_countdowns(self) -> None:
         # Lightweight repaint of column 3 only — avoids rebuilding action
@@ -1161,6 +1231,19 @@ class MainWindow(QMainWindow):
         self._append_log(
             "info",
             f"effort for {title!r} set to {level or '(none)'!r}"
+        )
+
+    def _on_model_changed(self, title: str, name: str) -> None:
+        key = title_key(title)
+        if name:
+            self._model_overrides[key] = name
+        else:
+            self._model_overrides.pop(key, None)
+        self.sig_set_model_overrides.emit(self._model_overrides)
+        self._save_settings()
+        self._append_log(
+            "info",
+            f"model for {title!r} set to {name or '(none)'!r}"
         )
 
     def _do_unexclude(self, title: str) -> None:

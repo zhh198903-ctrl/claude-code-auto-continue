@@ -54,14 +54,15 @@ python auto_continue.py --interval 20 --buffer 30 --match peak
 
 ## GUI features
 
-- **Live table** of every Windows Terminal window — title, status, reset time, countdown, last sent, per-row effort dropdown, action buttons.
+- **Live table** of every Windows Terminal window — title, status, reset time, countdown, last sent, per-row model dropdown, per-row effort dropdown, action buttons.
 - **Status colors** — yellow = ⏳ Waiting, orange = ▶ Sending, green = ✓ Sent (5 s flash), gray = Cooldown, light gray = Excluded.
 - **Action buttons per row:**
   - **Now** — fire `continue` immediately (bypasses the timer; respects the per-row effort setting).
   - **Skip** — cancel a pending continue for this row.
   - **Exclude** — never watch this window again (persisted across restarts).
   - **Clear cooldown** — reset the 15-min post-send suppression so the row can re-detect immediately (useful for testing).
-- **Effort dropdown per row** — `(none)` / `max` / `xhigh` / `high` / `medium` / `low` / `auto`. When set, the fire sequence becomes `/effort <level>` + Enter → wait 0.6 s → blank Enter (confirms the "Change effort level?" dialog) → wait 0.6 s → `continue` + Enter. Persisted per stable window title.
+- **Model dropdown per row** — `(none)` / `default` / `sonnet` / `haiku`, matching Claude Code's `/model` picker. `(none)` leaves the session on whatever model it's already using; any other value prefixes the fire sequence with `/model <name>` + Enter so the session switches before continuing. Persisted per stable window title.
+- **Effort dropdown per row** — `(none)` / `low` / `medium` / `high` / `xhigh` / `max` / `ultracode`, matching Claude Code's own `/effort` slider. When set, the fire sequence becomes `/effort <level>` + Enter → wait 0.6 s → blank Enter (confirms the "Change effort level?" dialog) → wait 0.6 s → `continue` + Enter. (Model, if set, goes first: `/model <name>` → `/effort <level>` → `continue`.) Persisted per stable window title. (`ultracode` = xhigh + workflows; it's newer, so sessions on Claude Code older than 4.7 won't recognize it.)
 - **Dry-run** — detect, schedule, and log everything but never actually press keys. Useful for sanity-checking before going live.
 - **Keep awake** — calls `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)` so Windows Modern Standby doesn't kill the watcher process during a long unattended wait.
 - **Minimize to system tray** — minimize button hides the window to the right-side tray; X button fully exits. Right-click the tray icon for **Show window** / **Quit**.
