@@ -3,7 +3,8 @@ import sys, io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 from auto_continue import (
-    parse_limit_message, parse_retry_exhausted, next_reset_datetime,
+    parse_limit_message, parse_retry_exhausted, parse_econnreset_stuck,
+    next_reset_datetime,
 )
 from datetime import datetime
 import pytz
@@ -137,6 +138,44 @@ for i, (text, expected) in enumerate(retry_samples):
     ok = got == expected
     status = "OK " if ok else "FAIL"
     print(f"[{status}] retry sample {i}: got={got!r} expected={expected!r}")
+    if not ok:
+        failures += 1
+
+
+# ---------- parse_econnreset_stuck ----------
+econn_samples = [
+    # Exact form seen in the screenshot.
+    ("⎿  · 电域模块 (S参数/RX Filter/CTLE/RX FFE/DFE) 直连光信号源...\n"
+     "  API Error: Unable to connect to API (ECONNRESET)\n"
+     "✻ Sautéed for 15m 46s · 1 shell still running",
+     True),
+    # Compact form.
+    ("API Error: Unable to connect to API (ECONNRESET)", True),
+    # Stale — buried far up in scrollback.
+    ("API Error: Unable to connect to API (ECONNRESET)\n" + "x" * 6000,
+     False),
+    # No match.
+    ("everything fine here", False),
+    # Bare token "ECONNRESET" without the API Error prefix — should NOT match
+    # (avoids false-matching log files / source code mentioning the constant).
+    ("socket error: ECONNRESET on fd 7", False),
+    # The Retrying banner alone shouldn't trip this function.
+    ("Retrying in 0s · attempt 5/10", False),
+    # Mixed case for the literal token.
+    ("API Error: Unable to connect to API (econnreset)", True),
+    # Two ECONNRESET lines — newer one near tail, should match.
+    ("API Error: Unable to connect to API (ECONNRESET)\n...later...\n"
+     "API Error: Unable to connect to API (ECONNRESET)",
+     True),
+]
+
+print()
+print("---- parse_econnreset_stuck ----")
+for i, (text, expected) in enumerate(econn_samples):
+    got = parse_econnreset_stuck(text)
+    ok = got == expected
+    status = "OK " if ok else "FAIL"
+    print(f"[{status}] econn sample {i}: got={got!r} expected={expected!r}")
     if not ok:
         failures += 1
 

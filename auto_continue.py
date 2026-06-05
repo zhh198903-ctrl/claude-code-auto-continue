@@ -97,6 +97,19 @@ RETRY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Bare-error variant — sometimes Claude Code prints the API error directly
+# without the "Retrying in Ns · attempt N/M" banner (e.g. when a tool call's
+# result can't be POSTed back and there's still a shell tool running):
+#     API Error: Unable to connect to API (ECONNRESET)
+# Treat this the same as retry-exhausted: keep poking 'continue' until the
+# connection comes back. The literal "(ECONNRESET)" with parens is distinctive
+# enough that we won't false-match prose. To avoid matching this script's own
+# source / docstrings in scrollback, we require the leading "API Error:" prefix.
+ECONNRESET_RE = re.compile(
+    r"API\s+Error:\s*Unable\s+to\s+connect\s+to\s+API\s*\(ECONNRESET\)",
+    re.IGNORECASE,
+)
+
 # How many trailing chars of the scrollback we scan each tick. Plenty for the
 # message to appear, small enough that re.search stays cheap.
 SCAN_TAIL_CHARS = 8000
@@ -225,6 +238,22 @@ def parse_retry_exhausted(text: str) -> bool:
         return False
     n, total = int(m.group(1)), int(m.group(2))
     return n >= total > 0
+
+
+def parse_econnreset_stuck(text: str) -> bool:
+    """True if `API Error: Unable to connect to API (ECONNRESET)` appears
+    near the tail of the buffer — i.e. Claude is currently stuck on a
+    network error without the usual retry banner. Tail-anchored just like
+    `parse_retry_exhausted`, so stale ECONNRESET messages from a previous
+    outage don't retrigger.
+    """
+    matches = list(ECONNRESET_RE.finditer(text))
+    if not matches:
+        return False
+    m = matches[-1]
+    if len(text) - m.end() > MAX_POST_MATCH_TAIL:
+        return False
+    return True
 
 
 def next_reset_datetime(hour_12: int, minute: int, ampm: str,
@@ -387,15 +416,24 @@ def tick(states: dict[int, WindowState], args,
         # rate-limit pending/cooldown state. If the API is unreachable in
         # the middle of a 5h wait, we still want to keep re-sending
         # 'continue' to unstick Claude once the connection comes back.
+        # Two flavors of "stuck on network" we treat identically:
+        #   a) `Retrying in 0s · attempt 10/10` — retries exhausted
+        #   b) `API Error: Unable to connect to API (ECONNRESET)` — bare error
         tail_for_retry = None
         text = read_terminal_text(w)
         if text:
             tail_for_retry = text[-SCAN_TAIL_CHARS:]
-        if tail_for_retry and parse_retry_exhausted(tail_for_retry):
+        stuck_reason = None
+        if tail_for_retry:
+            if parse_retry_exhausted(tail_for_retry):
+                stuck_reason = "retry-exhausted"
+            elif parse_econnreset_stuck(tail_for_retry):
+                stuck_reason = "econnreset"
+        if stuck_reason:
             if (st.retry_last_sent_utc is None
                     or now_utc - st.retry_last_sent_utc >= retry_interval):
                 if not st.retry_logged:
-                    print(f"[retry-exhausted] {title!r}: attempts hit max; "
+                    print(f"[{stuck_reason}] {title!r}: network stuck; "
                           f"sending 'continue' (will resend every "
                           f"{int(retry_interval.total_seconds())}s "
                           f"until recovery)", flush=True)
@@ -407,7 +445,7 @@ def tick(states: dict[int, WindowState], args,
             continue
         else:
             if st.retry_last_sent_utc is not None:
-                print(f"[retry-recovered] {title!r}: retry banner gone, "
+                print(f"[retry-recovered] {title!r}: network banner gone, "
                       f"clearing retry state", flush=True)
                 st.retry_last_sent_utc = None
                 st.retry_logged = False
