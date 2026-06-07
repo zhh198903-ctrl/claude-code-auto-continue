@@ -36,6 +36,10 @@ from datetime import datetime, timedelta
 import pytz
 import uiautomation as auto
 
+# Bumped on every shipped build so the running version is visible in the GUI
+# title bar (and thus in the Windows Terminal window title the watchdog reads).
+APP_VERSION = "1.0.4"
+
 
 def _force_utf8_console() -> None:
     """Switch stdout/stderr to UTF-8 so WT titles with CJK don't blow up."""
@@ -152,10 +156,23 @@ class WindowState:
 
 
 def find_terminal_windows():
-    """Return list of WindowControl for Windows Terminal top-level windows."""
+    """Return list of WindowControl for Windows Terminal top-level windows.
+
+    Every UIA access is guarded: a flaky child window that raises a COMError
+    (e.g. EVENT_E_ALL_SUBSCRIBERS_FAILED) is skipped rather than aborting the
+    whole enumeration — otherwise one bad window would blind the watchdog to
+    every other terminal that tick.
+    """
     out = []
-    for w in auto.GetRootControl().GetChildren():
-        cls = w.ClassName or ""
+    try:
+        children = auto.GetRootControl().GetChildren()
+    except Exception:
+        return out
+    for w in children:
+        try:
+            cls = w.ClassName or ""
+        except Exception:
+            continue
         if "CASCADIA" in cls.upper():
             out.append(w)
     return out

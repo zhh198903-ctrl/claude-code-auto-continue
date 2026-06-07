@@ -75,9 +75,9 @@ from PyQt6.QtWidgets import (
 )
 
 from auto_continue import (
-    LIMIT_RE, SCAN_TAIL_CHARS, find_terminal_windows, find_termcontrol,
-    next_reset_datetime, parse_limit_message, parse_retry_exhausted,
-    read_terminal_text, send_continue, send_text_lines,
+    APP_VERSION, LIMIT_RE, SCAN_TAIL_CHARS, find_terminal_windows,
+    find_termcontrol, next_reset_datetime, parse_limit_message,
+    parse_retry_exhausted, read_terminal_text, send_continue, send_text_lines,
 )
 
 
@@ -326,7 +326,12 @@ class Watcher(QObject):
                 continue
             seen.add(hwnd)
 
-            title = w.Name or f"<hwnd {hwnd}>"
+            try:
+                title = w.Name or f"<hwnd {hwnd}>"
+            except Exception:
+                # A UIA COMError reading the title shouldn't drop the whole
+                # tick — fall back to an hwnd label and keep going.
+                title = f"<hwnd {hwnd}>"
             st = self._states.setdefault(hwnd, _WState(hwnd=hwnd, title=title))
             st.title = title
 
@@ -661,7 +666,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Auto-Continue · Claude Code")
+        self.setWindowTitle(f"Auto-Continue v{APP_VERSION} · Claude Code")
         self.resize(960, 620)
 
         self.settings = QSettings("auto_continue", "gui")
