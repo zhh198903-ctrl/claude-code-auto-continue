@@ -77,8 +77,8 @@ from PyQt6.QtWidgets import (
 from auto_continue import (
     APP_VERSION, LIMIT_RE, SCAN_TAIL_CHARS, find_terminal_windows,
     find_termcontrol, init_uia_thread, next_reset_datetime,
-    parse_limit_message, parse_retry_exhausted, read_terminal_text,
-    send_continue, send_text_lines,
+    parse_econnreset_stuck, parse_limit_message, parse_retry_exhausted,
+    read_terminal_text, send_continue, send_text_lines,
 )
 
 
@@ -373,18 +373,27 @@ class Watcher(QObject):
             text = read_terminal_text(w)
             tail = text[-SCAN_TAIL_CHARS:] if text else ""
 
-            # 0.6. Network-retry exhaustion path. Runs *before* the rate-limit
-            # logic and ignores the cooldown — if the API is unreachable in
-            # the middle of a 5h wait we still want to resend 'continue'
-            # every retry_interval seconds until the connection comes back.
-            if tail and parse_retry_exhausted(tail):
+            # 0.6. Network-stuck path. Runs *before* the rate-limit logic and
+            # ignores the cooldown — if the API is unreachable in the middle
+            # of a 5h wait we still want to resend 'continue' every
+            # retry_interval seconds until the connection comes back. Two
+            # flavors are treated identically:
+            #   a) `Retrying in 0s · attempt N/N` — retries exhausted
+            #   b) `API Error: Unable to connect to API (ECONNRESET)` — bare
+            stuck_reason = None
+            if tail:
+                if parse_retry_exhausted(tail):
+                    stuck_reason = "network retries exhausted"
+                elif parse_econnreset_stuck(tail):
+                    stuck_reason = "API ECONNRESET"
+            if stuck_reason:
                 if (force_fire
                         or st.retry_last_sent_utc is None
                         or now - st.retry_last_sent_utc >= retry_interval):
                     if not st.retry_active:
                         self.log.emit(
                             "warn",
-                            f"network retries exhausted on {title!r}; "
+                            f"{stuck_reason} on {title!r}; "
                             f"sending 'continue' every "
                             f"{self._retry_interval}s until recovery"
                         )
@@ -410,8 +419,8 @@ class Watcher(QObject):
                 if st.retry_active:
                     self.log.emit(
                         "info",
-                        f"retry banner gone on {title!r}; "
-                        f"network recovered"
+                        f"network error cleared on {title!r}; "
+                        f"recovered"
                     )
                     st.retry_active = False
                     st.retry_last_sent_utc = None
