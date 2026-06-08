@@ -76,8 +76,9 @@ from PyQt6.QtWidgets import (
 
 from auto_continue import (
     APP_VERSION, LIMIT_RE, SCAN_TAIL_CHARS, find_terminal_windows,
-    find_termcontrol, next_reset_datetime, parse_limit_message,
-    parse_retry_exhausted, read_terminal_text, send_continue, send_text_lines,
+    find_termcontrol, init_uia_thread, next_reset_datetime,
+    parse_limit_message, parse_retry_exhausted, read_terminal_text,
+    send_continue, send_text_lines,
 )
 
 
@@ -196,6 +197,10 @@ class Watcher(QObject):
 
     @pyqtSlot()
     def thread_started(self) -> None:
+        # Must run before the first find_terminal_windows() so this worker
+        # thread builds the UIA client in a live (STA) apartment — otherwise
+        # it only ever sees windows that existed when it started.
+        init_uia_thread()
         self._timer = QTimer()
         self._timer.setSingleShot(False)
         self._timer.setInterval(self._interval * 1000)

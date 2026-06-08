@@ -38,7 +38,7 @@ import uiautomation as auto
 
 # Bumped on every shipped build so the running version is visible in the GUI
 # title bar (and thus in the Windows Terminal window title the watchdog reads).
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 
 
 def _force_utf8_console() -> None:
@@ -176,6 +176,29 @@ def find_terminal_windows():
         if "CASCADIA" in cls.upper():
             out.append(w)
     return out
+
+
+def init_uia_thread() -> None:
+    """Initialize UI Automation on the CURRENT thread. Call once, first thing,
+    on any non-main thread that will touch uiautomation.
+
+    uiautomation builds a single global IUIAutomation COM client on the first
+    thread that uses it, and that client only returns a *live* view of the
+    desktop tree when its thread has a properly initialized (STA) COM
+    apartment. The GUI runs the watcher on a Qt worker thread; without this
+    call that thread gets an uninitialized/implicit apartment and keeps
+    seeing the snapshot of windows that existed when it started — so a
+    terminal opened *after* the watchdog launched is never detected.
+
+    `InitializeUIAutomationInCurrentThread()` is `comtypes.CoInitializeEx()`
+    (STA by default). Idempotent enough to call once per thread; errors are
+    swallowed because the main-thread/CLI path is already COM-initialized by
+    comtypes at import.
+    """
+    try:
+        auto.InitializeUIAutomationInCurrentThread()
+    except Exception:
+        pass
 
 
 def find_termcontrol(window_ctrl, depth=0, _limit=10):
