@@ -38,7 +38,7 @@ import uiautomation as auto
 
 # Bumped on every shipped build so the running version is visible in the GUI
 # title bar (and thus in the Windows Terminal window title the watchdog reads).
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 
 
 def _force_utf8_console() -> None:
@@ -116,7 +116,7 @@ ECONNRESET_RE = re.compile(
 
 # How many trailing chars of the scrollback we scan each tick. Plenty for the
 # message to appear, small enough that re.search stays cheap.
-SCAN_TAIL_CHARS = 8000
+SCAN_TAIL_CHARS = 10000
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +245,17 @@ def read_terminal_text(window_ctrl) -> str | None:
 # source viewed in the terminal) — ignore it.
 MAX_POST_MATCH_TAIL = 4000
 
+# Network-stuck messages (retry banner / bare ECONNRESET) get a *larger* tail
+# allowance than the rate-limit message. Claude Code pads every terminal line
+# to the full window width and stacks a tall footer below the error — input
+# box, two border rules, the multi-line status bar, hints, and (often) a
+# multi-line `※ recap:` block. On a wide terminal that footer+recap alone can
+# run past 4000 chars, which would make a *current* ECONNRESET look "stale"
+# and never get auto-continued. 6000 covers a wide-terminal footer+recap while
+# still rejecting an error buried under a full resumed turn. Must stay below
+# SCAN_TAIL_CHARS so the match is actually within the scanned slice.
+NETWORK_POST_MATCH_TAIL = 6000
+
 
 def parse_limit_message(text: str) -> tuple[int, int, str, str] | None:
     """Return (hour_12, minute, ampm, tz_name) from the *latest* limit line.
@@ -274,7 +285,7 @@ def parse_retry_exhausted(text: str) -> bool:
     if not matches:
         return False
     m = matches[-1]
-    if len(text) - m.end() > MAX_POST_MATCH_TAIL:
+    if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
         return False
     n, total = int(m.group(1)), int(m.group(2))
     return n >= total > 0
@@ -291,7 +302,7 @@ def parse_econnreset_stuck(text: str) -> bool:
     if not matches:
         return False
     m = matches[-1]
-    if len(text) - m.end() > MAX_POST_MATCH_TAIL:
+    if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
         return False
     return True
 

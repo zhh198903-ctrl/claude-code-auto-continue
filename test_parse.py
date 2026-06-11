@@ -121,8 +121,11 @@ retry_samples = [
     ("Retrying in 5s · attempt 3/10\n...later...\n"
      "Retrying in 0s · attempt 10/10",
      True),
+    # Trailing footer+recap of ~5000 chars (wide terminal) — within the
+    # network tail allowance (6000), so still treated as current.
+    ("Retrying in 0s · attempt 10/10\n" + "x" * 5000, True),
     # Exhausted banner buried far above — stale, ignore.
-    ("Retrying in 0s · attempt 10/10\n" + "x" * 6000, False),
+    ("Retrying in 0s · attempt 10/10\n" + "x" * 7000, False),
     # Unrelated text mentioning attempt 10/10 (no Retrying anchor).
     ("test failed on attempt 10/10 of the run", False),
     # No retry banner at all.
@@ -151,8 +154,13 @@ econn_samples = [
      True),
     # Compact form.
     ("API Error: Unable to connect to API (ECONNRESET)", True),
-    # Stale — buried far up in scrollback.
-    ("API Error: Unable to connect to API (ECONNRESET)\n" + "x" * 6000,
+    # Trailing footer + multi-line recap (~5000 chars, wide terminal) — the
+    # exact regression from Image #14: error not at the very bottom but still
+    # current. Within the 6000 network tail allowance → must detect.
+    ("API Error: Unable to connect to API (ECONNRESET)\n"
+     "* Worked for 15m 6s\n* recap: ...\n" + "x" * 5000, True),
+    # Stale — buried far up in scrollback (beyond the network allowance).
+    ("API Error: Unable to connect to API (ECONNRESET)\n" + "x" * 7000,
      False),
     # No match.
     ("everything fine here", False),
