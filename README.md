@@ -68,6 +68,7 @@ python auto_continue.py --interval 20 --buffer 30 --match peak
 - **Minimize to system tray** — minimize button hides the window to the right-side tray; X button fully exits. Right-click the tray icon for **Show window** / **Quit**.
 - **DPI awareness** set to per-monitor v2 before any Qt or UIA DLL loads, so high-DPI displays render correctly without a startup warning.
 - **Per-window cooldown** — 15 minutes after a successful fire, the row's detection is suppressed so the lingering limit message in scrollback doesn't trigger a re-fire.
+- **Built-in self-update** (v1.0.8+) — checks GitHub for a newer release once on every launch (and via the **Check updates** button / tray **Check for updates…** entry). When a newer version exists, a banner offers **Update now**: it downloads the new exe on a background thread (with a progress %), verifies its SHA-256, asks to restart, then swaps the exe in place and relaunches — no manual download needed. Only the packaged `.exe` self-updates; running from source just reports availability. (Update checks use a single unauthenticated GitHub API call; nothing else is sent.)
 
 All settings (poll interval, buffer, dry-run, keep-awake, excluded windows, per-window effort) persist via `QSettings` (Windows registry under `HKCU\Software\auto_continue\gui`).
 

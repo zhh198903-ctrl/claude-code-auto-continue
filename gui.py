@@ -30,6 +30,7 @@ buffer seconds, dry-run flag, excluded window titles.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -64,14 +65,14 @@ _set_dpi_awareness()
 
 import pytz
 from PyQt6.QtCore import (
-    QEvent, QObject, QSettings, QThread, QTimer, Qt, pyqtSignal, pyqtSlot,
+    QEvent, QObject, QSettings, QThread, QTimer, QUrl, Qt, pyqtSignal, pyqtSlot,
 )
-from PyQt6.QtGui import QAction, QColor, QFont
+from PyQt6.QtGui import QAction, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QHBoxLayout,
-    QHeaderView, QLabel, QMainWindow, QMenu, QPlainTextEdit, QPushButton,
-    QSpinBox, QStyle, QSystemTrayIcon, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QHeaderView, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QPushButton, QSpinBox, QStyle, QSystemTrayIcon, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from auto_continue import (
@@ -80,6 +81,7 @@ from auto_continue import (
     parse_econnreset_stuck, parse_limit_message, parse_retry_exhausted,
     read_terminal_text, send_continue, send_text_lines,
 )
+import updater
 
 
 # Effort levels offered in the per-window dropdown, matching Claude Code's
@@ -660,6 +662,60 @@ def _fmt_countdown(target_utc: Optional[datetime], now_utc: datetime) -> str:
     return f"{m:d}:{s:02d}"
 
 
+class Updater(QObject):
+    """Background GitHub self-update worker, on its OWN QThread (separate from
+    Watcher so a multi-minute download never stalls watchdog ticks).
+
+    All network/disk work happens in the two slots; results come back to the
+    main thread via signals. It never quits the app or swaps the exe — that's
+    the main thread's job in MainWindow._on_update_ready.
+    """
+
+    update_available = pyqtSignal(dict)    # normalized release (carries _manual)
+    no_update = pyqtSignal(str, bool)      # (current_version, manual?)
+    check_failed = pyqtSignal(str, bool)   # (reason, manual?)
+    progress = pyqtSignal(int)             # 0..100, or -1 = indeterminate
+    download_failed = pyqtSignal(str)
+    ready_to_install = pyqtSignal(str)     # path to the staged new exe
+
+    @pyqtSlot(bool)
+    def check(self, manual: bool) -> None:
+        rel = updater.fetch_latest_release()
+        if rel is None:
+            self.check_failed.emit(
+                "Could not reach GitHub (network / rate limit / no asset)",
+                manual)
+            return
+        if updater.is_newer(rel.get("version", ""), APP_VERSION):
+            rel["_manual"] = manual
+            self.update_available.emit(rel)
+        else:
+            self.no_update.emit(APP_VERSION, manual)
+
+    @pyqtSlot(dict)
+    def download_and_stage(self, rel: dict) -> None:
+        try:
+            dest = updater.staged_exe_path()
+            size = int(rel.get("asset_size") or 0)
+
+            def cb(done: int, total: int) -> None:
+                tot = total or size
+                self.progress.emit(int(done * 100 / tot) if tot else -1)
+
+            updater.download_asset(rel["asset_url"], dest,
+                                   progress_cb=cb, total_hint=size)
+            if not updater.verify_sha256(dest, rel.get("sha256")):
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+                self.download_failed.emit("Integrity check failed (SHA256 mismatch)")
+                return
+            self.ready_to_install.emit(dest)
+        except Exception as e:
+            self.download_failed.emit(f"Download failed: {type(e).__name__}: {e}")
+
+
 class MainWindow(QMainWindow):
     # Signals into the watcher (auto-connected via Qt::QueuedConnection
     # because the watcher lives on a different thread).
@@ -677,6 +733,9 @@ class MainWindow(QMainWindow):
     sig_clear_cooldown = pyqtSignal(int)
     sig_set_effort_overrides = pyqtSignal(dict)
     sig_set_model_overrides = pyqtSignal(dict)
+    # Into the updater (its own thread).
+    sig_update_check = pyqtSignal(bool)      # manual?
+    sig_update_download = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
@@ -693,6 +752,8 @@ class MainWindow(QMainWindow):
         self._effort_overrides: dict = {}
         # Per-window model overrides, same keying.
         self._model_overrides: dict = {}
+        # The release dict from the latest "update available" result, if any.
+        self._pending_release: Optional[dict] = None
         # Theme-aware color set, plus a ring buffer of recent log entries
         # so they can be re-rendered when the user flips Win11 dark mode.
         # Must exist before _load_settings (which may emit log lines via
@@ -703,6 +764,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_worker()
+        self._build_updater()
         self._load_settings()
 
         # React to OS-level theme flips. Safe to skip on older Qt builds.
@@ -718,6 +780,11 @@ class MainWindow(QMainWindow):
         self._tick_timer.setInterval(1000)
         self._tick_timer.timeout.connect(self._refresh_countdowns)
         self._tick_timer.start()
+
+        # Auto-check for updates once per launch (silent unless a newer
+        # version exists). Delayed ~5s so startup/worker init isn't blocked;
+        # the check itself runs on the updater thread regardless.
+        QTimer.singleShot(5000, lambda: self.sig_update_check.emit(False))
 
     # ---- UI construction -------------------------------------------------
 
@@ -810,7 +877,36 @@ class MainWindow(QMainWindow):
         header.addWidget(QLabel("retry"))
         header.addWidget(self.retry_spin)
         header.addStretch()
+        self.check_updates_btn = QPushButton("Check updates")
+        self.check_updates_btn.setToolTip(
+            "Check GitHub for a newer Auto-Continue release")
+        self.check_updates_btn.clicked.connect(
+            lambda: self.sig_update_check.emit(True))
+        header.addWidget(self.check_updates_btn)
         root.addLayout(header)
+
+        # Update banner (hidden until an update is found).
+        self.update_banner = QWidget()
+        bl = QHBoxLayout(self.update_banner)
+        bl.setContentsMargins(8, 4, 8, 4)
+        self.update_label = QLabel("")
+        self.update_now_btn = QPushButton("Update now")
+        self.update_now_btn.clicked.connect(self._start_update_download)
+        self.update_notes_btn = QPushButton("Release notes")
+        self.update_notes_btn.clicked.connect(self._open_release_notes)
+        self.update_close_btn = QPushButton("✕")
+        self.update_close_btn.setFixedWidth(28)
+        self.update_close_btn.setToolTip("Dismiss")
+        self.update_close_btn.clicked.connect(
+            lambda: self.update_banner.setVisible(False))
+        bl.addWidget(self.update_label)
+        bl.addStretch()
+        bl.addWidget(self.update_now_btn)
+        bl.addWidget(self.update_notes_btn)
+        bl.addWidget(self.update_close_btn)
+        self.update_banner.setVisible(False)
+        self._apply_banner_theme()
+        root.addWidget(self.update_banner)
 
         # Window table
         self.table = QTableWidget(0, 8)
@@ -862,9 +958,12 @@ class MainWindow(QMainWindow):
         menu = QMenu()
         show_act = QAction("Show window", self)
         show_act.triggered.connect(self._show_from_tray)
+        check_act = QAction("Check for updates…", self)
+        check_act.triggered.connect(lambda: self.sig_update_check.emit(True))
         quit_act = QAction("Quit", self)
         quit_act.triggered.connect(self._quit_from_tray)
         menu.addAction(show_act)
+        menu.addAction(check_act)
         menu.addSeparator()
         menu.addAction(quit_act)
         self.tray.setContextMenu(menu)
@@ -946,6 +1045,136 @@ class MainWindow(QMainWindow):
         self.worker.running_changed.connect(self._on_running_changed)
 
         self.worker_thread.start()
+
+    # ---- Updater plumbing -----------------------------------------------
+
+    def _build_updater(self) -> None:
+        self.updater_thread = QThread(self)
+        self.updater = Updater()
+        self.updater.moveToThread(self.updater_thread)
+        # MainWindow -> updater
+        self.sig_update_check.connect(self.updater.check)
+        self.sig_update_download.connect(self.updater.download_and_stage)
+        # updater -> MainWindow
+        self.updater.update_available.connect(self._on_update_available)
+        self.updater.no_update.connect(self._on_no_update)
+        self.updater.check_failed.connect(self._on_update_check_failed)
+        self.updater.progress.connect(self._on_update_progress)
+        self.updater.download_failed.connect(self._on_update_download_failed)
+        self.updater.ready_to_install.connect(self._on_update_ready)
+        self.updater_thread.start()
+
+    def _apply_banner_theme(self) -> None:
+        dark = _current_color_scheme() == Qt.ColorScheme.Dark
+        bg, fg = ("#5c4a00", "#fff3bf") if dark else ("#fff3bf", "#5c4a00")
+        self.update_banner.setStyleSheet(
+            f"background:{bg}; border-radius:4px;")
+        self.update_label.setStyleSheet(f"color:{fg}; font-weight:bold;")
+
+    # ---- Update flow -----------------------------------------------------
+
+    @pyqtSlot(dict)
+    def _on_update_available(self, rel: dict) -> None:
+        self._pending_release = rel
+        ver = rel.get("version", "?")
+        self.update_label.setText(f"🔄  New version v{ver} available")
+        self.update_now_btn.setVisible(True)
+        self.update_notes_btn.setVisible(True)
+        frozen = updater.is_frozen()
+        self.update_now_btn.setEnabled(frozen)
+        self.update_now_btn.setToolTip(
+            "Download, replace and restart" if frozen
+            else "Run the packaged .exe to self-update (disabled in source mode)")
+        self.update_banner.setVisible(True)
+        self._append_log("info", f"update available: v{ver}")
+        if self.tray is not None:
+            self.tray.showMessage(
+                "Auto-Continue update",
+                f"Version {ver} is available. Open the window to update.",
+                QSystemTrayIcon.MessageIcon.Information, 6000)
+
+    @pyqtSlot(str, bool)
+    def _on_no_update(self, cur: str, manual: bool) -> None:
+        self._append_log("info", f"up to date (v{cur})")
+        if manual and self.tray is not None:
+            self.tray.showMessage(
+                "Auto-Continue",
+                f"You're on the latest version (v{cur}).",
+                QSystemTrayIcon.MessageIcon.Information, 4000)
+
+    @pyqtSlot(str, bool)
+    def _on_update_check_failed(self, reason: str, manual: bool) -> None:
+        self._append_log("warn", f"update check failed: {reason}")
+        if manual and self.tray is not None:
+            self.tray.showMessage(
+                "Auto-Continue", f"Update check failed: {reason}",
+                QSystemTrayIcon.MessageIcon.Warning, 4000)
+
+    def _start_update_download(self) -> None:
+        if not self._pending_release:
+            return
+        ver = self._pending_release.get("version", "?")
+        self.update_now_btn.setEnabled(False)
+        self.update_notes_btn.setVisible(False)
+        self.update_label.setText(f"Downloading v{ver}…")
+        self._append_log("info", f"downloading v{ver}…")
+        self.sig_update_download.emit(self._pending_release)
+
+    @pyqtSlot(int)
+    def _on_update_progress(self, pct: int) -> None:
+        ver = (self._pending_release or {}).get("version", "?")
+        if pct < 0:
+            self.update_label.setText(f"Downloading v{ver}…")
+        else:
+            self.update_label.setText(f"Downloading v{ver}…  {pct}%")
+
+    @pyqtSlot(str)
+    def _on_update_download_failed(self, reason: str) -> None:
+        self._append_log("err", reason)
+        # Revert the banner to the actionable state so the user can retry.
+        if self._pending_release:
+            self._on_update_available(self._pending_release)
+
+    @pyqtSlot(str)
+    def _on_update_ready(self, path: str) -> None:
+        ver = (self._pending_release or {}).get("version", "?")
+        if not updater.is_frozen():
+            self._append_log(
+                "info", f"dev mode — staged + verified at {path} (skip swap)")
+            self.update_label.setText(f"v{ver} downloaded (dev mode, no swap)")
+            return
+        resp = QMessageBox.question(
+            self, "Update Auto-Continue",
+            f"Update to v{ver} and restart now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if resp != QMessageBox.StandardButton.Yes:
+            # User declined — restore the actionable banner.
+            if self._pending_release:
+                self._on_update_available(self._pending_release)
+            return
+        try:
+            self._append_log("info", f"installing v{ver} and restarting…")
+            self.sig_stop.emit()
+            self._save_settings()
+            if self.keep_awake_check.isChecked():
+                self._apply_keep_awake(False)
+            self.worker_thread.quit()
+            self.worker_thread.wait(2000)
+            self.updater_thread.quit()
+            self.updater_thread.wait(2000)
+            updater.stage_and_swap(path)            # launches detached swapper
+            QApplication.instance().quit()          # clean exit -> lock drops
+        except Exception as e:
+            self._append_log("err", f"install failed: {type(e).__name__}: {e}")
+            if self._pending_release:
+                self._on_update_available(self._pending_release)
+
+    def _open_release_notes(self) -> None:
+        rel = self._pending_release or {}
+        url = rel.get("html_url")
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
 
     # ---- Settings persistence -------------------------------------------
 
@@ -1081,6 +1310,7 @@ class MainWindow(QMainWindow):
         self._refresh_running_indicator()
         self._render_table()
         self._redraw_log_view()
+        self._apply_banner_theme()
 
     # ---- Table rendering -------------------------------------------------
 
@@ -1327,6 +1557,11 @@ class MainWindow(QMainWindow):
             pass
         self.worker_thread.quit()
         self.worker_thread.wait(2000)
+        try:
+            self.updater_thread.quit()
+            self.updater_thread.wait(2000)
+        except Exception:
+            pass
         super().closeEvent(event)
         # setQuitOnLastWindowClosed is False (so the minimize-to-tray case
         # doesn't kill the app), so the X button path needs to ask the app
