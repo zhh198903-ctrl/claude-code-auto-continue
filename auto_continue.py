@@ -38,7 +38,7 @@ import uiautomation as auto
 
 # Bumped on every shipped build so the running version is visible in the GUI
 # title bar (and thus in the Windows Terminal window title the watchdog reads).
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 
 
 def _force_utf8_console() -> None:
