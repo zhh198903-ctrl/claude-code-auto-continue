@@ -209,6 +209,9 @@ class WindowState:
     # OAuth-expired warn-once flag ('continue' can't fix that state).
     oauth_logged: bool = False
 
+    # Multi-tab warn-once flag (background tabs can't be watched).
+    tabs_warned: bool = False
+
 
 # ---------------------------------------------------------------------------
 # UI Automation helpers
@@ -278,6 +281,50 @@ def find_termcontrol(window_ctrl, depth=0, _limit=10):
     except Exception:
         pass
     return None
+
+
+def list_tab_titles(window_ctrl) -> list:
+    """Titles of ALL tabs in a WT window, read from its TabView's
+    TabItemControls (shallow — the tab strip sits at depth 3, well above
+    the terminal content subtree).
+
+    Windows Terminal only exposes the ACTIVE tab's TermControl in the UIA
+    tree — background tabs' content physically cannot be read. Callers use
+    this list to detect (and warn about) sessions the watchdog can't see.
+    Returns [] on any failure or when the structure doesn't match.
+    """
+    def _find_tabview(c, depth):
+        if depth > 4:
+            return None
+        try:
+            if (c.ClassName or "") == "Microsoft.UI.Xaml.Controls.TabView":
+                return c
+        except Exception:
+            return None
+        try:
+            for ch in c.GetChildren():
+                r = _find_tabview(ch, depth + 1)
+                if r is not None:
+                    return r
+        except Exception:
+            pass
+        return None
+
+    out = []
+    try:
+        tv = _find_tabview(window_ctrl, 0)
+        if tv is None:
+            return out
+        for ch in tv.GetChildren():
+            try:
+                for item in ch.GetChildren():
+                    if item.ControlTypeName == "TabItemControl":
+                        out.append(item.Name or "")
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
 
 
 def read_terminal_text(window_ctrl) -> str | None:
@@ -647,6 +694,21 @@ def tick(states: dict[int, WindowState], args,
 
         st = states.setdefault(hwnd, WindowState(title=title))
         st.title = title  # title can change as user switches tabs
+
+        # Multi-tab warning: WT exposes only the ACTIVE tab's content, so
+        # Claude sessions in background tabs are invisible to the watchdog.
+        tabs = list_tab_titles(w)
+        if len(tabs) > 1:
+            if not st.tabs_warned:
+                others = [t for t in tabs if t != title]
+                print(f"[tabs] {title!r}: this window has {len(tabs)} tabs — "
+                      f"only the ACTIVE tab can be watched; "
+                      f"currently invisible: {others!r}. "
+                      f"Open each Claude session in its own window "
+                      f"(drag the tab out of the tab bar).", flush=True)
+                st.tabs_warned = True
+        else:
+            st.tabs_warned = False
 
         # Read the scrollback tail once; every detector shares this view.
         text = read_terminal_text(w)

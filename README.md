@@ -127,7 +127,7 @@ This works because the GUI is an interactive Qt app the user launched — it has
 
 - **Windows-only.** UIA + SendInput + Modern Standby calls are all Win32-specific.
 - **Windows Terminal required.** ConHost classic console isn't enumerated (the regex would still match its scrollback if it were, but the Watcher's `find_terminal_windows()` filters by the WT class `CASCADIA_HOSTING_WINDOW_CLASS`).
-- **Only the active tab/pane** of each WT window is watched — background tabs aren't exposed in the UIA tree. Run parallel sessions in separate windows (one session per window) for full coverage.
+- **Only the active tab/pane** of each WT window is watched — Windows Terminal does not expose background tabs' content in the UIA tree, so this is a hard platform limit. The app detects multi-tab windows, marks the row with **⚠ N tabs**, and logs which tab titles are invisible. Run parallel sessions in separate windows (drag each tab out of the tab bar) for full coverage.
 - **Two windows with identical titles** share one exclusion / model / effort setting (settings are keyed by title).
 - **The 15-min cooldown** is hard-coded. After a fire, the row won't re-detect for 15 minutes even if a new limit message appears (rare in practice — Anthropic limits don't fire that fast back-to-back).
 - **`/effort max`** triggers a confirmation dialog that we auto-confirm with an extra Enter. Other levels also trigger this dialog (verified May 2026), so the extra Enter is always sent when an effort level is configured.

@@ -78,7 +78,7 @@ from PyQt6.QtWidgets import (
 
 from auto_continue import (
     APP_VERSION, LIMIT_RE, SCAN_TAIL_CHARS, find_terminal_windows,
-    find_termcontrol, init_uia_thread, next_reset_datetime,
+    find_termcontrol, init_uia_thread, list_tab_titles, next_reset_datetime,
     parse_econnreset_stuck, parse_limit_message, parse_limit_prompt,
     parse_oauth_expired, parse_retry_exhausted,
     read_terminal_text, send_continue, send_text_lines,
@@ -169,6 +169,11 @@ class _WState:
     prompt_active: bool = False
     # OAuth-expired warn-once flag ('continue' can't fix that state).
     oauth_logged: bool = False
+    # Multi-tab bookkeeping: background tabs can't be watched (WT exposes
+    # only the active tab's content in the UIA tree). Count shown in the
+    # table; warn-once flag for the log.
+    tab_count: int = 1
+    tabs_warned: bool = False
 
 
 class Watcher(QObject):
@@ -400,6 +405,24 @@ class Watcher(QObject):
                     if st.last_sent_utc and now - st.last_sent_utc < cooldown
                     else ST_IDLE
                 )
+
+            # 0.45. Multi-tab warning: WT exposes only the ACTIVE tab's
+            # content, so Claude sessions in background tabs are invisible.
+            tabs = list_tab_titles(w)
+            st.tab_count = max(1, len(tabs))
+            if st.tab_count > 1:
+                if not st.tabs_warned:
+                    others = [t for t in tabs if t != title]
+                    self.log.emit(
+                        "warn",
+                        f"{title!r} has {st.tab_count} tabs — only the "
+                        f"ACTIVE tab is watched; invisible: {others!r}. "
+                        f"Open each Claude session in its own window "
+                        f"(drag the tab out of the tab bar)."
+                    )
+                    st.tabs_warned = True
+            else:
+                st.tabs_warned = False
 
             # 0.5. Read scrollback once per tick so every detector below
             # shares the same view of the terminal.
@@ -670,6 +693,7 @@ class Watcher(QObject):
                 "reset_utc": st.reset_utc,
                 "last_sent_utc": st.last_sent_utc,
                 "retry_last_sent_utc": st.retry_last_sent_utc,
+                "tabs": st.tab_count,
                 "excluded": title_key(st.title) in self._excluded_titles,
                 "model": self._model_overrides.get(title_key(st.title), ""),
                 "effort": self._effort_overrides.get(title_key(st.title), ""),
@@ -1459,7 +1483,8 @@ class MainWindow(QMainWindow):
         # effort dropdown the user has open and resets row selection.
         # (The countdown column is repainted by its own 1s timer.)
         sig = [(r["hwnd"], r["title"], r["status"], r["reset_utc"],
-                r["last_sent_utc"], r["excluded"], r["model"], r["effort"])
+                r["last_sent_utc"], r["excluded"], r["model"], r["effort"],
+                r.get("tabs", 1))
                for r in rows]
         if sig == self._last_render_sig:
             return
@@ -1534,8 +1559,18 @@ class MainWindow(QMainWindow):
         now = datetime.now(pytz.UTC)
 
         for r, row in enumerate(rows):
-            title_item = QTableWidgetItem(row["title"])
-            title_item.setToolTip(f"hwnd={row['hwnd']}")
+            tabs = row.get("tabs", 1)
+            title_text = row["title"]
+            if tabs > 1:
+                title_text += f"   ⚠ {tabs} tabs"
+            title_item = QTableWidgetItem(title_text)
+            tip = f"hwnd={row['hwnd']}"
+            if tabs > 1:
+                tip += (f"\n⚠ This window has {tabs} tabs — only the ACTIVE"
+                        f" tab is watched.\nWindows Terminal does not expose"
+                        f" background tabs' content.\nDrag each Claude tab"
+                        f" out into its own window for full coverage.")
+            title_item.setToolTip(tip)
             self.table.setItem(r, 0, title_item)
 
             status_item = QTableWidgetItem(
