@@ -15,8 +15,9 @@ Prefer source? See [Install](#install) below.
 ## How it works
 
 1. **Detect** — Polls every Windows Terminal window's scrollback via UI Automation. When the literal Anthropic limit message appears (both lines: `You've hit your limit · resets <H>[:<MM>]<am|pm> (<TZ>)` followed by the `/upgrade …` line), the row turns yellow and a countdown starts. Both Anthropic wordings of that follow-up line are recognized — `/upgrade or /extra-usage to finish what you're working on.` and `/upgrade to increase your usage limit.` — and the reset time may carry minutes (`2:50pm`) or not (`11pm`).
-2. **Schedule** — Parses the reset time in the named timezone, computes the next occurrence in UTC, adds a small buffer (default 20 s past the reset).
-3. **Fire** — At fire time, brings the target Windows Terminal window forward, sends `/effort <level>` + Enter (if configured for that row, plus an extra Enter to confirm the "Change effort level?" dialog), then `continue` + Enter. Restores the previously-focused window so the keystrokes don't yank you out of what you were doing.
+   Newer Claude Code builds first show an interactive picker instead of the banner (`What do you want to do?` / `1. Stop and wait for limit to reset` / `2. Upgrade your plan`). The watchdog detects that picker, presses **Enter** to confirm option 1, then picks up the banner that appears.
+2. **Schedule** — Parses the reset time in the named timezone (IANA names and common abbreviations like `EDT`; DST-correct), computes the next occurrence in UTC, adds a small buffer (default 20 s past the reset).
+3. **Fire** — At fire time, re-checks the limit message is still current (if you already continued manually, it skips instead of injecting a redundant `continue`), brings the target Windows Terminal window forward, **verifies the window actually reached the foreground** (if Windows refuses — e.g. you're actively typing elsewhere — it retries next tick rather than typing into the wrong app), sends `/model <name>` / `/effort <level>` + Enter (if configured for that row), then `continue` + Enter. Restores the previously-focused window.
 
 The watcher runs on a Qt worker thread so UIA reads (which take 100 ms+) never block the UI.
 
@@ -69,8 +70,14 @@ python auto_continue.py --interval 20 --buffer 30 --match peak
 - **DPI awareness** set to per-monitor v2 before any Qt or UIA DLL loads, so high-DPI displays render correctly without a startup warning.
 - **Per-window cooldown** — 15 minutes after a successful fire, the row's detection is suppressed so the lingering limit message in scrollback doesn't trigger a re-fire.
 - **Built-in self-update** (v1.0.8+) — checks GitHub for a newer release once on every launch (and via the **Check updates** button / tray **Check for updates…** entry). When a newer version exists, a banner offers **Update now**: it downloads the new exe on a background thread (with a progress %), verifies its SHA-256, asks to restart, then swaps the exe in place and relaunches — no manual download needed. Only the packaged `.exe` self-updates; running from source just reports availability. (Update checks use a single unauthenticated GitHub API call; nothing else is sent.)
+- **Network-stuck recovery** — detects the retry-exhausted banner (`Retrying in 0s · attempt 10/10`, long-form wording too) *and* bare API network errors (`API Error: Unable to connect to API (ECONNRESET)` — any errno: `ETIMEDOUT`, `ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, undici `UND_ERR_*`, plus `fetch failed`), then re-sends `continue` every retry interval until the connection recovers. HTTP-status errors (500/529) are left to Claude Code's own retries.
+- **Limit picker auto-confirm** (v1.0.9+) — the `What do you want to do?` modal is confirmed with a bare Enter (option 1, *Stop and wait for limit to reset*) so the reset-time banner appears and the normal wait-then-continue flow takes over. Status shows **⏎ Limit prompt**.
+- **OAuth-expired warning** — `OAuth token has expired` can't be fixed by `continue`; the watchdog logs a warning once instead of poking at a dead session.
+- **Start on launch** (v1.0.9+, default on) — the watcher starts automatically when the app opens, including the relaunch after a self-update, so protection never silently lapses.
+- **Single instance** — a second copy of the exe warns and exits instead of double-typing `continue` into the same windows.
+- **Persistent activity log** — everything in the log pane is also appended to `%LOCALAPPDATA%\auto_continue\activity.log` (rotated at ~1 MB) for overnight postmortems.
 
-All settings (poll interval, buffer, dry-run, keep-awake, excluded windows, per-window effort) persist via `QSettings` (Windows registry under `HKCU\Software\auto_continue\gui`).
+All settings (poll interval, buffer, dry-run, keep-awake, start-on-launch, excluded windows, per-window model/effort) persist via `QSettings` (Windows registry under `HKCU\Software\auto_continue\gui`). Excluded windows and the model/effort overrides are keyed by the *stable* part of the WT title (leading spinner glyph stripped), so they survive title churn while a session is running.
 
 ## Architecture
 
@@ -89,12 +96,14 @@ gui.py              PyQt6 front-end
 
 Auto-Continue.pyw   Double-click launcher (no console window)
 
-test_parse.py       Regex unit tests (8 samples)
+test_parse.py       Regex + reset-time unit tests
+test_tick.py        State-machine tests for the tick loop (stubbed UIA/clock)
+test_updater.py     Self-update unit tests (version compare, swap bat, sha256)
 ```
 
 ## Detection robustness
 
-The regex requires **both lines** of the Anthropic limit message and rejects matches buried more than ~4000 chars deep in scrollback. This avoids:
+The regex requires **both lines** of the Anthropic limit message and rejects matches buried more than ~6000 chars deep in scrollback (enough to tolerate the full-width footer + recap block Claude Code draws below the message on wide terminals). This avoids:
 
 - Source files containing the literal string (e.g. test fixtures, this README).
 - Past limit messages still in scrollback that the user already handled.
@@ -118,6 +127,8 @@ This works because the GUI is an interactive Qt app the user launched — it has
 
 - **Windows-only.** UIA + SendInput + Modern Standby calls are all Win32-specific.
 - **Windows Terminal required.** ConHost classic console isn't enumerated (the regex would still match its scrollback if it were, but the Watcher's `find_terminal_windows()` filters by the WT class `CASCADIA_HOSTING_WINDOW_CLASS`).
+- **Only the active tab/pane** of each WT window is watched — background tabs aren't exposed in the UIA tree. Run parallel sessions in separate windows (one session per window) for full coverage.
+- **Two windows with identical titles** share one exclusion / model / effort setting (settings are keyed by title).
 - **The 15-min cooldown** is hard-coded. After a fire, the row won't re-detect for 15 minutes even if a new limit message appears (rare in practice — Anthropic limits don't fire that fast back-to-back).
 - **`/effort max`** triggers a confirmation dialog that we auto-confirm with an extra Enter. Other levels also trigger this dialog (verified May 2026), so the extra Enter is always sent when an effort level is configured.
 - **Modern Standby** can throttle background Python processes even with keep-awake enabled in some power profiles. If the watcher dies overnight while keep-awake was on, file an issue with the Windows event log around the death time.

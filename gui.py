@@ -30,6 +30,7 @@ buffer seconds, dry-run flag, excluded window titles.
 
 from __future__ import annotations
 
+import html
 import os
 import sys
 import time
@@ -78,7 +79,8 @@ from PyQt6.QtWidgets import (
 from auto_continue import (
     APP_VERSION, LIMIT_RE, SCAN_TAIL_CHARS, find_terminal_windows,
     find_termcontrol, init_uia_thread, next_reset_datetime,
-    parse_econnreset_stuck, parse_limit_message, parse_retry_exhausted,
+    parse_econnreset_stuck, parse_limit_message, parse_limit_prompt,
+    parse_oauth_expired, parse_retry_exhausted,
     read_terminal_text, send_continue, send_text_lines,
 )
 import updater
@@ -135,6 +137,7 @@ ST_SENT = "sent"          # Just sent — short-lived display state.
 ST_COOLDOWN = "cooldown"  # Inside post-send cooldown window.
 ST_EXCLUDED = "excluded"  # User chose to ignore this window.
 ST_RETRY = "retry"        # Network retries exhausted, resending continue.
+ST_PROMPT = "prompt"      # Limit picker open, confirming with Enter.
 
 
 @dataclass
@@ -152,10 +155,20 @@ class _WState:
     reset_key: Optional[tuple] = None
     last_sent_utc: Optional[datetime] = None
     sent_flash_until: Optional[datetime] = None  # show "sent" for ~5s
+    # Key of the last limit message we already fired for (or the user
+    # skipped). Prevents the same still-visible message from re-arming a
+    # bogus "tomorrow" pending after the cooldown expires. Cleared once a
+    # tick sees no limit message at all.
+    fired_key: Optional[tuple] = None
     # Network-retry exhaustion bookkeeping. Independent of the rate-limit
     # fields above.
     retry_last_sent_utc: Optional[datetime] = None
     retry_active: bool = False
+    # Interactive limit-picker ("What do you want to do?") bookkeeping.
+    prompt_last_sent_utc: Optional[datetime] = None
+    prompt_active: bool = False
+    # OAuth-expired warn-once flag ('continue' can't fix that state).
+    oauth_logged: bool = False
 
 
 class Watcher(QObject):
@@ -230,7 +243,10 @@ class Watcher(QObject):
 
     @pyqtSlot(list)
     def set_excluded(self, titles: list) -> None:
-        self._excluded_titles = {str(t) for t in titles}
+        # Normalized via title_key so exclusion survives the WT spinner
+        # glyph and other leading-junk title churn (same keying as the
+        # effort/model overrides).
+        self._excluded_titles = {title_key(str(t)) for t in titles}
 
     @pyqtSlot(dict)
     def set_effort_overrides(self, overrides: dict) -> None:
@@ -262,12 +278,12 @@ class Watcher(QObject):
 
     @pyqtSlot(int, str)
     def cmd_exclude(self, hwnd: int, title: str) -> None:
-        self._excluded_titles.add(title)
+        self._excluded_titles.add(title_key(title))
         self._tick_safely()
 
     @pyqtSlot(str)
     def cmd_unexclude(self, title: str) -> None:
-        self._excluded_titles.discard(title)
+        self._excluded_titles.discard(title_key(title))
         self._tick_safely()
 
     @pyqtSlot(int)
@@ -310,6 +326,11 @@ class Watcher(QObject):
     # ---- core tick ------------------------------------------------------
 
     def _tick_safely(self) -> None:
+        # Guard: per-row command slots (fire-now / skip / exclude / …) call
+        # this unconditionally — a full detection+send tick must never run
+        # while the watcher is Stopped.
+        if not self._running:
+            return
         try:
             self._tick()
         except Exception as e:
@@ -342,9 +363,15 @@ class Watcher(QObject):
             st = self._states.setdefault(hwnd, _WState(hwnd=hwnd, title=title))
             st.title = title
 
-            # Excluded windows never get processed.
-            if title in self._excluded_titles:
+            # Excluded windows never get processed. Keyed via title_key so
+            # exclusion survives the WT spinner glyph / title churn.
+            if title_key(title) in self._excluded_titles:
                 st.status = ST_EXCLUDED
+                # Queued row commands are meaningless for an excluded row —
+                # drop them so they can't fire much later (or into an
+                # unrelated window after Windows recycles the HWND).
+                self._cmd_fire_now.discard(hwnd)
+                self._cmd_skip.discard(hwnd)
                 continue
 
             # --- per-row commands accumulated since last tick ---
@@ -353,6 +380,10 @@ class Watcher(QObject):
                 if st.reset_utc is not None:
                     self.log.emit("info",
                                   f"skipped pending continue for {title!r}")
+                    # Remember the skipped key: the message is still visible
+                    # in the scrollback and must not instantly re-arm in the
+                    # detection step below — that would make Skip a no-op.
+                    st.fired_key = st.reset_key or st.fired_key
                 st.reset_utc = None
                 st.reset_key = None
                 st.status = ST_IDLE
@@ -370,29 +401,77 @@ class Watcher(QObject):
                     else ST_IDLE
                 )
 
-            # 0.5. Read scrollback once per tick so both retry and rate-limit
-            # detection share the same view of the terminal.
+            # 0.5. Read scrollback once per tick so every detector below
+            # shares the same view of the terminal.
             text = read_terminal_text(w)
             tail = text[-SCAN_TAIL_CHARS:] if text else ""
+            dr = "[dry-run] " if self._dry_run else ""
+
+            # 0.52. Dead-session states 'continue' can't fix: warn once.
+            if tail and parse_oauth_expired(tail):
+                if not st.oauth_logged:
+                    self.log.emit(
+                        "warn",
+                        f"OAuth token expired on {title!r} — auto-continue "
+                        f"can't fix this; run /login in that session"
+                    )
+                    st.oauth_logged = True
+            else:
+                st.oauth_logged = False
+
+            # 0.55. Interactive limit picker ("What do you want to do?").
+            # Newer Claude Code builds show this modal INSTEAD of the limit
+            # banner; option 1 ("Stop and wait for limit to reset") is
+            # pre-selected, so a bare Enter confirms it and makes the
+            # regular banner (with the reset time) appear — which the flow
+            # below then picks up on the next tick. Does NOT touch
+            # last_sent_utc: the banner must not be swallowed by cooldown.
+            if tail and parse_limit_prompt(tail):
+                if (force_fire
+                        or st.prompt_last_sent_utc is None
+                        or now - st.prompt_last_sent_utc >= retry_interval):
+                    first = not st.prompt_active
+                    if first:
+                        self.log.emit(
+                            "warn",
+                            f"limit picker open on {title!r}; confirming "
+                            f"'Stop and wait for limit to reset'"
+                        )
+                        st.prompt_active = True
+                    self.log.emit(
+                        "fire" if first else "info",
+                        f"{dr}pressing Enter (limit picker) → {title!r}"
+                    )
+                    ok = send_text_lines(w, [""], dry_run=self._dry_run)
+                    if ok:
+                        st.prompt_last_sent_utc = now
+                st.status = ST_PROMPT
+                continue
+            elif st.prompt_active or st.prompt_last_sent_utc is not None:
+                st.prompt_active = False
+                st.prompt_last_sent_utc = None
+                if st.status == ST_PROMPT:
+                    st.status = ST_IDLE
 
             # 0.6. Network-stuck path. Runs *before* the rate-limit logic and
             # ignores the cooldown — if the API is unreachable in the middle
             # of a 5h wait we still want to resend 'continue' every
             # retry_interval seconds until the connection comes back. Two
             # flavors are treated identically:
-            #   a) `Retrying in 0s · attempt N/N` — retries exhausted
-            #   b) `API Error: Unable to connect to API (ECONNRESET)` — bare
+            #   a) retry banner at attempt N/N — retries exhausted
+            #   b) bare `API Error: ... (E...)` / `fetch failed` — no banner
             stuck_reason = None
             if tail:
                 if parse_retry_exhausted(tail):
                     stuck_reason = "network retries exhausted"
                 elif parse_econnreset_stuck(tail):
-                    stuck_reason = "API ECONNRESET"
+                    stuck_reason = "network API error"
             if stuck_reason:
                 if (force_fire
                         or st.retry_last_sent_utc is None
                         or now - st.retry_last_sent_utc >= retry_interval):
-                    if not st.retry_active:
+                    first = not st.retry_active
+                    if first:
                         self.log.emit(
                             "warn",
                             f"{stuck_reason} on {title!r}; "
@@ -400,20 +479,34 @@ class Watcher(QObject):
                             f"{self._retry_interval}s until recovery"
                         )
                         st.retry_active = True
+                    # 'fire' (tray balloon) only for the FIRST resend of an
+                    # outage — a long outage would otherwise pop a balloon
+                    # every retry_interval seconds.
                     self.log.emit(
-                        "fire",
-                        f"resending 'continue' (retry path) → {title!r}"
+                        "fire" if first else "info",
+                        f"{dr}resending 'continue' (retry path) → {title!r}"
                     )
                     ok = send_continue(w, dry_run=self._dry_run)
                     if ok:
                         st.retry_last_sent_utc = now
                         st.status = ST_RETRY
+                        # If a rate-limit pending elapsed during the outage,
+                        # this 'continue' doubles as its fire — otherwise
+                        # we'd send a second, redundant continue right
+                        # after recovery.
+                        if (st.reset_utc is not None
+                                and now >= st.reset_utc + buffer):
+                            st.fired_key = st.reset_key
+                            st.reset_utc = None
+                            st.reset_key = None
+                            st.last_sent_utc = now
                     else:
                         self.log.emit(
                             "warn",
                             f"retry send failed for {title!r}; "
                             f"will try again in {self._interval}s"
                         )
+                        st.status = ST_RETRY
                 else:
                     st.status = ST_RETRY
                 continue
@@ -439,7 +532,12 @@ class Watcher(QObject):
                            and now - st.last_sent_utc < cooldown)
             if tail and not in_cooldown:
                 parsed = parse_limit_message(tail)
-                if parsed and parsed != st.reset_key:
+                if (parsed and parsed != st.reset_key
+                        and parsed != st.fired_key):
+                    # `fired_key` blocks the stale case: a message we
+                    # already fired for (or the user skipped), still visible
+                    # after the cooldown, must not re-arm a bogus "tomorrow
+                    # at the same time" pending.
                     hour_12, minute, ampm, tz_name = parsed
                     new_reset = None
                     try:
@@ -471,11 +569,31 @@ class Watcher(QObject):
                                 f"{old_local:%Y-%m-%d %H:%M:%S} → "
                                 f"{local:%Y-%m-%d %H:%M:%S}"
                             )
+                elif parsed is None:
+                    # No limit message anywhere near the tail: the handled
+                    # message is gone, so any future match is genuinely new.
+                    st.fired_key = None
 
             # 2. Pending? Decide whether to fire.
             if st.reset_utc is not None or force_fire:
                 fire_at = (st.reset_utc or now) + buffer
                 if force_fire or now >= fire_at:
+                    # Re-verify the message is still current — if the user
+                    # already continued manually, the session has moved on
+                    # and a redundant 'continue' would start an unwanted
+                    # turn. (Forced fires skip this check by design.)
+                    if (not force_fire and tail
+                            and parse_limit_message(tail) is None):
+                        self.log.emit(
+                            "info",
+                            f"limit message gone on {title!r} before fire; "
+                            f"assuming handled manually"
+                        )
+                        st.fired_key = st.reset_key
+                        st.reset_utc = None
+                        st.reset_key = None
+                        st.status = ST_IDLE
+                        continue
                     st.status = ST_FIRING
                     model = self._model_overrides.get(title_key(title), "")
                     effort = self._effort_overrides.get(title_key(title), "")
@@ -497,12 +615,13 @@ class Watcher(QObject):
                     lines.append("continue")
                     self.log.emit(
                         "fire",
-                        f"sending {lines} to {title!r}"
+                        f"{dr}sending {lines} to {title!r}"
                         + (" (forced)" if force_fire else "")
                     )
                     ok = send_text_lines(w, lines, dry_run=self._dry_run)
                     if ok:
                         st.last_sent_utc = now
+                        st.fired_key = st.reset_key
                         st.reset_utc = None
                         st.reset_key = None
                         st.status = ST_SENT
@@ -530,10 +649,13 @@ class Watcher(QObject):
             elif st.status not in (ST_SENT, ST_FIRING):
                 st.status = ST_IDLE
 
-        # Drop closed windows.
+        # Drop closed windows, and queued row commands aimed at them (a
+        # stale hwnd could be recycled by Windows for an unrelated window).
         for hwnd in list(self._states):
             if hwnd not in seen:
                 del self._states[hwnd]
+        self._cmd_fire_now &= seen
+        self._cmd_skip &= seen
 
         # Snapshot for the GUI.
         self.snapshot.emit(self._make_snapshot())
@@ -548,14 +670,14 @@ class Watcher(QObject):
                 "reset_utc": st.reset_utc,
                 "last_sent_utc": st.last_sent_utc,
                 "retry_last_sent_utc": st.retry_last_sent_utc,
-                "excluded": st.title in self._excluded_titles,
+                "excluded": title_key(st.title) in self._excluded_titles,
                 "model": self._model_overrides.get(title_key(st.title), ""),
                 "effort": self._effort_overrides.get(title_key(st.title), ""),
             })
-        # Stable ordering: retry (network down) is the most urgent, then
-        # rate-limit pending, then idle, then excluded.
-        order = {ST_RETRY: 0, ST_FIRING: 1, ST_PENDING: 2, ST_SENT: 3,
-                 ST_IDLE: 4, ST_COOLDOWN: 5, ST_EXCLUDED: 6}
+        # Stable ordering: retry (network down) / limit picker are the most
+        # urgent, then rate-limit pending, then idle, then excluded.
+        order = {ST_RETRY: 0, ST_PROMPT: 1, ST_FIRING: 2, ST_PENDING: 3,
+                 ST_SENT: 4, ST_IDLE: 5, ST_COOLDOWN: 6, ST_EXCLUDED: 7}
         out.sort(key=lambda r: (order.get(r["status"], 9), r["title"].lower()))
         return out
 
@@ -572,6 +694,7 @@ STATUS_LABEL = {
     ST_COOLDOWN: "Cooldown",
     ST_EXCLUDED: "Excluded",
     ST_RETRY:    "⚠ Net retry",
+    ST_PROMPT:   "⏎ Limit prompt",
 }
 
 
@@ -609,6 +732,7 @@ def _make_palette(scheme: "Qt.ColorScheme") -> dict:
                 ST_COOLDOWN: QColor("#3a3f44"),
                 ST_EXCLUDED: QColor("#2a2d31"),
                 ST_RETRY:    QColor("#5c1e1e"),
+                ST_PROMPT:   QColor("#3d3160"),
             },
             "status_fg": QColor("#f1f3f5"),
             "log_fg": {
@@ -629,6 +753,7 @@ def _make_palette(scheme: "Qt.ColorScheme") -> dict:
             ST_COOLDOWN: QColor("#dee2e6"),
             ST_EXCLUDED: QColor("#f8f9fa"),
             ST_RETRY:    QColor("#ffc9c9"),
+            ST_PROMPT:   QColor("#e5dbff"),
         },
         "status_fg": QColor("#212529"),
         "log_fg": {
@@ -761,6 +886,20 @@ class MainWindow(QMainWindow):
         # directly but is co-located for clarity).
         self._palette = _make_palette(_current_color_scheme())
         self._log_buffer: list = []  # list[tuple[ts, level, msg]]
+        # Persistent activity log for overnight postmortems (the in-window
+        # view is a 500-line ring buffer that dies with the process).
+        # %LOCALAPPDATA%\auto_continue\activity.log, rotated at ~1 MB.
+        self._log_path = os.path.join(
+            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            "auto_continue", "activity.log",
+        )
+        try:
+            os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
+        except OSError:
+            self._log_path = None
+        # Signature of the last rendered table so unchanged snapshots skip
+        # the full rebuild (which would close an open dropdown every tick).
+        self._last_render_sig: Optional[list] = None
 
         self._build_ui()
         self._build_worker()
@@ -830,6 +969,14 @@ class MainWindow(QMainWindow):
             lambda v: (self._apply_keep_awake(v), self._save_settings())
         )
 
+        self.autostart_check = QCheckBox("Start on launch")
+        self.autostart_check.setToolTip(
+            "Begin watching automatically when the app opens — including "
+            "the automatic relaunch after a self-update. Without this, "
+            "protection lapses until you click Start."
+        )
+        self.autostart_check.toggled.connect(lambda _v: self._save_settings())
+
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(5, 600)
         self.interval_spin.setValue(30)
@@ -869,6 +1016,7 @@ class MainWindow(QMainWindow):
         header.addSpacing(12)
         header.addWidget(self.dry_run_check)
         header.addWidget(self.keep_awake_check)
+        header.addWidget(self.autostart_check)
         header.addSpacing(12)
         header.addWidget(QLabel("poll"))
         header.addWidget(self.interval_spin)
@@ -1118,7 +1266,15 @@ class MainWindow(QMainWindow):
         self.update_notes_btn.setVisible(False)
         self.update_label.setText(f"Downloading v{ver}…")
         self._append_log("info", f"downloading v{ver}…")
-        self.sig_update_download.emit(self._pending_release)
+        if not self._pending_release.get("sha256"):
+            # Surface the silent best-effort branch of verify_sha256: with
+            # no published digest the download is only protected by HTTPS.
+            self._append_log(
+                "warn",
+                "release has no sha256 digest — integrity check "
+                "will be skipped"
+            )
+        self.sig_update_download.emit(dict(self._pending_release))
 
     @pyqtSlot(int)
     def _on_update_progress(self, pct: int) -> None:
@@ -1155,15 +1311,16 @@ class MainWindow(QMainWindow):
             return
         try:
             self._append_log("info", f"installing v{ver} and restarting…")
+            # Launch the detached swapper FIRST — if writing/launching the
+            # swap .bat fails we bail out here with the watcher threads
+            # still alive, instead of a dead-but-"Running" app.
+            updater.stage_and_swap(path)
             self.sig_stop.emit()
             self._save_settings()
             if self.keep_awake_check.isChecked():
                 self._apply_keep_awake(False)
-            self.worker_thread.quit()
-            self.worker_thread.wait(2000)
-            self.updater_thread.quit()
-            self.updater_thread.wait(2000)
-            updater.stage_and_swap(path)            # launches detached swapper
+            self._shutdown_thread(self.worker_thread)
+            self._shutdown_thread(self.updater_thread)
             QApplication.instance().quit()          # clean exit -> lock drops
         except Exception as e:
             self._append_log("err", f"install failed: {type(e).__name__}: {e}")
@@ -1178,19 +1335,28 @@ class MainWindow(QMainWindow):
 
     # ---- Settings persistence -------------------------------------------
 
+    def _settings_int(self, key: str, default: int) -> int:
+        """int(QSettings.value(...)) that survives a corrupt registry value
+        instead of killing the (windowed, console-less) exe at startup."""
+        try:
+            return int(self.settings.value(key, default))
+        except (TypeError, ValueError):
+            return default
+
     def _load_settings(self) -> None:
         # Block widget signals so that programmatically populating the
         # controls doesn't trigger a chain of valueChanged → _save_settings
         # → sig_set_* before the worker is even ready.
         widgets = [self.interval_spin, self.buffer_spin, self.retry_spin,
-                   self.dry_run_check, self.keep_awake_check]
+                   self.dry_run_check, self.keep_awake_check,
+                   self.autostart_check]
         for w in widgets:
             w.blockSignals(True)
         try:
-            self.interval_spin.setValue(int(self.settings.value("interval", 30)))
-            self.buffer_spin.setValue(int(self.settings.value("buffer", 20)))
+            self.interval_spin.setValue(self._settings_int("interval", 30))
+            self.buffer_spin.setValue(self._settings_int("buffer", 20))
             self.retry_spin.setValue(
-                int(self.settings.value("retry_interval", 30))
+                self._settings_int("retry_interval", 30)
             )
             self.dry_run_check.setChecked(
                 self.settings.value("dry_run", False, type=bool)
@@ -1198,8 +1364,16 @@ class MainWindow(QMainWindow):
             self.keep_awake_check.setChecked(
                 self.settings.value("keep_awake", False, type=bool)
             )
+            self.autostart_check.setChecked(
+                self.settings.value("autostart", True, type=bool)
+            )
             excl = self.settings.value("excluded", [], type=list) or []
-            self._excluded_titles = list(excl)
+            # Normalize through title_key — migrates raw titles persisted
+            # by older versions (exclusion used to break when the WT
+            # spinner glyph changed).
+            self._excluded_titles = sorted(
+                {title_key(str(t)) for t in excl if title_key(str(t))}
+            )
             # QSettings can't roundtrip arbitrary dicts, so we serialize
             # effort overrides as JSON.
             import json
@@ -1217,17 +1391,24 @@ class MainWindow(QMainWindow):
             for w in widgets:
                 w.blockSignals(False)
 
-        # Now push the final config to the worker exactly once.
+        # Now push the final config to the worker exactly once. Always emit
+        # COPIES: a queued connection shares the same Python object across
+        # threads, and the worker iterating a dict/list the GUI thread later
+        # mutates would raise mid-slot.
         self.sig_set_interval.emit(self.interval_spin.value())
         self.sig_set_buffer.emit(self.buffer_spin.value())
         self.sig_set_retry_interval.emit(self.retry_spin.value())
         self.sig_set_dry_run.emit(self.dry_run_check.isChecked())
-        self.sig_set_excluded.emit(self._excluded_titles)
-        self.sig_set_effort_overrides.emit(self._effort_overrides)
-        self.sig_set_model_overrides.emit(self._model_overrides)
+        self.sig_set_excluded.emit(list(self._excluded_titles))
+        self.sig_set_effort_overrides.emit(dict(self._effort_overrides))
+        self.sig_set_model_overrides.emit(dict(self._model_overrides))
         # Apply keep-awake state immediately if the user had it ON before.
         if self.keep_awake_check.isChecked():
             self._apply_keep_awake(True)
+        # Resume watching automatically (also covers the relaunch after a
+        # self-update — protection must not silently lapse).
+        if self.autostart_check.isChecked():
+            self.sig_start.emit()
 
     def _save_settings(self) -> None:
         import json
@@ -1236,6 +1417,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("retry_interval", self.retry_spin.value())
         self.settings.setValue("dry_run", self.dry_run_check.isChecked())
         self.settings.setValue("keep_awake", self.keep_awake_check.isChecked())
+        self.settings.setValue("autostart", self.autostart_check.isChecked())
         self.settings.setValue("excluded", list(self._excluded_titles))
         self.settings.setValue(
             "effort_overrides", json.dumps(self._effort_overrides)
@@ -1272,6 +1454,16 @@ class MainWindow(QMainWindow):
     @pyqtSlot(list)
     def _on_snapshot(self, rows: list) -> None:
         self._latest_snapshot = rows
+        # Skip the full table rebuild when nothing user-visible changed —
+        # rebuilding destroys the cell widgets, which closes any model/
+        # effort dropdown the user has open and resets row selection.
+        # (The countdown column is repainted by its own 1s timer.)
+        sig = [(r["hwnd"], r["title"], r["status"], r["reset_utc"],
+                r["last_sent_utc"], r["excluded"], r["model"], r["effort"])
+               for r in rows]
+        if sig == self._last_render_sig:
+            return
+        self._last_render_sig = sig
         self._render_table()
 
     @pyqtSlot(str, str)
@@ -1284,6 +1476,7 @@ class MainWindow(QMainWindow):
         if len(self._log_buffer) > 500:
             del self._log_buffer[: len(self._log_buffer) - 500]
         self._render_log_line(ts, level, message)
+        self._write_log_file(ts, level, message)
         # Tray notification on fire so the user notices even when minimized.
         if level == "fire" and self.tray is not None:
             self.tray.showMessage(
@@ -1291,10 +1484,31 @@ class MainWindow(QMainWindow):
                 QSystemTrayIcon.MessageIcon.Information, 4000,
             )
 
+    def _write_log_file(self, ts: str, level: str, message: str) -> None:
+        if not self._log_path:
+            return
+        try:
+            try:
+                if os.path.getsize(self._log_path) > 1_000_000:
+                    old = self._log_path + ".old"
+                    if os.path.exists(old):
+                        os.remove(old)
+                    os.replace(self._log_path, old)
+            except OSError:
+                pass
+            with open(self._log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"{datetime.now():%Y-%m-%d} {ts}  "
+                         f"[{level}]  {message}\n")
+        except OSError:
+            pass
+
     def _render_log_line(self, ts: str, level: str, message: str) -> None:
         log_fg = self._palette["log_fg"]
         color = log_fg.get(level, log_fg["info"]).name()
-        line = f"{ts}  [{level}]  {message}"
+        # Escape: window titles routinely contain '<'/'&' (the watcher's
+        # own fallback title is literally '<hwnd N>'), which appendHtml
+        # would otherwise parse as markup and silently strip.
+        line = html.escape(f"{ts}  [{level}]  {message}")
         self.log_view.appendHtml(
             f'<span style="color:{color}">{line}</span>'
         )
@@ -1461,12 +1675,13 @@ class MainWindow(QMainWindow):
     # ---- Actions ---------------------------------------------------------
 
     def _do_exclude(self, hwnd: int, title: str) -> None:
-        if title not in self._excluded_titles:
-            self._excluded_titles.append(title)
+        key = title_key(title)
+        if key and key not in self._excluded_titles:
+            self._excluded_titles.append(key)
             self.sig_exclude.emit(hwnd, title)
-            self.sig_set_excluded.emit(self._excluded_titles)
+            self.sig_set_excluded.emit(list(self._excluded_titles))
             self._save_settings()
-            self._append_log("info", f"excluded {title!r}")
+            self._append_log("info", f"excluded {key!r}")
 
     def _on_effort_changed(self, title: str, level: str) -> None:
         key = title_key(title)
@@ -1475,7 +1690,7 @@ class MainWindow(QMainWindow):
             self._effort_overrides[key] = level
         else:
             self._effort_overrides.pop(key, None)
-        self.sig_set_effort_overrides.emit(self._effort_overrides)
+        self.sig_set_effort_overrides.emit(dict(self._effort_overrides))
         self._save_settings()
         self._append_log(
             "info",
@@ -1488,7 +1703,7 @@ class MainWindow(QMainWindow):
             self._model_overrides[key] = name
         else:
             self._model_overrides.pop(key, None)
-        self.sig_set_model_overrides.emit(self._model_overrides)
+        self.sig_set_model_overrides.emit(dict(self._model_overrides))
         self._save_settings()
         self._append_log(
             "info",
@@ -1496,12 +1711,13 @@ class MainWindow(QMainWindow):
         )
 
     def _do_unexclude(self, title: str) -> None:
-        if title in self._excluded_titles:
-            self._excluded_titles.remove(title)
+        key = title_key(title)
+        if key in self._excluded_titles:
+            self._excluded_titles.remove(key)
             self.sig_unexclude.emit(title)
-            self.sig_set_excluded.emit(self._excluded_titles)
+            self.sig_set_excluded.emit(list(self._excluded_titles))
             self._save_settings()
-            self._append_log("info", f"un-excluded {title!r}")
+            self._append_log("info", f"un-excluded {key!r}")
 
     # ---- Keep-awake (SetThreadExecutionState) ---------------------------
 
@@ -1541,6 +1757,18 @@ class MainWindow(QMainWindow):
 
     # ---- Lifecycle -------------------------------------------------------
 
+    def _shutdown_thread(self, thread: QThread) -> None:
+        """quit() + generous wait; terminate as a last resort. Destroying a
+        QThread object that is still running is qFatal (crash on quit) — a
+        tick mid-UIA-scan or mid-send can easily outlive a short wait."""
+        try:
+            thread.quit()
+            if not thread.wait(8000):
+                thread.terminate()
+                thread.wait(2000)
+        except Exception:
+            pass
+
     def closeEvent(self, event) -> None:
         # X button = full quit (per user preference). Tray-only background
         # mode is reached via the minimize button instead.
@@ -1555,13 +1783,8 @@ class MainWindow(QMainWindow):
             self.sig_stop.emit()
         except Exception:
             pass
-        self.worker_thread.quit()
-        self.worker_thread.wait(2000)
-        try:
-            self.updater_thread.quit()
-            self.updater_thread.wait(2000)
-        except Exception:
-            pass
+        self._shutdown_thread(self.worker_thread)
+        self._shutdown_thread(self.updater_thread)
         super().closeEvent(event)
         # setQuitOnLastWindowClosed is False (so the minimize-to-tray case
         # doesn't kill the app), so the X button path needs to ask the app
@@ -1575,6 +1798,20 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Auto-Continue")
     app.setOrganizationName("auto_continue")
+
+    # Single-instance guard: two copies would each type 'continue' into the
+    # same windows (double submissions) and race each other's update staging.
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    global _INSTANCE_MUTEX  # keep the handle alive for the process lifetime
+    _INSTANCE_MUTEX = kernel32.CreateMutexW(
+        None, False, "Local\\AutoContinueGuiSingleton")
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        QMessageBox.warning(
+            None, "Auto-Continue",
+            "Auto-Continue is already running — check the system tray.")
+        return 0
+
     # Hiding the main window to the tray must not exit the app — the
     # watcher thread needs to keep running.
     app.setQuitOnLastWindowClosed(False)

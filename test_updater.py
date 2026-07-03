@@ -119,6 +119,10 @@ check_true("bat uses ping (not timeout)", "ping -n 2 127.0.0.1" in bat and "time
 check_true("bat retries on lock (errorlevel 1)", "if errorlevel 1" in bat)
 check_true("bat relaunches", 'start "" "C:\\dir\\Auto-Continue.exe"' in bat)
 check_true("bat self-deletes", '(goto) 2>nul & del "%~f0"' in bat)
+check_true("bat caps the wait loop", "if %tries% gtr 150 goto cleanup" in bat
+           and "set /a tries+=1" in bat and ":cleanup" in bat)
+check_true("bat relaunch line precedes cleanup label (skip on give-up)",
+           bat.index('start ""') < bat.index(":cleanup"))
 bat_no = build_swap_bat(r"C:\d\new.exe", r"C:\d\t.exe", relaunch=False)
 check_true("no-relaunch omits start", 'start ""' not in bat_no)
 

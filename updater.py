@@ -226,18 +226,28 @@ def build_swap_bat(new_exe: str, target_exe: str, relaunch: bool = True) -> str:
     Uses `ping` (not `timeout`) for the wait because a detached process has no
     console and `timeout` would error. `chcp 65001` + quoted paths handle
     spaces / unicode (the user runs CJK terminals).
+
+    The wait loop is CAPPED (~150 tries ≈ 2.5 min): a permanent failure
+    (staged .new quarantined by AV, unwritable target dir, app never exits)
+    must not leave a hidden detached cmd.exe looping forever. On give-up the
+    bat just self-deletes without relaunching — the running app keeps its
+    old version, which is the safe outcome.
     """
     relaunch_line = f'start "" "{target_exe}"\r\n' if relaunch else ""
     return (
         "@echo off\r\n"
         "chcp 65001 >nul\r\n"
+        "set tries=0\r\n"
         ":waitloop\r\n"
+        "set /a tries+=1\r\n"
+        "if %tries% gtr 150 goto cleanup\r\n"
         f'move /y "{new_exe}" "{target_exe}" >nul 2>&1\r\n'
         "if errorlevel 1 (\r\n"
         "    ping -n 2 127.0.0.1 >nul\r\n"
         "    goto waitloop\r\n"
         ")\r\n"
         f"{relaunch_line}"
+        ":cleanup\r\n"
         '(goto) 2>nul & del "%~f0"\r\n'
     )
 

@@ -4,9 +4,9 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 from auto_continue import (
     parse_limit_message, parse_retry_exhausted, parse_econnreset_stuck,
-    next_reset_datetime,
+    parse_limit_prompt, parse_oauth_expired, next_reset_datetime,
 )
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 # The two Anthropic wordings of the follow-up line seen in the wild.
@@ -94,10 +94,46 @@ for i, (text, expected) in enumerate(samples):
         failures += 1
 
 print()
-# Smoke test next_reset_datetime with minutes.
-res = next_reset_datetime(2, 50, "pm", "Asia/Shanghai")
-print(f"next reset for 2:50pm Asia/Shanghai → {res} (UTC) "
-      f"= {res.astimezone(pytz.timezone('Asia/Shanghai'))}")
+print("---- next_reset_datetime ----")
+
+
+def check_reset(label, cond):
+    global failures
+    status = "OK " if cond else "FAIL"
+    print(f"[{status}] {label}")
+    if not cond:
+        failures += 1
+
+
+# Basic invariants: result is aware UTC, in the future, within 24h, and has
+# the requested wall-clock time in the requested zone.
+def assert_reset(hour_12, minute, ampm, tz_name, expect_tz=None):
+    res = next_reset_datetime(hour_12, minute, ampm, tz_name)
+    now = datetime.now(pytz.UTC)
+    ok = (res.tzinfo is not None and now < res <= now + timedelta(days=1))
+    if expect_tz:
+        local = res.astimezone(pytz.timezone(expect_tz))
+        hour_24 = hour_12 % 12 + (12 if ampm == "pm" else 0)
+        ok = ok and (local.hour, local.minute) == (hour_24, minute)
+    check_reset(f"{hour_12}:{minute:02d}{ampm} ({tz_name})", ok)
+
+
+assert_reset(2, 50, "pm", "Asia/Shanghai", "Asia/Shanghai")
+assert_reset(12, 0, "am", "Asia/Shanghai", "Asia/Shanghai")   # midnight
+assert_reset(12, 0, "pm", "Asia/Shanghai", "Asia/Shanghai")   # noon
+assert_reset(11, 0, "pm", "America/New_York", "America/New_York")  # DST zone
+assert_reset(9, 0, "am", "EDT", "America/New_York")   # abbrev → IANA map
+assert_reset(6, 30, "pm", "PST", "America/Los_Angeles")
+assert_reset(7, 0, "am", "NoSuch/Zone")               # local-tz fallback
+
+# DST correctness: the target must carry the OFFSET OF THE TARGET MOMENT,
+# not today's. Simulate by checking round-trip consistency: converting the
+# result back to the zone must show exactly the requested wall-clock time
+# (pytz normalize would reveal a wrong fixed offset as a shifted hour).
+res = next_reset_datetime(11, 0, "pm", "America/New_York")
+back = res.astimezone(pytz.timezone("America/New_York"))
+check_reset("DST round-trip America/New_York 11pm",
+            (back.hour, back.minute) == (23, 0))
 
 
 # ---------- parse_retry_exhausted ----------
@@ -132,6 +168,9 @@ retry_samples = [
     ("nothing to see here", False),
     # 5/5 retry config (hypothetical lower max) — still exhausted (N >= total).
     ("Retrying in 0s · attempt 5/5", True),
+    # Long-form wording some builds print.
+    ("Retrying in 8 seconds… (attempt 10/10)", True),
+    ("Retrying in 8 seconds… (attempt 3/10)", False),
 ]
 
 print()
@@ -175,6 +214,19 @@ econn_samples = [
     ("API Error: Unable to connect to API (ECONNRESET)\n...later...\n"
      "API Error: Unable to connect to API (ECONNRESET)",
      True),
+    # Sibling errnos — same stuck state, must all be detected.
+    ("API Error: Unable to connect to API (ETIMEDOUT)", True),
+    ("API Error: Unable to connect to API (ECONNREFUSED)", True),
+    ("API Error: Unable to connect to API (ENOTFOUND)", True),
+    ("API Error: Unable to connect to API (EAI_AGAIN)", True),
+    ("API Error: Unable to connect to API (EHOSTUNREACH)", True),
+    # undici error codes.
+    ("API Error: Unable to connect to API (UND_ERR_CONNECT_TIMEOUT)", True),
+    # Node's generic wording.
+    ("API Error: fetch failed", True),
+    # HTTP status errors are NOT network-stuck (Claude retries those itself).
+    ("API Error: 500 {\"type\":\"error\"}", False),
+    ("API Error: 529 overloaded", False),
 ]
 
 print()
@@ -184,6 +236,67 @@ for i, (text, expected) in enumerate(econn_samples):
     ok = got == expected
     status = "OK " if ok else "FAIL"
     print(f"[{status}] econn sample {i}: got={got!r} expected={expected!r}")
+    if not ok:
+        failures += 1
+
+
+# ---------- parse_limit_prompt ----------
+# The interactive limit picker. NOTE: key phrases below are built via string
+# concatenation so that DISPLAYING this test file inside a watched terminal
+# cannot false-trigger the detector.
+PICKER = ("What do you want to do?\n"
+          "> 1. Stop and wait for li" "mit to reset\n"
+          "  2. Upgrade your plan\n"
+          "Enter to conf" "irm · Esc to cancel")
+BANNER = ("You've hit your li" "mit · resets 11pm (Asia/Shanghai)\n"
+          "/upgra" "de to increase your usage limit.")
+prompt_samples = [
+    # Picker open at the tail — must press Enter.
+    (PICKER, True),
+    # Exact form from the screenshot, with preceding turn output.
+    ("● 架构侦察一下,再上多智能体全面审查。\n"
+     "✳ Waiting for 1 dynamic workflow to finish\n" + PICKER, True),
+    # Some padding after the footer (narrow modal, wide terminal) — still ok.
+    (PICKER + "\n" + " " * 800, True),
+    # Buried under real output — stale, do NOT press Enter.
+    (PICKER + "\n" + "x" * 2000, False),
+    # Already confirmed: the limit banner appears AFTER the picker.
+    (PICKER + "\n" + BANNER, False),
+    # Banner BEFORE the picker (previous limit) — picker is current, Enter.
+    (BANNER + "\n...much later...\n" + PICKER, True),
+    # No picker at all.
+    ("nothing here", False),
+    # Similar words without the full three-part shape — no match.
+    ("What do you want to do? open the pod bay doors\n"
+     "Enter to conf" "irm", False),
+]
+
+print()
+print("---- parse_limit_prompt ----")
+for i, (text, expected) in enumerate(prompt_samples):
+    got = parse_limit_prompt(text)
+    ok = got == expected
+    status = "OK " if ok else "FAIL"
+    print(f"[{status}] prompt sample {i}: got={got!r} expected={expected!r}")
+    if not ok:
+        failures += 1
+
+
+# ---------- parse_oauth_expired ----------
+oauth_samples = [
+    ("OAuth token has exp" "ired · Please run /log" "in", True),
+    ("API Error: OAuth token has exp" "ired", True),
+    ("OAuth token has exp" "ired\n" + "x" * 7000, False),  # stale
+    ("everything fine", False),
+]
+
+print()
+print("---- parse_oauth_expired ----")
+for i, (text, expected) in enumerate(oauth_samples):
+    got = parse_oauth_expired(text)
+    ok = got == expected
+    status = "OK " if ok else "FAIL"
+    print(f"[{status}] oauth sample {i}: got={got!r} expected={expected!r}")
     if not ok:
         failures += 1
 

@@ -62,10 +62,30 @@ a = Analysis(
         # Heavy stdlib modules not used.
         "tkinter",
         "unittest",
+        # uiautomation only imports these lazily inside its screenshot/
+        # bitmap helpers (Bitmap.ToPIL etc.), which this app never calls.
+        # Together they are ~38 MB uncompressed of dead payload.
+        "numpy",
+        "PIL",
     ],
     noarchive=False,
     optimize=0,
 )
+
+# Module-level excludes don't stop PyQt6's hook from collecting Qt DLLs and
+# data files we never load. Filter the heavyweights out of the TOCs:
+#   opengl32sw.dll (~20 MB)  — software GL rasterizer; QWidgets uses raster
+#   Qt6Pdf/qpdf   (~5.6 MB)  — PDF plugin, never imported
+#   Qt6Network    (~1.8 MB)  — we use urllib, not QtNetwork
+#   Qt6Qml/Quick             — no QML anywhere
+#   translations  (~6.7 MB)  — app UI is English-only
+_DROP_BIN = ("opengl32sw", "qt6pdf", "qpdf", "qt6network",
+             "qt6qml", "qt6quick", "qt6virtualkeyboard")
+a.binaries = [b for b in a.binaries
+              if not any(k in b[0].lower() for k in _DROP_BIN)]
+a.datas = [d for d in a.datas
+           if "translations" not in d[0].lower().replace("\\", "/")]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
