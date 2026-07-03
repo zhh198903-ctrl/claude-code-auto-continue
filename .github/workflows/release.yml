@@ -1,0 +1,59 @@
+# Build Auto-Continue.exe on GitHub's infrastructure and attach it to a
+# release — created because uploading a 26 MB asset from the dev machine's
+# link is hopeless (connection resets at ~1.4 MB, 50+ failed attempts for
+# v1.0.10). The source push is a few hundred KB; the runner does the rest.
+#
+# Usage:
+#   gh workflow run release.yml -f tag=v1.0.10 -f publish=true
+# The release (draft or published) must already exist for that tag.
+name: build-release-exe
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the exe to"
+        required: true
+      publish:
+        description: "Flip the draft to published after upload"
+        required: false
+        default: "true"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Unit tests
+        run: |
+          python test_parse.py
+          python test_updater.py
+          python test_tick.py
+
+      - name: Build onefile exe
+        run: pyinstaller Auto-Continue.spec --clean --noconfirm
+
+      - name: Report exe size
+        run: Get-Item dist/Auto-Continue.exe | Select-Object Name,Length
+
+      - name: Upload asset to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" dist/Auto-Continue.exe --clobber
+
+      - name: Publish draft
+        if: ${{ inputs.publish == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ inputs.tag }}" --draft=false
