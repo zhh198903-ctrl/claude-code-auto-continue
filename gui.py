@@ -1204,14 +1204,21 @@ class MainWindow(QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
-        # Belt-and-braces foreground grab (Qt's activateWindow won't steal
-        # foreground from another process on Windows; the signalling instance
-        # is exiting so this succeeds).
+        # Belt-and-braces native show + foreground grab. Qt's show() is a
+        # no-op if its cached state already says "visible" (which desyncs
+        # from the real window if anything hid it out from under Qt), and
+        # activateWindow() won't steal foreground from another process on
+        # Windows. A direct ShowWindow + SetForegroundWindow guarantees the
+        # window actually appears and comes forward. (The signalling second
+        # instance is exiting, so the foreground grab is allowed.)
         try:
             import ctypes
             hwnd = int(self.winId())
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-            ctypes.windll.user32.BringWindowToTop(hwnd)
+            user32 = ctypes.windll.user32
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE (un-minimize)
+            user32.ShowWindow(hwnd, 5)   # SW_SHOW    (force visible)
+            user32.SetForegroundWindow(hwnd)
+            user32.BringWindowToTop(hwnd)
         except Exception:
             pass
 
