@@ -865,21 +865,27 @@ class Updater(QObject):
             self.download_failed.emit(f"Download failed: {type(e).__name__}: {e}")
 
 
+# Shared named objects for single-instance coordination (session-scoped).
+_MUTEX_NAME = "Local\\AutoContinueGuiSingleton"
 _SHOW_EVENT_NAME = "Local\\AutoContinueShowEvent"
+_ACK_EVENT_NAME = "Local\\AutoContinueAckEvent"
 
 
 class _ShowListener(QThread):
     """Waits on a shared named Win32 auto-reset event and emits
     `show_requested` when a *second* launch signals it — so double-clicking
     the exe (or re-running it) surfaces the already-running window instead
-    of a dead-end 'already running' popup. Pure ctypes; no QtNetwork (which
-    the frozen build excludes)."""
+    of a dead-end 'already running' popup. It also sets the ACK event so the
+    second launch knows a LIVE instance handled the request (a stale/leaked
+    mutex with no live owner never acks, letting the new launch take over).
+    Pure ctypes; no QtNetwork (which the frozen build excludes)."""
 
     show_requested = pyqtSignal()
 
-    def __init__(self, event_handle: int, parent=None):
+    def __init__(self, show_handle: int, ack_handle: int, parent=None):
         super().__init__(parent)
-        self._h = event_handle
+        self._h = show_handle
+        self._ack = ack_handle
         self._stop = False
 
     def run(self) -> None:
@@ -891,6 +897,9 @@ class _ShowListener(QThread):
             rc = k.WaitForSingleObject(self._h, 400)
             if rc == 0 and not self._stop:
                 self.show_requested.emit()
+                # Tell the waiting second instance a live primary exists.
+                if self._ack:
+                    k.SetEvent(self._ack)
 
     def stop(self) -> None:
         self._stop = True
@@ -1214,12 +1223,12 @@ class MainWindow(QMainWindow):
                 "Auto-Continue", "Already running — window restored.",
                 QSystemTrayIcon.MessageIcon.Information, 2500)
 
-    def attach_show_listener(self, event_handle: int) -> None:
+    def attach_show_listener(self, show_handle: int, ack_handle: int) -> None:
         """Start the single-instance 'show me' listener on the given named
-        event handle (created in main())."""
-        if not event_handle:
+        event handles (created in main())."""
+        if not show_handle:
             return
-        self._show_listener = _ShowListener(event_handle, self)
+        self._show_listener = _ShowListener(show_handle, ack_handle, self)
         self._show_listener.show_requested.connect(self._on_show_requested)
         self._show_listener.start()
 
@@ -1905,29 +1914,50 @@ def main() -> int:
 
     # Single-instance guard: two copies would each type 'continue' into the
     # same windows (double submissions) and race each other's update staging.
+    #
+    # use_last_error + proper HANDLE restype: reading the "already exists"
+    # status via a bare kernel32.GetLastError() is unreliable (an intervening
+    # ctypes/Win32 call can clobber the thread's last-error); ctypes' own
+    # last-error slot is captured atomically with the call.
     import ctypes
-    kernel32 = ctypes.windll.kernel32
-    global _INSTANCE_MUTEX  # keep the handle alive for the process lifetime
-    _INSTANCE_MUTEX = kernel32.CreateMutexW(
-        None, False, "Local\\AutoContinueGuiSingleton")
-    already_running = kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+    from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateMutexW.restype = wintypes.HANDLE
+    k.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    k.CreateEventW.restype = wintypes.HANDLE
+    k.CreateEventW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL,
+                               wintypes.LPCWSTR]
 
-    # Shared auto-reset event both instances open by name. A second launch
-    # signals it so the running instance surfaces its window (Win11 hides
-    # tray icons in the overflow flyout, making a hidden window otherwise
-    # hard to recover — a dead-end 'already running' popup didn't help).
-    show_event = kernel32.CreateEventW(None, False, False, _SHOW_EVENT_NAME)
-    if already_running:
+    global _INSTANCE_MUTEX  # keep the handle alive for the process lifetime
+    _INSTANCE_MUTEX = k.CreateMutexW(None, False, _MUTEX_NAME)
+    already_exists = ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
+
+    # Two shared auto-reset events. A second launch signals SHOW so the
+    # running instance surfaces its window (Win11 buries tray icons in the
+    # overflow flyout, making a hidden window otherwise hard to recover —
+    # a dead-end 'already running' popup didn't help). The running instance
+    # answers on ACK; a second launch that gets no ACK within 1.5 s concludes
+    # the mutex is STALE (crashed/leaked prior owner) and takes over as the
+    # primary, so a stuck mutex can never permanently brick startup.
+    show_event = k.CreateEventW(None, False, False, _SHOW_EVENT_NAME)
+    ack_event = k.CreateEventW(None, False, False, _ACK_EVENT_NAME)
+    if already_exists:
+        if ack_event:
+            k.ResetEvent(ack_event)
         if show_event:
-            kernel32.SetEvent(show_event)  # ask the running instance to show
-        return 0
+            k.SetEvent(show_event)          # ask the running instance to show
+        acked = (ack_event
+                 and k.WaitForSingleObject(ack_event, 1500) == 0)
+        if acked:
+            return 0                        # a live instance handled it
+        # No ACK → stale mutex; fall through and run as the primary.
 
     # Hiding the main window to the tray must not exit the app — the
     # watcher thread needs to keep running.
     app.setQuitOnLastWindowClosed(False)
     win = MainWindow()
     win.show()
-    win.attach_show_listener(show_event)
+    win.attach_show_listener(show_event, ack_event)
     return app.exec()
 
 
