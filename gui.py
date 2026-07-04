@@ -865,6 +865,37 @@ class Updater(QObject):
             self.download_failed.emit(f"Download failed: {type(e).__name__}: {e}")
 
 
+_SHOW_EVENT_NAME = "Local\\AutoContinueShowEvent"
+
+
+class _ShowListener(QThread):
+    """Waits on a shared named Win32 auto-reset event and emits
+    `show_requested` when a *second* launch signals it — so double-clicking
+    the exe (or re-running it) surfaces the already-running window instead
+    of a dead-end 'already running' popup. Pure ctypes; no QtNetwork (which
+    the frozen build excludes)."""
+
+    show_requested = pyqtSignal()
+
+    def __init__(self, event_handle: int, parent=None):
+        super().__init__(parent)
+        self._h = event_handle
+        self._stop = False
+
+    def run(self) -> None:
+        import ctypes
+        k = ctypes.windll.kernel32
+        while not self._stop:
+            # 400 ms timeout so stop() is honored promptly; auto-reset event
+            # clears itself when the wait succeeds (rc == WAIT_OBJECT_0 == 0).
+            rc = k.WaitForSingleObject(self._h, 400)
+            if rc == 0 and not self._stop:
+                self.show_requested.emit()
+
+    def stop(self) -> None:
+        self._stop = True
+
+
 class MainWindow(QMainWindow):
     # Signals into the watcher (auto-connected via Qt::QueuedConnection
     # because the watcher lives on a different thread).
@@ -903,6 +934,8 @@ class MainWindow(QMainWindow):
         self._model_overrides: dict = {}
         # The release dict from the latest "update available" result, if any.
         self._pending_release: Optional[dict] = None
+        # Single-instance "show me" listener thread (attached in main()).
+        self._show_listener: Optional[_ShowListener] = None
         # Theme-aware color set, plus a ring buffer of recent log entries
         # so they can be re-rendered when the user flips Win11 dark mode.
         # Must exist before _load_settings (which may emit log lines via
@@ -1153,9 +1186,42 @@ class MainWindow(QMainWindow):
             self._show_from_tray()
 
     def _show_from_tray(self) -> None:
+        # Clear the minimized bit so showNormal doesn't restore-as-minimized,
+        # then show + force to the foreground. Used both by the tray click
+        # and by a second launch signalling us to surface (single-instance).
+        self.setWindowState(
+            self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
         self.showNormal()
-        self.activateWindow()
         self.raise_()
+        self.activateWindow()
+        # Belt-and-braces foreground grab (Qt's activateWindow won't steal
+        # foreground from another process on Windows; the signalling instance
+        # is exiting so this succeeds).
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            ctypes.windll.user32.BringWindowToTop(hwnd)
+        except Exception:
+            pass
+
+    @pyqtSlot()
+    def _on_show_requested(self) -> None:
+        self._show_from_tray()
+        if self.tray is not None:
+            self.tray.showMessage(
+                "Auto-Continue", "Already running — window restored.",
+                QSystemTrayIcon.MessageIcon.Information, 2500)
+
+    def attach_show_listener(self, event_handle: int) -> None:
+        """Start the single-instance 'show me' listener on the given named
+        event handle (created in main())."""
+        if not event_handle:
+            return
+        self._show_listener = _ShowListener(event_handle, self)
+        self._show_listener.show_requested.connect(self._on_show_requested)
+        self._show_listener.start()
 
     def _quit_from_tray(self) -> None:
         # Mirrors the X-button path; closeEvent does the full shutdown.
@@ -1818,6 +1884,9 @@ class MainWindow(QMainWindow):
             self.sig_stop.emit()
         except Exception:
             pass
+        if self._show_listener is not None:
+            self._show_listener.stop()
+            self._show_listener.wait(1000)
         self._shutdown_thread(self.worker_thread)
         self._shutdown_thread(self.updater_thread)
         super().closeEvent(event)
@@ -1841,10 +1910,16 @@ def main() -> int:
     global _INSTANCE_MUTEX  # keep the handle alive for the process lifetime
     _INSTANCE_MUTEX = kernel32.CreateMutexW(
         None, False, "Local\\AutoContinueGuiSingleton")
-    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        QMessageBox.warning(
-            None, "Auto-Continue",
-            "Auto-Continue is already running — check the system tray.")
+    already_running = kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+
+    # Shared auto-reset event both instances open by name. A second launch
+    # signals it so the running instance surfaces its window (Win11 hides
+    # tray icons in the overflow flyout, making a hidden window otherwise
+    # hard to recover — a dead-end 'already running' popup didn't help).
+    show_event = kernel32.CreateEventW(None, False, False, _SHOW_EVENT_NAME)
+    if already_running:
+        if show_event:
+            kernel32.SetEvent(show_event)  # ask the running instance to show
         return 0
 
     # Hiding the main window to the tray must not exit the app — the
@@ -1852,6 +1927,7 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)
     win = MainWindow()
     win.show()
+    win.attach_show_listener(show_event)
     return app.exec()
 
 
