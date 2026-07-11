@@ -38,7 +38,7 @@ import uiautomation as auto
 
 # Bumped on every shipped build so the running version is visible in the GUI
 # title bar (and thus in the Windows Terminal window title the watchdog reads).
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 
 
 def _force_utf8_console() -> None:
@@ -74,6 +74,9 @@ def _force_utf8_console() -> None:
 #     You've hit your session limit · resets Ham (Asia/Shanghai)
 #     /up·grade to increase your usage limit.
 #
+#     You've hit your session limit · resets H:MMam (Asia/Shanghai)
+#     /up·grade or /usage-credits to finish what you're working on.
+#
 # (The examples above are deliberately de-fanged — digits replaced with H/MM
 # and a · inside "/upgrade" — so that viewing THIS file inside a watched
 # terminal can never false-trigger the detector.)
@@ -84,12 +87,21 @@ def _force_utf8_console() -> None:
 # is a real rate-limit hit and not e.g. our own test output or this script's
 # source code visible in the user's scrollback. The DOTALL `[\s\S]{0,400}`
 # lets the two lines be separated by terminal padding/whitespace.
+#
+# The follow-up wording is a moving target — Anthropic has shipped
+# `/extra-usage`, then renamed it `/usage-credits`, with the tail either
+# "to finish what you're working on" or "to increase your usage limit". So
+# after "/upgrade" we accept ANY of the known continuations (either slash
+# command, or either stable tail phrase). The separator glyph between "limit"
+# and "resets" also varies (middle dot ·, bullet operator ∙, dot operator ⋅,
+# en/em dash), so the class enumerates all of them.
 LIMIT_RE = re.compile(
-    r"You['’]ve hit your (?:\w+\s+)?limit\s*[·•‧․\-]?\s*"
+    r"You['’]ve hit your (?:\w+\s+)?limit\s*[·•‧․∙⋅⸱\-–—]?\s*"
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)"
     r"[\s\S]{0,400}?"
-    r"/upgrade\s+(?:or\s+/extra[-\s]?usage"
-    r"|to\s+increase\s+your\s+usage\s+limit)",
+    r"/upgrade\b[^\n]{0,80}?"
+    r"(?:/extra[-\s]?usage|/usage[-\s]?credits"
+    r"|increase\s+your\s+usage\s+limit|finish\s+what\s+you)",
     re.IGNORECASE,
 )
 

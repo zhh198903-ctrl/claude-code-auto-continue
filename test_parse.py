@@ -9,10 +9,27 @@ from auto_continue import (
 from datetime import datetime, timedelta
 import pytz
 
-# The two Anthropic wordings of the follow-up line seen in the wild.
+# The Anthropic wordings of the follow-up line seen in the wild. UP3 is the
+# newest (2026-07): /extra-usage was renamed /usage-credits.
 UP = "/upgrade or /extra-usage to finish what you're working on."
 UP2 = "/upgrade to increase your usage limit."
+UP3 = "/upgrade or /usage-credits to finish what you're working on."
 samples = [
+    # NEWEST wording from user's 2026-07-11 screenshot: "session limit",
+    # reset with minutes, /usage-credits follow-up. This is the exact case
+    # that previously went undetected (regex only accepted /extra-usage).
+    ("You've hit your session limit · resets 5:20am (Asia/Shanghai)\n" + UP3,
+     (5, 20, "am", "Asia/Shanghai")),
+    # /usage-credits with a whole-hour reset.
+    ("You've hit your limit · resets 9pm (Asia/Shanghai)\n" + UP3,
+     (9, 0, "pm", "Asia/Shanghai")),
+    # /usage-credits + bullet-operator separator (∙ U+2219, not the middle
+    # dot) — Claude Code emits this glyph in some builds.
+    ("You've hit your session limit ∙ resets 5:20am (Asia/Shanghai)\n" + UP3,
+     (5, 20, "am", "Asia/Shanghai")),
+    # /usage-credits + dot-operator separator (⋅ U+22C5).
+    ("You've hit your session limit ⋅ resets 3am (UTC)\n" + UP3,
+     (3, 0, "am", "UTC")),
     # Exact form from the original screenshot (whole-hour reset).
     ("You've hit your limit · resets 11pm (Asia/Shanghai)\n" + UP,
      (11, 0, "pm", "Asia/Shanghai")),
