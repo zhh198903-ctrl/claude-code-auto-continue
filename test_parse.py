@@ -4,7 +4,8 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 from auto_continue import (
     parse_limit_message, parse_retry_exhausted, parse_econnreset_stuck,
-    parse_limit_prompt, parse_oauth_expired, next_reset_datetime,
+    parse_server_error_stuck, parse_limit_prompt, parse_oauth_expired,
+    next_reset_datetime,
 )
 from datetime import datetime, timedelta
 import pytz
@@ -253,6 +254,44 @@ for i, (text, expected) in enumerate(econn_samples):
     ok = got == expected
     status = "OK " if ok else "FAIL"
     print(f"[{status}] econn sample {i}: got={got!r} expected={expected!r}")
+    if not ok:
+        failures += 1
+
+
+# ---------- parse_server_error_stuck ----------
+server_error_samples = [
+    # Exact form from the user's 2026-07-11 screenshot (Image #7).
+    ("● API Error: Server error mid-response. The response above may be "
+     "incomplete.\n✻ Sautéed for 1m 6s", True),
+    # Compact form.
+    ("API Error: Server error mid-response.", True),
+    # Trailing footer + recap (~5000 chars, wide terminal) — within the 6000
+    # network tail allowance → still current.
+    ("API Error: Server error mid-response. The response above may be "
+     "incomplete.\n" + "x" * 5000, True),
+    # Stale — buried far up in scrollback (beyond the network allowance).
+    ("API Error: Server error mid-response.\n" + "x" * 7000, False),
+    # No match.
+    ("everything fine here", False),
+    # Must NOT confuse with the connectivity error (that's econnreset's job,
+    # but neither should false-match the other).
+    ("API Error: Unable to connect to API (ECONNRESET)", False),
+    # Prose merely mentioning a server error without the "API Error:" prefix
+    # — must NOT match (avoids logs / this discussion in scrollback).
+    ("the server returned an error mid-response, retrying", False),
+    # Two markers — newer one near tail, should match.
+    ("API Error: Server error mid-response.\n...later...\n"
+     "API Error: Server error mid-response.", True),
+]
+
+print()
+print("---- parse_server_error_stuck ----")
+for i, (text, expected) in enumerate(server_error_samples):
+    got = parse_server_error_stuck(text)
+    ok = got == expected
+    status = "OK " if ok else "FAIL"
+    print(f"[{status}] server-error sample {i}: got={got!r} "
+          f"expected={expected!r}")
     if not ok:
         failures += 1
 

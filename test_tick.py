@@ -108,6 +108,8 @@ PICKER = ("What do you want to do?\n"
           "  2. Upgrade your plan\n"
           "Enter to conf" "irm · Esc to cancel")
 ECONN = "API Error: Unable to connect to API (ECONN" "RESET)"
+SERVER_ERR = ("API Error: Server error mid-resp" "onse. "
+              "The response above may be incomplete.")
 OAUTH = "OAuth token has exp" "ired · Please run /log" "in"
 
 # Base moment: 2026-07-03 10:00 UTC == 18:00 Asia/Shanghai.
@@ -269,6 +271,32 @@ SENT.clear()
 tick(states)
 check("E3 recovery clears retry state", st.retry_last_sent_utc is None
       and not st.retry_logged and not SENT)
+
+# =============================================================================
+print("---- E2: server-error mid-response gets poked like a network stall ----")
+WINDOWS[:] = [FakeWin(115, "sess-e2")]
+TEXTS.clear()
+SENT.clear()
+states = {}
+
+set_now(T0)
+TEXTS[115] = SERVER_ERR
+tick(states)
+st = states[115]
+check("E2a poke on server-error mid-response", SENT == [(115, ["continue"])])
+
+# Still cut off after retry interval (500 burst): poke again.
+SENT.clear()
+set_now(T0 + timedelta(seconds=35))
+tick(states)
+check("E2b re-poke after retry interval", SENT == [(115, ["continue"])])
+
+# A full turn completes; marker scrolls out of tail range -> retry cleared.
+TEXTS[115] = "● here is the finished answer\n" + ("z" * 7000)
+SENT.clear()
+tick(states)
+check("E2c recovery clears retry state once marker is stale",
+      st.retry_last_sent_utc is None and not st.retry_logged and not SENT)
 
 # =============================================================================
 print("---- F: oauth-expired never gets keystrokes ----")

@@ -80,7 +80,7 @@ from auto_continue import (
     APP_VERSION, LIMIT_RE, SCAN_TAIL_CHARS, find_terminal_windows,
     find_termcontrol, init_uia_thread, list_tab_titles, next_reset_datetime,
     parse_econnreset_stuck, parse_limit_message, parse_limit_prompt,
-    parse_oauth_expired, parse_retry_exhausted,
+    parse_oauth_expired, parse_retry_exhausted, parse_server_error_stuck,
     read_terminal_text, send_continue, send_text_lines,
 )
 import updater
@@ -483,12 +483,16 @@ class Watcher(QObject):
             # flavors are treated identically:
             #   a) retry banner at attempt N/N — retries exhausted
             #   b) bare `API Error: ... (E...)` / `fetch failed` — no banner
+            #   c) `API Error: Server error mid-response` — a 500 truncated
+            #      the answer; 'continue' resumes the cut-off turn
             stuck_reason = None
             if tail:
                 if parse_retry_exhausted(tail):
                     stuck_reason = "network retries exhausted"
                 elif parse_econnreset_stuck(tail):
                     stuck_reason = "network API error"
+                elif parse_server_error_stuck(tail):
+                    stuck_reason = "server error mid-response"
             if stuck_reason:
                 if (force_fire
                         or st.retry_last_sent_utc is None

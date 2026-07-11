@@ -38,7 +38,7 @@ import uiautomation as auto
 
 # Bumped on every shipped build so the running version is visible in the GUI
 # title bar (and thus in the Windows Terminal window title the watchdog reads).
-APP_VERSION = "1.0.13"
+APP_VERSION = "1.0.14"
 
 
 def _force_utf8_console() -> None:
@@ -141,6 +141,25 @@ ECONNRESET_RE = re.compile(
     r"\(\s*(?:E[A-Z0-9_]{2,}|UND_ERR_[A-Z_]+)\s*\)"
     r"|fetch\s+failed"
     r")",
+    re.IGNORECASE,
+)
+
+# Server-side 500-class error that truncates a response mid-stream:
+#     API Error: Server error mid-response. The response above may be
+#     incomplete.
+# (followed by a `✻ Sautéed for 1m 6s` completion footer — the turn ended.)
+# Unlike ECONNRESET this is NOT a connectivity failure: the request reached
+# Anthropic, but the server erred partway through streaming the answer, so
+# the turn stops with a partial response. Typing 'continue' makes Claude
+# resume from where it cut off. These 500s tend to arrive in bursts during
+# overload, so we treat it like the other network-stuck states — keep poking
+# 'continue' every retry_interval until a turn completes cleanly (the tail
+# anchor clears it once a full response scrolls the marker out of range).
+# Anchored on the fixed "API Error: Server error mid-response" sentence; the
+# `\s+`/`.` in the pattern mean THIS source line can't match itself if the
+# file is viewed inside a watched terminal.
+SERVER_ERROR_RE = re.compile(
+    r"API\s+Error:\s*Server\s+error\s+mid.response",
     re.IGNORECASE,
 )
 
@@ -459,6 +478,22 @@ def parse_econnreset_stuck(text: str) -> bool:
     return True
 
 
+def parse_server_error_stuck(text: str) -> bool:
+    """True if an `API Error: Server error mid-response` marker (a truncated
+    response) sits near the tail of the buffer — i.e. Claude's last turn was
+    cut off by a server-side 500 and needs a 'continue' to resume. Tail-
+    anchored exactly like `parse_econnreset_stuck` so a stale marker from an
+    earlier, already-resolved outage doesn't retrigger.
+    """
+    matches = list(SERVER_ERROR_RE.finditer(text))
+    if not matches:
+        return False
+    m = matches[-1]
+    if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
+        return False
+    return True
+
+
 def parse_limit_prompt(text: str) -> bool:
     """True if the interactive limit picker ("What do you want to do?" /
     "Stop and wait for limit to reset" / "Enter to confirm") is currently
@@ -764,15 +799,19 @@ def tick(states: dict[int, WindowState], args,
         # rate-limit pending/cooldown state. If the API is unreachable in
         # the middle of a 5h wait, we still want to keep re-sending
         # 'continue' to unstick Claude once the connection comes back.
-        # Two flavors of "stuck on network" we treat identically:
+        # Three flavors of "stuck / cut off" we treat identically:
         #   a) retry banner at attempt N/N — retries exhausted
         #   b) bare `API Error: ... (E...)` / `fetch failed` — no banner
+        #   c) `API Error: Server error mid-response` — a 500 truncated the
+        #      answer; 'continue' resumes it
         stuck_reason = None
         if tail:
             if parse_retry_exhausted(tail):
                 stuck_reason = "retry-exhausted"
             elif parse_econnreset_stuck(tail):
                 stuck_reason = "econnreset"
+            elif parse_server_error_stuck(tail):
+                stuck_reason = "server-error"
         if stuck_reason:
             if (st.retry_last_sent_utc is None
                     or now_utc - st.retry_last_sent_utc >= retry_interval):
