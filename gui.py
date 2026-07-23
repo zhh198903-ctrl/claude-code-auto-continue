@@ -483,8 +483,9 @@ class Watcher(QObject):
             # flavors are treated identically:
             #   a) retry banner at attempt N/N — retries exhausted
             #   b) bare `API Error: ... (E...)` / `fetch failed` — no banner
-            #   c) `API Error: Server error mid-response` — a 500 truncated
-            #      the answer; 'continue' resumes the cut-off turn
+            #   c) a server-side truncation (the "Server-error"/"Response-
+            #      stalled" mid-stream wordings) — 'continue' resumes the
+            #      cut-off turn
             stuck_reason = None
             if tail:
                 if parse_retry_exhausted(tail):
@@ -492,7 +493,7 @@ class Watcher(QObject):
                 elif parse_econnreset_stuck(tail):
                     stuck_reason = "network API error"
                 elif parse_server_error_stuck(tail):
-                    stuck_reason = "server error mid-response"
+                    stuck_reason = "response truncated mid-stream"
             if stuck_reason:
                 if (force_fire
                         or st.retry_last_sent_utc is None
@@ -909,6 +910,64 @@ class _ShowListener(QThread):
         self._stop = True
 
 
+# ===========================================================================
+# "Start with Windows" — per-user boot autostart (HKCU Run key)
+# ===========================================================================
+# One checkbox toggles a per-user HKCU\...\Run entry that relaunches us at
+# login with --minimized (straight to the tray). No admin rights needed. The
+# registry entry — not QSettings — is the source of truth, so the checkbox
+# stays honest even if the user removes it from Task Manager's Startup tab.
+
+_RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_VALUE_NAME = "Auto-Continue"
+_MINIMIZED_FLAG = "--minimized"
+
+
+def _autostart_command() -> str:
+    """Command line Windows runs at login to bring us up minimized in tray."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller onefile: sys.executable IS our exe.
+        return f'"{sys.executable}" {_MINIMIZED_FLAG}'
+    # Source checkout: relaunch the .pyw entry via pythonw (no console window).
+    entry = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "Auto-Continue.pyw")
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    if not os.path.exists(pyw):
+        pyw = sys.executable
+    return f'"{pyw}" "{entry}" {_MINIMIZED_FLAG}'
+
+
+def autostart_enabled() -> bool:
+    """True when our HKCU Run entry currently exists."""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY_PATH) as key:
+            winreg.QueryValueEx(key, _RUN_VALUE_NAME)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
+def set_autostart(enabled: bool) -> None:
+    """Add or remove the HKCU Run entry. Raises OSError on a registry failure
+    (the caller reverts the checkbox to autostart_enabled())."""
+    import winreg
+    if enabled:
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _RUN_KEY_PATH, 0,
+                                winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, _RUN_VALUE_NAME, 0, winreg.REG_SZ,
+                              _autostart_command())
+    else:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY_PATH, 0,
+                                winreg.KEY_SET_VALUE) as key:
+                winreg.DeleteValue(key, _RUN_VALUE_NAME)
+        except FileNotFoundError:
+            pass  # nothing to remove
+
+
 class MainWindow(QMainWindow):
     # Signals into the watcher (auto-connected via Qt::QueuedConnection
     # because the watcher lives on a different thread).
@@ -1047,6 +1106,18 @@ class MainWindow(QMainWindow):
         )
         self.autostart_check.toggled.connect(lambda _v: self._save_settings())
 
+        # Boot autostart (stacked under "Start on launch" in the header).
+        # Backed by the HKCU Run entry rather than QSettings.
+        self.boot_check = QCheckBox("Start with Windows")
+        self.boot_check.setToolTip(
+            "Launch Auto-Continue automatically when you sign in to "
+            "Windows, minimized to the system tray. Pair with 'Start on "
+            "launch' above for hands-off protection from boot. Adds a "
+            "per-user registry Run entry (no admin needed); uncheck to "
+            "remove it."
+        )
+        self.boot_check.toggled.connect(self._on_boot_toggled)
+
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(5, 600)
         self.interval_spin.setValue(30)
@@ -1086,7 +1157,14 @@ class MainWindow(QMainWindow):
         header.addSpacing(12)
         header.addWidget(self.dry_run_check)
         header.addWidget(self.keep_awake_check)
-        header.addWidget(self.autostart_check)
+        # Stack the boot-autostart switch directly beneath "Start on launch"
+        # — both are auto-start options, so keep them visually paired.
+        autostart_box = QVBoxLayout()
+        autostart_box.setSpacing(2)
+        autostart_box.setContentsMargins(0, 0, 0, 0)
+        autostart_box.addWidget(self.autostart_check)
+        autostart_box.addWidget(self.boot_check)
+        header.addLayout(autostart_box)
         header.addSpacing(12)
         header.addWidget(QLabel("poll"))
         header.addWidget(self.interval_spin)
@@ -1233,6 +1311,18 @@ class MainWindow(QMainWindow):
             self.tray.showMessage(
                 "Auto-Continue", "Already running — window restored.",
                 QSystemTrayIcon.MessageIcon.Information, 2500)
+
+    def notify_started_in_tray(self) -> None:
+        """Boot-launched straight into the tray (--minimized): keep the window
+        hidden and drop a one-shot balloon so the user knows we're alive. Also
+        suppresses the later first-minimize tip (this already served it)."""
+        self._notified_minimize_to_tray = True
+        if self.tray is not None:
+            self.tray.showMessage(
+                "Auto-Continue",
+                "Running in the system tray. Right-click the tray icon to "
+                "open the window or quit.",
+                QSystemTrayIcon.MessageIcon.Information, 3500)
 
     def attach_show_listener(self, show_handle: int, ack_handle: int) -> None:
         """Start the single-instance 'show me' listener on the given named
@@ -1459,7 +1549,7 @@ class MainWindow(QMainWindow):
         # → sig_set_* before the worker is even ready.
         widgets = [self.interval_spin, self.buffer_spin, self.retry_spin,
                    self.dry_run_check, self.keep_awake_check,
-                   self.autostart_check]
+                   self.autostart_check, self.boot_check]
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -1477,6 +1567,10 @@ class MainWindow(QMainWindow):
             self.autostart_check.setChecked(
                 self.settings.value("autostart", True, type=bool)
             )
+            # Boot-autostart is backed by the HKCU Run entry, not QSettings —
+            # read the registry so the checkbox mirrors reality even if the
+            # user toggled it from Task Manager's Startup tab.
+            self.boot_check.setChecked(autostart_enabled())
             excl = self.settings.value("excluded", [], type=list) or []
             # Normalize through title_key — migrates raw titles persisted
             # by older versions (exclusion used to break when the WT
@@ -1840,6 +1934,25 @@ class MainWindow(QMainWindow):
             self._save_settings()
             self._append_log("info", f"un-excluded {key!r}")
 
+    @pyqtSlot(bool)
+    def _on_boot_toggled(self, on: bool) -> None:
+        # Registry write can fail (locked-down policy, AV); if it does, log it
+        # and snap the checkbox back to the registry's real state so the UI
+        # never claims a startup entry exists when it doesn't.
+        try:
+            set_autostart(on)
+        except OSError as e:
+            self._append_log(
+                "err", f"couldn't update Windows startup entry: {e}")
+            self.boot_check.blockSignals(True)
+            self.boot_check.setChecked(autostart_enabled())
+            self.boot_check.blockSignals(False)
+            return
+        self._append_log(
+            "info",
+            "will start with Windows, minimized to the tray" if on
+            else "will no longer start with Windows")
+
     # ---- Keep-awake (SetThreadExecutionState) ---------------------------
 
     # When ON we register CONTINUOUS | SYSTEM_REQUIRED | AWAYMODE_REQUIRED.
@@ -1967,7 +2080,17 @@ def main() -> int:
     # watcher thread needs to keep running.
     app.setQuitOnLastWindowClosed(False)
     win = MainWindow()
-    win.show()
+    # --minimized (used by the "Start with Windows" boot entry) brings the app
+    # up straight in the tray with no window on screen. Falls back to a normal
+    # minimized window if no system tray is available.
+    start_minimized = any(a in ("--minimized", "--min", "--tray")
+                          for a in sys.argv[1:])
+    if start_minimized and win.tray is not None:
+        win.notify_started_in_tray()
+    elif start_minimized:
+        win.showMinimized()
+    else:
+        win.show()
     win.attach_show_listener(show_event, ack_event)
     return app.exec()
 

@@ -38,7 +38,7 @@ import uiautomation as auto
 
 # Bumped on every shipped build so the running version is visible in the GUI
 # title bar (and thus in the Windows Terminal window title the watchdog reads).
-APP_VERSION = "1.0.14"
+APP_VERSION = "1.0.15"
 
 
 def _force_utf8_console() -> None:
@@ -144,22 +144,28 @@ ECONNRESET_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Server-side 500-class error that truncates a response mid-stream:
-#     API Error: Server error mid-response. The response above may be
-#     incomplete.
-# (followed by a `✻ Sautéed for 1m 6s` completion footer — the turn ended.)
-# Unlike ECONNRESET this is NOT a connectivity failure: the request reached
-# Anthropic, but the server erred partway through streaming the answer, so
-# the turn stops with a partial response. Typing 'continue' makes Claude
-# resume from where it cut off. These 500s tend to arrive in bursts during
-# overload, so we treat it like the other network-stuck states — keep poking
-# 'continue' every retry_interval until a turn completes cleanly (the tail
-# anchor clears it once a full response scrolls the marker out of range).
-# Anchored on the fixed "API Error: Server error mid-response" sentence; the
-# `\s+`/`.` in the pattern mean THIS source line can't match itself if the
-# file is viewed inside a watched terminal.
+# Server-side truncation: a response is cut off partway through streaming,
+# so the turn ends with a partial answer that 'continue' can resume. Two
+# leading wordings seen so far — the 500-class "Server-error" one, and a
+# later "Response-stalled" one — both closing with the same "…may be
+# incomplete" footer sentence (plus a `✻ Sautéed for 1m 6s`-style completion
+# marker). Unlike ECONNRESET this is NOT a connectivity failure: the request
+# reached Anthropic, but the server erred / stalled partway through streaming,
+# so the turn stops early. Typing 'continue' makes Claude resume from where it
+# cut off. These arrive in bursts during overload, so we treat them like the
+# other network-stuck states — keep poking 'continue' every retry_interval
+# until a turn completes cleanly (the tail anchor clears the marker once a
+# full response scrolls it out of range).
+# The regex matches either known leading phrase OR — as a forward-compat net
+# for future re-wordings — any `API Error` line ending in that shared footer.
+# It uses \s+ / . (and the prose above avoids the verbatim strings) so this
+# source can't self-trigger in a watched terminal.
 SERVER_ERROR_RE = re.compile(
-    r"API\s+Error:\s*Server\s+error\s+mid.response",
+    r"API\s+Error:\s*(?:"
+    r"Server\s+error\s+mid.response"        # 500-class truncation
+    r"|Response\s+stalled\s+mid.stream"     # later stream-stall wording
+    r"|[\s\S]{0,80}?The\s+response\s+above\s+may\s+be\s+incomplete"
+    r")",
     re.IGNORECASE,
 )
 
@@ -479,11 +485,13 @@ def parse_econnreset_stuck(text: str) -> bool:
 
 
 def parse_server_error_stuck(text: str) -> bool:
-    """True if an `API Error: Server error mid-response` marker (a truncated
-    response) sits near the tail of the buffer — i.e. Claude's last turn was
-    cut off by a server-side 500 and needs a 'continue' to resume. Tail-
-    anchored exactly like `parse_econnreset_stuck` so a stale marker from an
-    earlier, already-resolved outage doesn't retrigger.
+    """True if a server-side truncation marker sits near the tail of the
+    buffer — the response was cut off mid-stream (the 500 "Server-error"
+    wording or the later "Response-stalled" one, both closing with the shared
+    "…may be incomplete" footer), so Claude's last turn ended early and needs
+    a 'continue' to resume. Tail-anchored exactly like `parse_econnreset_stuck`
+    so a stale marker from an earlier, already-resolved outage doesn't
+    retrigger.
     """
     matches = list(SERVER_ERROR_RE.finditer(text))
     if not matches:
@@ -802,8 +810,8 @@ def tick(states: dict[int, WindowState], args,
         # Three flavors of "stuck / cut off" we treat identically:
         #   a) retry banner at attempt N/N — retries exhausted
         #   b) bare `API Error: ... (E...)` / `fetch failed` — no banner
-        #   c) `API Error: Server error mid-response` — a 500 truncated the
-        #      answer; 'continue' resumes it
+        #   c) a server-side truncation — the "Server-error"/"Response-
+        #      stalled" mid-stream wordings; 'continue' resumes the partial turn
         stuck_reason = None
         if tail:
             if parse_retry_exhausted(tail):

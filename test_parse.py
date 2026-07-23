@@ -282,6 +282,18 @@ server_error_samples = [
     # Two markers — newer one near tail, should match.
     ("API Error: Server error mid-response.\n...later...\n"
      "API Error: Server error mid-response.", True),
+    # 2026-07-23 re-wording (user Image #1): same truncation class, new
+    # leading phrase "Response stalled mid-stream" + the shared footer.
+    ("● API Error: Response stalled mid-stream. The response above may be "
+     "incomplete.\n※ Baked for 26m 35s", True),
+    # Compact stalled form (no footer).
+    ("API Error: Response stalled mid-stream.", True),
+    # Forward-compat: an unseen leading phrase, but the shared footer within
+    # the same `API Error` line still classifies it as a truncation.
+    ("API Error: Streaming interrupted. The response above may be "
+     "incomplete.", True),
+    # Stale stalled marker buried far up scrollback (beyond the allowance).
+    ("API Error: Response stalled mid-stream.\n" + "x" * 7000, False),
 ]
 
 print()
