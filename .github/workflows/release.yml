@@ -35,6 +35,29 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
 
+      - name: Verify APP_VERSION matches the tag
+        # The updater compares version strings alone, so shipping an exe whose
+        # APP_VERSION disagrees with its tag is silently unfixable: users on a
+        # build carrying the same number never see the release as newer and
+        # never update. Fail here rather than publish that.
+        shell: python
+        run: |
+          import os, re, sys
+          tag = os.environ["TAG"].lstrip("vV")
+          src = open("auto_continue.py", encoding="utf-8").read()
+          m = re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', src, re.M)
+          if not m:
+              sys.exit("APP_VERSION not found in auto_continue.py")
+          got = m.group(1)
+          print(f"tag={tag!r}  APP_VERSION={got!r}")
+          if got != tag:
+              sys.exit(
+                  f"APP_VERSION ({got}) != release tag ({tag}). Bump "
+                  f"APP_VERSION in the release commit, then re-run.")
+          print("version check OK")
+        env:
+          TAG: ${{ inputs.tag }}
+
       - name: Unit tests
         run: |
           python test_parse.py

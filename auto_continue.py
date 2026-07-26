@@ -38,6 +38,16 @@ import uiautomation as auto
 
 # Bumped on every shipped build so the running version is visible in the GUI
 # title bar (and thus in the Windows Terminal window title the watchdog reads).
+#
+# BUMP THIS ONLY IN THE RELEASE COMMIT — never at the start of a dev cycle.
+# The updater compares version strings alone, so a locally-built dev exe that
+# already carries the upcoming number is a trap: `is_newer("1.0.16", "1.0.16")`
+# is False, so that build reports "up to date" forever and NEVER updates to the
+# real release. It happened — a dev exe built 2026-07-25 claimed v1.0.16 a day
+# before v1.0.16 shipped, and would have silently kept running unreviewed code.
+# A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
+# 1.0.17 compare equal. Leave this at the LAST RELEASED version while
+# developing; release.yml refuses to publish if it disagrees with the tag.
 APP_VERSION = "1.0.16"
 
 
