@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import html
 import os
+import re as _re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -70,18 +71,23 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QAction, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QHBoxLayout,
-    QHeaderView, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QPushButton, QSpinBox, QStyle, QSystemTrayIcon, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
+    QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
+    QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from auto_continue import (
-    APP_VERSION, LIMIT_RE, SCAN_TAIL_CHARS, find_terminal_windows,
-    find_termcontrol, init_uia_thread, list_tab_titles, next_reset_datetime,
-    parse_econnreset_stuck, parse_limit_message, parse_limit_prompt,
-    parse_oauth_expired, parse_retry_exhausted, parse_server_error_stuck,
-    read_terminal_text, send_continue, send_text_lines,
+    APP_VERSION, MAX_POST_MATCH_TAIL, NETWORK_POST_MATCH_TAIL,
+    PROMPT_POST_MATCH_TAIL, SCAN_TAIL_CHARS, SWITCH_POST_MATCH_TAIL,
+    TRIGGER_DEFAULTS,
+    TRIGGER_SPECS, compile_trigger_patterns, find_terminal_windows,
+    init_uia_thread, list_tab_titles, next_reset_datetime,
+    parse_econnreset_stuck, parse_fable_refusal, parse_limit_message,
+    parse_limit_prompt, parse_oauth_expired, parse_retry_exhausted,
+    parse_server_error_stuck, parse_switch_model_prompt, read_terminal_text,
+    send_continue, send_keys, send_text_lines,
 )
 import updater
 
@@ -108,12 +114,14 @@ EFFORT_LABEL = {
 # `/model` picker (Default / Sonnet / Haiku). The first sentinel means
 # "don't send /model, leave the session on whatever model it's already on".
 MODEL_NONE = ""
-MODEL_LEVELS = [MODEL_NONE, "default", "sonnet", "haiku"]
+MODEL_LEVELS = [MODEL_NONE, "default", "opus", "sonnet", "haiku", "fable"]
 MODEL_LABEL = {
     MODEL_NONE: "(none)",
     "default": "default",
+    "opus": "opus",
     "sonnet": "sonnet",
     "haiku": "haiku",
+    "fable": "fable",
 }
 
 
@@ -121,8 +129,83 @@ def title_key(title: str) -> str:
     """Strip the leading WT spinner glyph + whitespace so the per-window
     settings (effort, exclusion) survive title churn while a session is
     actively running."""
-    import re as _re
     return _re.sub(r"^[^\w]+", "", title or "").strip()
+
+
+# Fable recovery is an editable "step script" — one step per line:
+#   plain text (e.g. /model opus, continue) → type it + Enter
+#   <confirm> → wait for the "Switch model?" dialog, press Enter (= Yes)
+#   <esc>     → press ESC to surface a QUEUED switch dialog — but ONLY if one
+#               isn't already showing (ESC on an open dialog cancels it). Needed
+#               when the session is still busy on Opus; a no-op when it's idle
+#               (the dialog already popped from /model).
+#   <enter>   → press a bare Enter
+#   <wait> / <wait:N> → wait N seconds (bare <wait> uses the configured Delay)
+# Default flow: switch to Opus (ESC if the turn is busy) + confirm + continue
+# → run on Opus for <wait> seconds → switch back to Fable (ESC if busy) +
+# confirm + continue. EITHER /model can queue behind a running turn and not pop
+# the dialog; <esc> surfaces it, and it's skipped when a dialog is already up.
+DEFAULT_FABLE_STEPS = (
+    "/model opus\n"
+    "<esc>\n"
+    "<confirm>\n"
+    "continue\n"
+    "<wait>\n"
+    "/model fable\n"
+    "<esc>\n"
+    "<confirm>\n"
+    "continue"
+)
+SWITCH_SETTLE_S = 10       # if no dialog within this after a step, move on
+FABLE_RETICK_MS = 6000     # fast follow-up tick while a recovery is running
+# Every step is bounded. Without these a recovery can wedge a window: the
+# confirm step would press Enter on every tick for as long as the dialog text
+# stays in range, a <wait> would never expire while a stale network error sits
+# in the tail, and a failed send would advance as if it had succeeded.
+FABLE_CONFIRM_MAX_S = 30   # hard deadline for <confirm>, even after a dialog
+FABLE_KEY_GAP_S = 3        # min gap between repeated Enters on one dialog
+FABLE_SEND_RETRIES = 3     # re-attempts when a send can't reach foreground
+FABLE_WAIT_MAX_MULT = 4    # <wait> can stretch to N× on stalls, then gives up
+FABLE_STALE_RUN_S = 900    # a run older than this is abandoned, not resumed
+FABLE_MAX_RUNS = 2         # consecutive recoveries before we stop retrying
+
+
+def _fable_reset(st) -> None:
+    """Return a window to 'no recovery in flight'. Deliberately leaves
+    `fable_handled` / `fable_runs` alone — those track whether we already
+    tried for the CURRENT notice and are cleared only when it clears."""
+    st.fable_step = -1
+    st.fable_step_at = None
+    st.fable_dlg_seen = False
+    st.fable_tries = 0
+    st.fable_wait_from = None
+    st.fable_last_key_at = None
+
+
+def _parse_recovery_steps(text: str) -> list:
+    """Parse the recovery step-script into a list of (kind, arg) tuples."""
+    steps = []
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low == "<confirm>":
+            steps.append(("confirm", None))
+        elif low == "<esc>":
+            steps.append(("esc", None))
+        elif low == "<enter>":
+            steps.append(("enter", None))
+        elif low == "<wait>":
+            steps.append(("wait", None))
+        elif low.startswith("<wait:") and low.endswith(">"):
+            try:
+                steps.append(("wait", max(0, int(low[6:-1]))))
+            except ValueError:
+                steps.append(("wait", None))
+        else:
+            steps.append(("send", s))
+    return steps
 
 
 # ===========================================================================
@@ -138,6 +221,7 @@ ST_COOLDOWN = "cooldown"  # Inside post-send cooldown window.
 ST_EXCLUDED = "excluded"  # User chose to ignore this window.
 ST_RETRY = "retry"        # Network retries exhausted, resending continue.
 ST_PROMPT = "prompt"      # Limit picker open, confirming with Enter.
+ST_FABLE = "fable"        # Recovering from a Fable safeguard block.
 
 
 @dataclass
@@ -174,6 +258,15 @@ class _WState:
     # table; warn-once flag for the log.
     tab_count: int = 1
     tabs_warned: bool = False
+    # Fable refusal-recovery bookkeeping (opt-in windows). Step-script driven.
+    fable_step: int = -1                          # -1 idle, else step index
+    fable_step_at: Optional[datetime] = None      # when the current step began
+    fable_dlg_seen: bool = False                  # confirmed a Switch dialog
+    fable_handled: bool = False                   # latch (until notice clears)
+    fable_tries: int = 0                          # failed sends on this step
+    fable_wait_from: Optional[datetime] = None    # absolute <wait> start
+    fable_last_key_at: Optional[datetime] = None  # rate-limit repeated Enter
+    fable_runs: int = 0                           # recoveries since idle
 
 
 class Watcher(QObject):
@@ -203,6 +296,23 @@ class Watcher(QObject):
         self._buffer = 20
         self._retry_interval = 30
         self._dry_run = False
+
+        # Fable refusal-recovery config (opt-in per window; see AdvancedDialog).
+        self._fable_enabled = False
+        self._fable_delay = 180
+        self._fable_steps = _parse_recovery_steps(DEFAULT_FABLE_STEPS)
+        self._fable_windows: set[str] = set()
+        self._fable_all_windows = True   # eligible on every watched window
+
+        # User overrides for the detection regexes (Advanced → Triggers).
+        # Only keys the user actually changed (and that validated) live here;
+        # a missing key means "pass None" → the parser uses its built-in
+        # default. Written on the worker thread via set_trigger_patterns.
+        self._patterns: dict = {}
+
+        # Earliest pending fast-retick, so N recovering windows still
+        # produce ONE timer instead of N (which compounded geometrically).
+        self._retick_at: Optional[datetime] = None
 
         # User commands accumulated between ticks. Each maps hwnd → True.
         self._cmd_fire_now: set[int] = set()
@@ -267,6 +377,60 @@ class Watcher(QObject):
             str(k): str(v) for k, v in overrides.items() if v
         }
 
+    @pyqtSlot(dict)
+    def set_fable_config(self, cfg: dict) -> None:
+        # Every field is defensively coerced: this dict round-trips through
+        # QSettings as JSON, so a hand-edited or truncated store can deliver
+        # any type. A bad value must fall back to the default, never raise —
+        # this runs on the worker thread and an exception here would take the
+        # whole watch loop down.
+        was_on = self._fable_enabled
+        self._fable_enabled = bool(cfg.get("enabled", False))
+        try:
+            self._fable_delay = max(1, int(cfg.get("delay", 180)))
+        except (TypeError, ValueError):
+            self._fable_delay = 180
+        steps_src = cfg.get("steps")
+        if not isinstance(steps_src, str) or not steps_src.strip():
+            steps_src = DEFAULT_FABLE_STEPS
+        self._fable_steps = _parse_recovery_steps(steps_src)
+        self._fable_all_windows = bool(cfg.get("all_windows", True))
+        wins = cfg.get("windows")
+        if not isinstance(wins, (list, tuple, set)):
+            wins = []
+        self._fable_windows = {
+            title_key(str(t)) for t in wins if title_key(str(t))
+        }
+        # A live edit can shorten the step script while a recovery is mid-run
+        # (index would point past the end), and switching the feature OFF must
+        # not leave a half-finished run armed to resume — hours later, into a
+        # session that has long since moved on.
+        n = len(self._fable_steps)
+        turned_off = was_on and not self._fable_enabled
+        for st in self._states.values():
+            if turned_off or st.fable_step >= n:
+                _fable_reset(st)
+
+    @pyqtSlot(dict)
+    def set_trigger_patterns(self, overrides: dict) -> None:
+        """Install user regex overrides for the detection patterns. Invalid
+        entries are rejected (the built-in default stays live) and reported —
+        a trigger that silently stops matching is exactly the failure this
+        feature exists to fix, so failing loud beats failing open."""
+        try:
+            patterns, errors = compile_trigger_patterns(overrides or {})
+        except Exception as e:                    # never kill the worker
+            self.log.emit("err", f"trigger patterns not applied: {e}")
+            return
+        self._patterns = patterns
+        for msg in errors:
+            self.log.emit("err", msg)
+        if patterns:
+            self.log.emit(
+                "info",
+                "custom trigger pattern(s) active: "
+                + ", ".join(sorted(patterns)))
+
     # ---- user actions per row -------------------------------------------
 
     @pyqtSlot(int)
@@ -325,6 +489,13 @@ class Watcher(QObject):
         self._running = False
         if self._timer is not None:
             self._timer.stop()
+        # Disarm any in-flight Fable recovery. Without this a run parked on
+        # <wait> resumes mid-script whenever the user presses Start again —
+        # possibly hours later — and types /model + Enter into a session that
+        # has moved on. Stopping must mean stopping.
+        self._retick_at = None
+        for st in self._states.values():
+            _fable_reset(st)
         self.running_changed.emit(False)
         self.log.emit("info", "watcher stopped")
 
@@ -340,6 +511,40 @@ class Watcher(QObject):
             self._tick()
         except Exception as e:
             self.log.emit("err", f"tick error: {type(e).__name__}: {e}")
+
+    def _retick_soon(self, ms: int = FABLE_RETICK_MS) -> None:
+        """Schedule a quick follow-up tick so a multi-step Fable recovery
+        (confirm dialog → continue, timed waits) progresses in seconds rather
+        than waiting a full poll interval. Runs on the worker thread's own
+        event loop.
+
+        COALESCED on purpose. This is called once per in-recovery window per
+        tick, and each scheduled tick schedules more: with two windows
+        recovering, one tick queues two timers, each of which queues two —
+        2^k pending ticks, every one of them a full UIA scan that also
+        advances the step machine. Keeping a single earliest-deadline timer
+        makes the retick rate independent of how many windows are recovering.
+        """
+        try:
+            now = datetime.now(pytz.UTC)
+            target = now + timedelta(milliseconds=int(ms))
+            if (self._retick_at is not None
+                    and self._retick_at <= target
+                    and self._retick_at >= now):
+                return                       # a sooner tick is already pending
+            self._retick_at = target
+            QTimer.singleShot(int(ms), self._retick_fire)
+        except Exception:
+            pass
+
+    def _retick_fire(self) -> None:
+        """Target of the coalescing timer. Only a tick that the retick timer
+        itself triggered may clear the pending marker — clearing it at the top
+        of every _tick (including the periodic poll) would let each poll queue
+        a fresh self-sustaining chain, which is the accumulation the
+        coalescing exists to prevent."""
+        self._retick_at = None
+        self._tick_safely()
 
     def _tick(self) -> None:
         now = datetime.now(pytz.UTC)
@@ -430,8 +635,264 @@ class Watcher(QObject):
             tail = text[-SCAN_TAIL_CHARS:] if text else ""
             dr = "[dry-run] " if self._dry_run else ""
 
+            # Isolated: this is the only block driven by user-authored
+            # free text (the recovery step script). An exception escaping
+            # here would abort the WHOLE tick, so every window enumerated
+            # after this one would silently stop being watched — with the
+            # only symptom a single 'tick error' log line.
+            try:
+                # 0.53. Fable refusal-recovery (opt-in windows). When Fable's
+                # safeguards block a turn the session stalls ON Fable. Recovery
+                # runs the editable step-script (self._fable_steps): type /model,
+                # confirm the "Switch model?" dialog, ESC to surface it, timed
+                # waits, continue. Targeting is per-window — every send goes to
+                # THIS window `w`, so a window with no notice is never switched
+                # even in all-windows mode. While a recovery runs (or the notice
+                # lingers, handled) the block `continue`s, so the outer continue /
+                # limit / retry logic never touches a Fable-stalled window.
+                _fable_ok = (self._fable_all_windows
+                             or title_key(title) in self._fable_windows)
+                if self._fable_enabled and _fable_ok:
+                    steps = self._fable_steps
+                    if 0 <= st.fable_step < len(steps):
+                        # Abandon a run parked too long. A window can drop out
+                        # of this block entirely (title drift, with per-window
+                        # opt-in), freezing fable_step mid-script; when it
+                        # drifts back hours later the run would otherwise
+                        # resume and type /model + Enter into a session that
+                        # moved on long ago.
+                        if (st.fable_step_at is not None
+                                and now - st.fable_step_at
+                                >= timedelta(seconds=FABLE_STALE_RUN_S)):
+                            self.log.emit(
+                                "warn",
+                                f"Fable-recover on {title!r}: run went stale; "
+                                f"abandoning rather than resuming mid-script")
+                            _fable_reset(st)
+                            st.fable_handled = True
+                            st.status = ST_FABLE
+                            continue
+                        kind, arg = steps[st.fable_step]
+
+                        # <wait> does NOT own the window: it lets the OUTER
+                        # continue / limit logic keep the fallback model unstuck
+                        # (we don't duplicate that), and a network stall RESETS the
+                        # countdown so the wait is N seconds of real run time.
+                        if kind == "wait":
+                            secs = arg if arg is not None else self._fable_delay
+                            if st.fable_wait_from is None:
+                                st.fable_wait_from = st.fable_step_at or now
+                            stuck = bool(tail and (
+                                parse_retry_exhausted(
+                                    tail, self._patterns.get("retry"))
+                                or parse_econnreset_stuck(
+                                    tail, self._patterns.get("econnreset"))
+                                or parse_server_error_stuck(
+                                    tail, self._patterns.get("server_error"))))
+                            # A stall resets the countdown so <wait> measures real
+                            # run time — but CAPPED: a stale error line that never
+                            # scrolls away would otherwise strand the session on
+                            # the fallback model forever, silently.
+                            capped = (now - st.fable_wait_from
+                                      >= timedelta(seconds=secs
+                                                   * FABLE_WAIT_MAX_MULT))
+                            if stuck and not capped:
+                                st.fable_step_at = now   # reset; outer resends continue
+                            elif (capped
+                                  or (st.fable_step_at is not None
+                                      and now - st.fable_step_at
+                                      >= timedelta(seconds=secs))):
+                                if capped and stuck:
+                                    self.log.emit(
+                                        "warn",
+                                        f"Fable-recover on {title!r}: wait capped "
+                                        f"after repeated stalls; moving on")
+                                st.fable_step += 1        # wait done → next step
+                                st.fable_step_at = now
+                                st.fable_dlg_seen = False
+                                st.fable_wait_from = None
+                                st.fable_tries = 0
+                                st.status = ST_FABLE
+                                self._retick_soon()
+                                continue
+                            st.status = ST_FABLE
+                            self._retick_soon(15000)
+                            # Fall through → the outer network/limit handlers keep
+                            # the FALLBACK model unstuck during the wait (we don't
+                            # duplicate that logic). They may overwrite `status`;
+                            # that's cosmetic and `fable_step` still owns the run.
+
+                        else:
+                            # send / enter / esc / confirm own the window (skip outer).
+                            # Every send is CHECKED: send_text_lines / send_keys
+                            # return False when they can't bring the window to the
+                            # foreground (the guard against typing into whatever
+                            # the user is using). Advancing on a failed send is how
+                            # you end up pressing ESC with no dialog open and then
+                            # 'continue'-ing on the model you meant to leave.
+                            advance = False
+                            failed = False
+                            if kind == "send":
+                                self.log.emit(
+                                    "fire", f"{dr}Fable-recover → {title!r}: {arg!r}")
+                                if send_text_lines(w, [arg], dry_run=self._dry_run):
+                                    advance = True
+                                else:
+                                    failed = True
+                            elif kind == "enter":
+                                if send_text_lines(w, [""], dry_run=self._dry_run):
+                                    advance = True
+                                else:
+                                    failed = True
+                            elif kind == "esc":
+                                if tail and parse_switch_model_prompt(
+                                        tail,
+                                        self._patterns.get("switch_model")):
+                                    # Dialog already up — ESC would CANCEL it. Skip;
+                                    # the next <confirm> accepts the showing dialog.
+                                    advance = True
+                                elif (st.fable_step_at is not None
+                                      and now - st.fable_step_at
+                                      >= timedelta(seconds=4)):
+                                    # No dialog after a brief settle → the switch is
+                                    # queued behind a busy turn; ESC surfaces it.
+                                    self.log.emit(
+                                        "fire",
+                                        f"{dr}Fable-recover → {title!r}: ESC "
+                                        f"(surface switch dialog)")
+                                    if send_keys(w, "{Esc}", dry_run=self._dry_run):
+                                        advance = True
+                                    else:
+                                        failed = True
+                                # else: wait a moment for an idle dialog to appear
+                            elif kind == "confirm":
+                                dlg_up = bool(tail and parse_switch_model_prompt(
+                                    tail, self._patterns.get("switch_model")))
+                                overdue = (
+                                    st.fable_step_at is not None
+                                    and now - st.fable_step_at
+                                    >= timedelta(seconds=FABLE_CONFIRM_MAX_S))
+                                if st.fable_dlg_seen:
+                                    # EXACTLY ONE Enter per dialog, ever. The
+                                    # confirmed modal's text STAYS in the
+                                    # scrollback, so "the pattern still
+                                    # matches" is not evidence the modal is
+                                    # still open — measured live, re-pressing
+                                    # on that signal fired 8 Enters for one
+                                    # dialog, and every extra Enter submits
+                                    # whatever sits in the user's input box as
+                                    # a prompt. Settle briefly, then move on.
+                                    if (st.fable_last_key_at is not None
+                                            and now - st.fable_last_key_at
+                                            >= timedelta(
+                                                seconds=FABLE_KEY_GAP_S)):
+                                        advance = True
+                                elif overdue:
+                                    advance = True   # no dialog ever appeared
+                                elif dlg_up:
+                                    self.log.emit(
+                                        "fire",
+                                        f"{dr}Fable-recover: confirming Switch-model "
+                                        f"(Yes) → {title!r}")
+                                    if send_text_lines(w, [""],
+                                                       dry_run=self._dry_run):
+                                        st.fable_dlg_seen = True
+                                        st.fable_last_key_at = now
+                                    else:
+                                        failed = True
+                                elif (st.fable_step_at is not None
+                                      and now - st.fable_step_at
+                                      >= timedelta(seconds=SWITCH_SETTLE_S)):
+                                    advance = True      # no dialog appeared
+                            else:
+                                advance = True          # unknown step → skip
+
+                            if failed:
+                                # Retry the same step next tick, bounded so a
+                                # window we can never focus doesn't spin forever.
+                                st.fable_tries += 1
+                                if st.fable_tries >= FABLE_SEND_RETRIES:
+                                    self.log.emit(
+                                        "warn",
+                                        f"Fable-recover on {title!r}: could not "
+                                        f"send (window wouldn't come forward); "
+                                        f"abandoning this recovery")
+                                    _fable_reset(st)
+                                    st.fable_handled = True
+                            elif advance:
+                                st.fable_step += 1
+                                st.fable_step_at = now
+                                st.fable_dlg_seen = False
+                                st.fable_tries = 0
+                                st.fable_wait_from = None
+                                st.fable_last_key_at = None
+                                if st.fable_step >= len(steps):
+                                    _fable_reset(st)
+                                    st.fable_handled = True
+                                    self.log.emit(
+                                        "info", f"Fable-recover done → {title!r}")
+                            st.status = ST_FABLE
+                            self._retick_soon()
+                            continue
+
+                    # Detection runs ONLY when no recovery is in flight. During a
+                    # <wait> the block falls through to here, and the safeguard
+                    # notice is still on screen (the fallback model has barely
+                    # printed anything yet) — re-entering would restart the script
+                    # from step 0, ESC-interrupting the very turn it just started,
+                    # every few seconds, forever.
+                    if st.fable_step < 0:
+                        fable_hit = bool(
+                            tail and parse_fable_refusal(
+                                tail, self._patterns.get("fable")))
+                        if not fable_hit:
+                            # Notice gone → the recovery worked. Re-arm for next time.
+                            st.fable_handled = False
+                            st.fable_runs = 0
+                        elif not st.fable_handled and steps:
+                            if st.fable_runs >= FABLE_MAX_RUNS:
+                                # The script ends by returning to Fable and
+                                # retrying the SAME message Fable already refused,
+                                # so a second refusal is expected. Retrying without
+                                # bound would loop model-switches all night.
+                                if not st.fable_handled:
+                                    self.log.emit(
+                                        "warn",
+                                        f"Fable safeguard on {title!r} again after "
+                                        f"{st.fable_runs} recoveries — giving up "
+                                        f"on this message")
+                                st.fable_handled = True
+                            else:
+                                st.fable_runs += 1
+                                self.log.emit(
+                                    "fire",
+                                    f"{dr}Fable safeguard on {title!r}; running "
+                                    f"recovery ({len(steps)} steps)")
+                                _fable_reset(st)
+                                st.fable_step = 0
+                                st.fable_step_at = now
+                                st.status = ST_FABLE
+                                self._retick_soon()
+                                continue
+                        # Notice lingers but already handled: show it in the table,
+                        # then FALL THROUGH. Owning the window here used to skip the
+                        # limit / retry / oauth handlers below, so a session that
+                        # ended on a lingering notice went permanently unwatched —
+                        # the exact overnight stall this tool exists to prevent.
+                        if st.fable_handled:
+                            st.status = ST_FABLE
+
+            except Exception as e:
+                self.log.emit(
+                    'err',
+                    f'Fable-recover error on {title!r}: '
+                    f'{type(e).__name__}: {e}; disabling it for this window')
+                _fable_reset(st)
+                st.fable_handled = True
+
             # 0.52. Dead-session states 'continue' can't fix: warn once.
-            if tail and parse_oauth_expired(tail):
+            if tail and parse_oauth_expired(
+                    tail, self._patterns.get("oauth")):
                 if not st.oauth_logged:
                     self.log.emit(
                         "warn",
@@ -449,7 +910,9 @@ class Watcher(QObject):
             # regular banner (with the reset time) appear — which the flow
             # below then picks up on the next tick. Does NOT touch
             # last_sent_utc: the banner must not be swallowed by cooldown.
-            if tail and parse_limit_prompt(tail):
+            if tail and parse_limit_prompt(
+                    tail, self._patterns.get("limit_prompt"),
+                    self._patterns.get("limit")):
                 if (force_fire
                         or st.prompt_last_sent_utc is None
                         or now - st.prompt_last_sent_utc >= retry_interval):
@@ -488,11 +951,14 @@ class Watcher(QObject):
             #      cut-off turn
             stuck_reason = None
             if tail:
-                if parse_retry_exhausted(tail):
+                if parse_retry_exhausted(
+                        tail, self._patterns.get("retry")):
                     stuck_reason = "network retries exhausted"
-                elif parse_econnreset_stuck(tail):
+                elif parse_econnreset_stuck(
+                        tail, self._patterns.get("econnreset")):
                     stuck_reason = "network API error"
-                elif parse_server_error_stuck(tail):
+                elif parse_server_error_stuck(
+                        tail, self._patterns.get("server_error")):
                     stuck_reason = "response truncated mid-stream"
             if stuck_reason:
                 if (force_fire
@@ -559,7 +1025,8 @@ class Watcher(QObject):
             in_cooldown = (st.last_sent_utc is not None
                            and now - st.last_sent_utc < cooldown)
             if tail and not in_cooldown:
-                parsed = parse_limit_message(tail)
+                parsed = parse_limit_message(
+                    tail, self._patterns.get("limit"))
                 if (parsed and parsed != st.reset_key
                         and parsed != st.fired_key):
                     # `fired_key` blocks the stale case: a message we
@@ -611,7 +1078,8 @@ class Watcher(QObject):
                     # and a redundant 'continue' would start an unwanted
                     # turn. (Forced fires skip this check by design.)
                     if (not force_fire and tail
-                            and parse_limit_message(tail) is None):
+                            and parse_limit_message(
+                                tail, self._patterns.get("limit")) is None):
                         self.log.emit(
                             "info",
                             f"limit message gone on {title!r} before fire; "
@@ -705,8 +1173,9 @@ class Watcher(QObject):
             })
         # Stable ordering: retry (network down) / limit picker are the most
         # urgent, then rate-limit pending, then idle, then excluded.
-        order = {ST_RETRY: 0, ST_PROMPT: 1, ST_FIRING: 2, ST_PENDING: 3,
-                 ST_SENT: 4, ST_IDLE: 5, ST_COOLDOWN: 6, ST_EXCLUDED: 7}
+        order = {ST_RETRY: 0, ST_PROMPT: 1, ST_FABLE: 2, ST_FIRING: 3,
+                 ST_PENDING: 4, ST_SENT: 5, ST_IDLE: 6, ST_COOLDOWN: 7,
+                 ST_EXCLUDED: 8}
         out.sort(key=lambda r: (order.get(r["status"], 9), r["title"].lower()))
         return out
 
@@ -724,6 +1193,7 @@ STATUS_LABEL = {
     ST_EXCLUDED: "Excluded",
     ST_RETRY:    "⚠ Net retry",
     ST_PROMPT:   "⏎ Limit prompt",
+    ST_FABLE:    "⇄ Fable-recover",
 }
 
 
@@ -762,6 +1232,7 @@ def _make_palette(scheme: "Qt.ColorScheme") -> dict:
                 ST_EXCLUDED: QColor("#2a2d31"),
                 ST_RETRY:    QColor("#5c1e1e"),
                 ST_PROMPT:   QColor("#3d3160"),
+                ST_FABLE:    QColor("#0b4a4a"),
             },
             "status_fg": QColor("#f1f3f5"),
             "log_fg": {
@@ -783,6 +1254,7 @@ def _make_palette(scheme: "Qt.ColorScheme") -> dict:
             ST_EXCLUDED: QColor("#f8f9fa"),
             ST_RETRY:    QColor("#ffc9c9"),
             ST_PROMPT:   QColor("#e5dbff"),
+            ST_FABLE:    QColor("#c3fae8"),
         },
         "status_fg": QColor("#212529"),
         "log_fg": {
@@ -985,6 +1457,8 @@ class MainWindow(QMainWindow):
     sig_clear_cooldown = pyqtSignal(int)
     sig_set_effort_overrides = pyqtSignal(dict)
     sig_set_model_overrides = pyqtSignal(dict)
+    sig_set_fable_config = pyqtSignal(dict)
+    sig_set_trigger_patterns = pyqtSignal(dict)
     # Into the updater (its own thread).
     sig_update_check = pyqtSignal(bool)      # manual?
     sig_update_download = pyqtSignal(dict)
@@ -1004,6 +1478,16 @@ class MainWindow(QMainWindow):
         self._effort_overrides: dict = {}
         # Per-window model overrides, same keying.
         self._model_overrides: dict = {}
+        # Fable refusal-recovery config (Advanced dialog). Empty pattern =
+        # use the built-in default.
+        self._fable_cfg: dict = {
+            "enabled": False, "all_windows": True, "delay": 180,
+            "steps": DEFAULT_FABLE_STEPS, "windows": [],
+        }
+        # User regex overrides, keyed by TRIGGER_SPECS key. Only patterns the
+        # user actually changed are stored, so a future build's improved
+        # default still wins for every trigger they never touched.
+        self._trigger_patterns: dict = {}
         # The release dict from the latest "update available" result, if any.
         self._pending_release: Optional[dict] = None
         # Single-instance "show me" listener thread (attached in main()).
@@ -1076,7 +1560,12 @@ class MainWindow(QMainWindow):
         self.status_text.setStyleSheet("font-weight: bold;")
 
         self.start_btn = QPushButton("Start")
-        self.start_btn.setMinimumWidth(80)
+        self.start_btn.setMinimumWidth(96)
+        self.start_btn.setMinimumHeight(40)
+        _sbf = self.start_btn.font()
+        _sbf.setBold(True)
+        _sbf.setPointSize(_sbf.pointSize() + 1)
+        self.start_btn.setFont(_sbf)
         self.start_btn.clicked.connect(self._toggle_running)
 
         self.dry_run_check = QCheckBox("Dry-run")
@@ -1155,8 +1644,13 @@ class MainWindow(QMainWindow):
         header.addSpacing(6)
         header.addWidget(self.start_btn)
         header.addSpacing(12)
-        header.addWidget(self.dry_run_check)
-        header.addWidget(self.keep_awake_check)
+        # Dry-run / Keep-awake stacked vertically as a compact pair.
+        drk_box = QVBoxLayout()
+        drk_box.setSpacing(2)
+        drk_box.setContentsMargins(0, 0, 0, 0)
+        drk_box.addWidget(self.dry_run_check)
+        drk_box.addWidget(self.keep_awake_check)
+        header.addLayout(drk_box)
         # Stack the boot-autostart switch directly beneath "Start on launch"
         # — both are auto-start options, so keep them visually paired.
         autostart_box = QVBoxLayout()
@@ -1173,6 +1667,12 @@ class MainWindow(QMainWindow):
         header.addWidget(QLabel("retry"))
         header.addWidget(self.retry_spin)
         header.addStretch()
+        self.advanced_btn = QPushButton("Advanced…")
+        self.advanced_btn.setToolTip(
+            "Advanced settings — edit the trigger patterns that decide when "
+            "auto-continue fires, and the opt-in Fable refusal-recovery")
+        self.advanced_btn.clicked.connect(self._open_advanced)
+        header.addWidget(self.advanced_btn)
         self.check_updates_btn = QPushButton("Check updates")
         self.check_updates_btn.setToolTip(
             "Check GitHub for a newer Auto-Continue release")
@@ -1236,6 +1736,9 @@ class MainWindow(QMainWindow):
         root.addWidget(self.log_view, stretch=1)
 
         self.setCentralWidget(central)
+
+        # Initial prominent Start/Stop styling + status dot.
+        self._refresh_running_indicator()
 
         # System tray (optional minimize-to-tray)
         self._build_tray()
@@ -1386,6 +1889,9 @@ class MainWindow(QMainWindow):
         self.sig_clear_cooldown.connect(self.worker.cmd_clear_cooldown)
         self.sig_set_effort_overrides.connect(self.worker.set_effort_overrides)
         self.sig_set_model_overrides.connect(self.worker.set_model_overrides)
+        self.sig_set_fable_config.connect(self.worker.set_fable_config)
+        self.sig_set_trigger_patterns.connect(
+            self.worker.set_trigger_patterns)
 
         # Receive snapshots and logs.
         self.worker.snapshot.connect(self._on_snapshot)
@@ -1533,6 +2039,43 @@ class MainWindow(QMainWindow):
         if url:
             QDesktopServices.openUrl(QUrl(url))
 
+    def _open_advanced(self) -> None:
+        # Current watched windows (title_key -> display) for the opt-in list.
+        # Persisted opt-ins not currently open are re-added inside the dialog
+        # so they can still be un-ticked.
+        seen = {}
+        for r in self._latest_snapshot:
+            k = title_key(r["title"])
+            if k:
+                seen[k] = r["title"]
+        dlg = AdvancedDialog(self, dict(self._fable_cfg), seen,
+                             dict(self._trigger_patterns))
+        if dlg.exec():
+            self._fable_cfg = dlg.result_config()
+            self._trigger_patterns = dlg.result_patterns()
+            self.sig_set_fable_config.emit(dict(self._fable_cfg))
+            self.sig_set_trigger_patterns.emit(
+                dict(self._trigger_patterns))
+            self._save_settings()
+            on = bool(self._fable_cfg.get("enabled"))
+            allw = bool(self._fable_cfg.get("all_windows", True))
+            scope = ("all watched windows" if allw
+                     else f"{len(self._fable_cfg.get('windows', []))} window(s)")
+            self._append_log(
+                "info",
+                "Fable-recover " + ("ON" if on else "OFF") + f"; scope: {scope}")
+            if self._trigger_patterns:
+                self._append_log(
+                    "warn",
+                    "custom trigger pattern(s): "
+                    + ", ".join(sorted(self._trigger_patterns))
+                    + " — built-in defaults are overridden for these")
+            if on:
+                self._append_log(
+                    "warn",
+                    "Fable-recover needs Claude Code /config → “Switch models "
+                    "when a message is flagged” = false, or no notice appears")
+
     # ---- Settings persistence -------------------------------------------
 
     def _settings_int(self, key: str, default: int) -> int:
@@ -1591,6 +2134,30 @@ class MainWindow(QMainWindow):
                 self._model_overrides = json.loads(raw_m) if raw_m else {}
             except Exception:
                 self._model_overrides = {}
+            raw_f = self.settings.value("fable_cfg", "", type=str) or ""
+            try:
+                loaded_f = json.loads(raw_f) if raw_f else {}
+                if isinstance(loaded_f, dict):
+                    self._fable_cfg.update(loaded_f)
+            except Exception:
+                pass
+            raw_t = self.settings.value("trigger_patterns", "", type=str) or ""
+            try:
+                loaded_t = json.loads(raw_t) if raw_t else {}
+                if isinstance(loaded_t, dict):
+                    self._trigger_patterns = {
+                        str(k): str(v) for k, v in loaded_t.items()
+                        if isinstance(v, str) and v.strip()
+                    }
+            except Exception:
+                self._trigger_patterns = {}
+            # Migrate the v1.0.16-dev layout, where the Fable detect pattern
+            # lived inside fable_cfg before all triggers became editable.
+            legacy = self._fable_cfg.pop("pattern", "")
+            if (isinstance(legacy, str) and legacy.strip()
+                    and "fable" not in self._trigger_patterns
+                    and legacy.strip() != TRIGGER_DEFAULTS.get("fable")):
+                self._trigger_patterns["fable"] = legacy.strip()
         finally:
             for w in widgets:
                 w.blockSignals(False)
@@ -1606,6 +2173,8 @@ class MainWindow(QMainWindow):
         self.sig_set_excluded.emit(list(self._excluded_titles))
         self.sig_set_effort_overrides.emit(dict(self._effort_overrides))
         self.sig_set_model_overrides.emit(dict(self._model_overrides))
+        self.sig_set_fable_config.emit(dict(self._fable_cfg))
+        self.sig_set_trigger_patterns.emit(dict(self._trigger_patterns))
         # Apply keep-awake state immediately if the user had it ON before.
         if self.keep_awake_check.isChecked():
             self._apply_keep_awake(True)
@@ -1629,6 +2198,9 @@ class MainWindow(QMainWindow):
         self.settings.setValue(
             "model_overrides", json.dumps(self._model_overrides)
         )
+        self.settings.setValue("fable_cfg", json.dumps(self._fable_cfg))
+        self.settings.setValue(
+            "trigger_patterns", json.dumps(self._trigger_patterns))
 
     # ---- Slots -----------------------------------------------------------
 
@@ -1654,6 +2226,14 @@ class MainWindow(QMainWindow):
         color = (self._palette["dot_running"] if running
                  else self._palette["dot_stopped"])
         self.status_dot.setStyleSheet(f"color: {color}; font-size: 16px;")
+        # Prominent Start/Stop button — green to start, red to stop.
+        bg = "#e03131" if running else "#2f9e44"
+        hover = "#f03e3e" if running else "#37b24d"
+        self.start_btn.setStyleSheet(
+            "QPushButton {"
+            f" background:{bg}; color:white; font-weight:bold;"
+            " border:none; border-radius:5px; padding:6px 16px; }"
+            f"QPushButton:hover {{ background:{hover}; }}")
 
     @pyqtSlot(list)
     def _on_snapshot(self, rows: list) -> None:
@@ -2027,6 +2607,407 @@ class MainWindow(QMainWindow):
         # doesn't kill the app), so the X button path needs to ask the app
         # to quit explicitly.
         QApplication.instance().quit()
+
+
+# ===========================================================================
+# Advanced settings sub-window
+# ===========================================================================
+
+class AdvancedDialog(QDialog):
+    """Advanced sub-window with two tabs:
+
+    * **Triggers** — the regexes that decide when auto-continue fires. Editable
+      because Anthropic re-words these banners without notice and a rename
+      silently stops the tool from firing until a new build ships.
+    * **Fable recovery** — opt-in: when Fable's safeguards block a turn (the
+      session stalls on Fable), recover on a fallback model and switch back
+      after a delay.
+    """
+
+    def __init__(self, parent, cfg: dict, windows: dict, patterns: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Advanced")
+        self.resize(660, 640)
+        self._orig_windows = list(cfg.get("windows", []))
+        outer = QVBoxLayout(self)
+        tabs = QTabWidget()
+        outer.addWidget(tabs, 1)
+
+        trig_tab = QWidget()
+        tabs.addTab(trig_tab, "Triggers")
+        self._build_triggers_tab(trig_tab, patterns or {})
+
+        fable_tab = QWidget()
+        tabs.addTab(fable_tab, "Fable recovery")
+        root = QVBoxLayout(fable_tab)
+
+        intro = QLabel(
+            "When Fable's safeguards block a turn the session stalls on "
+            "Fable. For each ticked window this sends the “on detect” "
+            "keys (switch off Fable and continue), waits N seconds, then sends "
+            "the “switch back” keys (return to Fable)."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        prereq = QLabel(
+            "⚠ Prerequisite: in Claude Code run /config and set “Switch "
+            "models when a message is flagged” to false — otherwise Claude "
+            "Code auto-switches the model itself and no detectable notice "
+            "appears for this to act on."
+        )
+        prereq.setWordWrap(True)
+        prereq.setStyleSheet("font-weight: bold;")
+        root.addWidget(prereq)
+
+        form = QFormLayout()
+        self.enable_chk = QCheckBox("Enable Fable refusal-recovery")
+        self.enable_chk.setChecked(bool(cfg.get("enabled", False)))
+        form.addRow(self.enable_chk)
+
+        self.delay_spin = QSpinBox()
+        self.delay_spin.setRange(1, 3600)
+        self.delay_spin.setSuffix(" s")
+        try:
+            self.delay_spin.setValue(int(cfg.get("delay", 180) or 180))
+        except (TypeError, ValueError):
+            self.delay_spin.setValue(180)
+        form.addRow("Wait for <wait> steps", self.delay_spin)
+        root.addLayout(form)
+
+        detect_hint = QLabel(
+            "Detection pattern for the safeguard notice lives on the "
+            "<b>Triggers</b> tab (“Fable safeguard block”).")
+        detect_hint.setWordWrap(True)
+        root.addWidget(detect_hint)
+
+        root.addWidget(QLabel(
+            "Recovery steps (one per line):  plain line = type it + Enter · "
+            "<confirm> = wait for “Switch model?” then Yes · <esc> = ESC to "
+            "surface a queued dialog (skipped if one's already up) · <wait> = "
+            "wait Delay seconds"))
+        _steps_src = cfg.get("steps")
+        if not isinstance(_steps_src, str) or not _steps_src.strip():
+            _steps_src = DEFAULT_FABLE_STEPS
+        self.steps_edit = QPlainTextEdit(_steps_src)
+        self.steps_edit.setFixedHeight(150)
+        root.addWidget(self.steps_edit)
+
+        self.all_windows_chk = QCheckBox(
+            "Apply to all watched windows (recommended)")
+        self.all_windows_chk.setChecked(bool(cfg.get("all_windows", True)))
+        self.all_windows_chk.setToolTip(
+            "On: recovery is eligible on every watched window — but only the "
+            "window that actually shows the Fable notice is ever switched. "
+            "Off: restrict to the specific windows ticked below.")
+        root.addWidget(self.all_windows_chk)
+
+        root.addWidget(QLabel("…or only these windows:"))
+        self.win_list = QListWidget()
+        opted = {title_key(str(t)) for t in cfg.get("windows", [])
+                 if title_key(str(t))}
+        rows = dict(windows)                       # title_key -> display title
+        for k in opted:
+            rows.setdefault(k, k + "   (not currently open)")
+        self._has_rows = bool(rows)
+        if not rows:
+            self.win_list.addItem(QListWidgetItem(
+                "(no Claude windows detected yet)"))
+        else:
+            for k, disp in sorted(rows.items(), key=lambda kv: kv[1].lower()):
+                it = QListWidgetItem(disp)
+                it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                it.setCheckState(Qt.CheckState.Checked if k in opted
+                                 else Qt.CheckState.Unchecked)
+                it.setData(Qt.ItemDataRole.UserRole, k)
+                self.win_list.addItem(it)
+        root.addWidget(self.win_list, 1)
+
+        def _sync_list(_=None):
+            self.win_list.setEnabled(
+                self._has_rows and not self.all_windows_chk.isChecked())
+        self.all_windows_chk.toggled.connect(_sync_list)
+        _sync_list()
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        outer.addWidget(btns)
+
+    # ---- Triggers tab ----------------------------------------------------
+
+    def _build_triggers_tab(self, tab, patterns: dict) -> None:
+        """One editable regex per detection trigger, with a live match tester.
+
+        Editing state is held in `self._pat_edits` (key → current source) and
+        only flushed to the widget on selection change, so switching rows
+        doesn't lose a half-typed pattern.
+        """
+        lay = QVBoxLayout(tab)
+        intro = QLabel(
+            "These regexes decide when auto-continue fires. Edit one if "
+            "Anthropic re-words a banner and detection stops working — you "
+            "don't have to wait for a new build. Matching is always "
+            "case-insensitive."
+        )
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+
+        # Working copy: start from saved overrides, fall back to the defaults.
+        self._pat_edits = {}
+        for spec in TRIGGER_SPECS:
+            src = str((patterns or {}).get(spec["key"], "") or "").strip()
+            self._pat_edits[spec["key"]] = src or spec["default"]
+
+        self.trig_list = QListWidget()
+        self.trig_list.setFixedHeight(150)
+        for spec in TRIGGER_SPECS:
+            it = QListWidgetItem()
+            it.setData(Qt.ItemDataRole.UserRole, spec["key"])
+            self.trig_list.addItem(it)
+        lay.addWidget(self.trig_list)
+
+        self.trig_help = QLabel("")
+        self.trig_help.setWordWrap(True)
+        self.trig_help.setStyleSheet("color: palette(mid);")
+        lay.addWidget(self.trig_help)
+
+        self.pat_edit = QPlainTextEdit()
+        self.pat_edit.setFixedHeight(96)
+        self.pat_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        _f = QFont("Consolas")
+        _f.setStyleHint(QFont.StyleHint.Monospace)
+        self.pat_edit.setFont(_f)
+        lay.addWidget(self.pat_edit)
+
+        row = QHBoxLayout()
+        self.pat_status = QLabel("")
+        self.pat_status.setWordWrap(True)
+        row.addWidget(self.pat_status, 1)
+        self.reset_one_btn = QPushButton("Reset this")
+        self.reset_all_btn = QPushButton("Reset all")
+        row.addWidget(self.reset_one_btn)
+        row.addWidget(self.reset_all_btn)
+        lay.addLayout(row)
+
+        lay.addWidget(QLabel(
+            "Test — paste terminal text here to check what it matches:"))
+        self.test_edit = QPlainTextEdit()
+        self.test_edit.setPlaceholderText(
+            "e.g. paste the banner Claude Code printed…")
+        lay.addWidget(self.test_edit, 1)
+        self.test_result = QLabel("")
+        self.test_result.setWordWrap(True)
+        lay.addWidget(self.test_result)
+
+        self._cur_key = None
+        self.trig_list.currentRowChanged.connect(self._on_trigger_row)
+        self.pat_edit.textChanged.connect(self._on_pattern_edited)
+        self.test_edit.textChanged.connect(self._refresh_test)
+        self.reset_one_btn.clicked.connect(self._reset_current_pattern)
+        self.reset_all_btn.clicked.connect(self._reset_all_patterns)
+        self._refresh_trigger_labels()
+        self.trig_list.setCurrentRow(0)
+
+    def _spec(self, key):
+        for s in TRIGGER_SPECS:
+            if s["key"] == key:
+                return s
+        return None
+
+    def _refresh_trigger_labels(self) -> None:
+        """Mark rows whose pattern differs from the built-in default."""
+        for i in range(self.trig_list.count()):
+            it = self.trig_list.item(i)
+            key = it.data(Qt.ItemDataRole.UserRole)
+            spec = self._spec(key)
+            custom = self._pat_edits.get(key, "") != spec["default"]
+            it.setText(spec["label"] + ("   • customised" if custom else ""))
+
+    def _on_trigger_row(self, row: int) -> None:
+        if row < 0:
+            return
+        key = self.trig_list.item(row).data(Qt.ItemDataRole.UserRole)
+        self._cur_key = None                      # suppress the edit hook
+        spec = self._spec(key)
+        need = spec["groups"]
+        self.trig_help.setText(
+            spec["help"]
+            + (f"  (needs {need} capture group(s))" if need else ""))
+        self.pat_edit.setPlainText(self._pat_edits.get(key, ""))
+        self._cur_key = key
+        self._validate_current()
+
+    def _on_pattern_edited(self) -> None:
+        if self._cur_key is None:
+            return
+        self._pat_edits[self._cur_key] = self.pat_edit.toPlainText().strip()
+        self._refresh_trigger_labels()
+        self._validate_current()
+
+    def _compile_current(self):
+        """Compile the shown pattern → (regex|None, error_message|"")."""
+        key = self._cur_key
+        if key is None:
+            return None, ""
+        spec = self._spec(key)
+        src = self._pat_edits.get(key, "").strip()
+        if not src:
+            return None, "empty — the built-in default will be used"
+        try:
+            rx = _re.compile(src, _re.IGNORECASE)
+        except _re.error as e:
+            return None, f"✗ invalid regex: {e}"
+        if rx.groups < spec["groups"]:
+            return None, (f"✗ needs {spec['groups']} capture group(s), "
+                          f"found {rx.groups}")
+        return rx, ""
+
+    def _validate_current(self) -> None:
+        rx, err = self._compile_current()
+        if err:
+            self.pat_status.setText(err)
+            self.pat_status.setStyleSheet(
+                "color: #e03131;" if err.startswith("✗") else "")
+        else:
+            spec = self._spec(self._cur_key)
+            same = self._pat_edits.get(self._cur_key) == spec["default"]
+            self.pat_status.setText(
+                "✓ valid — built-in default" if same else "✓ valid — customised")
+            self.pat_status.setStyleSheet("color: #2f9e44;")
+        self._refresh_test()
+
+    def _refresh_test(self) -> None:
+        sample = self.test_edit.toPlainText()
+        if not sample:
+            self.test_result.setText("")
+            return
+        rx, err = self._compile_current()
+        if rx is None:
+            self.test_result.setText("(fix the pattern above to test)")
+            self.test_result.setStyleSheet("color: #e03131;")
+            return
+        m = None
+        for m in rx.finditer(sample):
+            pass                                   # keep the LAST match
+        if m is None:
+            self.test_result.setText("✗ no match in the sample text")
+            self.test_result.setStyleSheet("color: #e03131;")
+            return
+        shown = m.group(0)
+        if len(shown) > 160:
+            shown = shown[:160] + "…"
+        tail = len(sample) - m.end()
+        extra = ""
+        # Mirror the runtime tail anchor: a match too far from the end is
+        # treated as stale scrollback and would NOT fire.
+        limit = {"limit": MAX_POST_MATCH_TAIL,
+                 "limit_prompt": PROMPT_POST_MATCH_TAIL,
+                 "switch_model": SWITCH_POST_MATCH_TAIL}.get(
+                     self._cur_key, NETWORK_POST_MATCH_TAIL)
+        if tail > limit:
+            extra = (f"  ⚠ but it sits {tail} chars from the end (limit "
+                     f"{limit}) — at runtime this counts as stale scrollback "
+                     f"and would NOT fire")
+        groups = ""
+        if m.re.groups:
+            groups = "   groups: " + ", ".join(
+                repr(g) for g in m.groups())
+        self.test_result.setText(f"✓ matched: {shown!r}{groups}{extra}")
+        self.test_result.setStyleSheet(
+            "color: #e8590c;" if extra else "color: #2f9e44;")
+
+    def _reset_current_pattern(self) -> None:
+        if self._cur_key is None:
+            return
+        self._pat_edits[self._cur_key] = self._spec(self._cur_key)["default"]
+        self.pat_edit.setPlainText(self._pat_edits[self._cur_key])
+        self._refresh_trigger_labels()
+
+    def _reset_all_patterns(self) -> None:
+        for spec in TRIGGER_SPECS:
+            self._pat_edits[spec["key"]] = spec["default"]
+        if self._cur_key is not None:
+            self.pat_edit.setPlainText(self._pat_edits[self._cur_key])
+        self._refresh_trigger_labels()
+
+    # ---- accept / results ------------------------------------------------
+
+    def accept(self) -> None:
+        """Refuse to close on an unusable pattern — silently falling back to
+        the default would leave the user believing their edit took effect."""
+        bad = []
+        for spec in TRIGGER_SPECS:
+            src = self._pat_edits.get(spec["key"], "").strip()
+            if not src or src == spec["default"]:
+                continue
+            try:
+                rx = _re.compile(src, _re.IGNORECASE)
+            except _re.error as e:
+                bad.append(f"• {spec['label']}: {e}")
+                continue
+            if rx.groups < spec["groups"]:
+                bad.append(f"• {spec['label']}: needs {spec['groups']} "
+                           f"capture group(s), found {rx.groups}")
+        if bad:
+            QMessageBox.warning(
+                self, "Invalid trigger pattern",
+                "These patterns can't be used:\n\n" + "\n".join(bad)
+                + "\n\nFix them on the Triggers tab, or press “Reset this”.")
+            return
+
+        # Recovery steps are typed verbatim into a terminal. Braces are key
+        # syntax to the sender, so they are escaped rather than rejected —
+        # but an empty script with the feature enabled is a silent no-op.
+        cfg = self.result_config()
+        if cfg["enabled"]:
+            if not _parse_recovery_steps(cfg["steps"]):
+                QMessageBox.warning(
+                    self, "No recovery steps",
+                    "Fable refusal-recovery is enabled but the step list is "
+                    "empty, so nothing would happen.\n\nAdd steps, or untick "
+                    "“Enable Fable refusal-recovery”.")
+                return
+            if not cfg["all_windows"] and not cfg["windows"]:
+                QMessageBox.warning(
+                    self, "No windows selected",
+                    "Fable refusal-recovery is enabled but no windows are "
+                    "ticked, so it would never run.\n\nTick at least one "
+                    "window, or choose “Apply to all watched windows”.")
+                return
+        super().accept()
+
+    def result_patterns(self) -> dict:
+        """Only genuinely-customised patterns are persisted, so a future
+        build's improved default automatically wins for untouched triggers."""
+        out = {}
+        for spec in TRIGGER_SPECS:
+            src = self._pat_edits.get(spec["key"], "").strip()
+            if src and src != spec["default"]:
+                out[spec["key"]] = src
+        return out
+
+    def result_config(self) -> dict:
+        if not self.win_list.isEnabled():
+            wins = list(self._orig_windows)        # nothing to edit; preserve
+        else:
+            wins = []
+            for i in range(self.win_list.count()):
+                it = self.win_list.item(i)
+                if (it.flags() & Qt.ItemFlag.ItemIsUserCheckable
+                        and it.checkState() == Qt.CheckState.Checked):
+                    k = it.data(Qt.ItemDataRole.UserRole)
+                    if k:
+                        wins.append(k)
+        return {
+            "enabled": self.enable_chk.isChecked(),
+            "all_windows": self.all_windows_chk.isChecked(),
+            "delay": self.delay_spin.value(),
+            "steps": self.steps_edit.toPlainText(),
+            "windows": wins,
+        }
 
 
 # ===========================================================================

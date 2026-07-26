@@ -3,8 +3,10 @@ import sys, io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 from auto_continue import (
-    parse_limit_message, parse_retry_exhausted, parse_econnreset_stuck,
-    parse_server_error_stuck, parse_limit_prompt, parse_oauth_expired,
+    NETWORK_POST_MATCH_TAIL, SWITCH_POST_MATCH_TAIL,
+    compile_trigger_patterns, parse_limit_message, parse_retry_exhausted,
+    parse_econnreset_stuck, parse_server_error_stuck, parse_fable_refusal,
+    parse_switch_model_prompt, parse_limit_prompt, parse_oauth_expired,
     next_reset_datetime,
 )
 from datetime import datetime, timedelta
@@ -308,6 +310,83 @@ for i, (text, expected) in enumerate(server_error_samples):
         failures += 1
 
 
+# ---------- parse_fable_refusal ----------
+# NOTE: like the limit-picker samples further down, every phrase the detectors
+# anchor on is split with string concatenation so that DISPLAYING this test
+# file inside a watched terminal cannot trigger a real Fable recovery — which
+# would type /model, ESC and Enter into that live session. Keep the splits.
+_SG = "safegu" "ards flagged"
+_YES = "Yes, swi" "tch to"
+_NO = "No, go b" "ack"
+
+fable_refusal_samples = [
+    # Exact terminal text (user Image #2): Fable safeguard block.
+    ("● API Error: Fable 5's " + _SG + " this message "
+     "(https://www.anthropic.com/legal/aup). They may flag safe, normal "
+     "content as well.\n\nDouble press esc to edit your last message, or "
+     "try a different model with /model.", True),
+    # The 'can't respond ... with Fable' clause alone.
+    ("Claude Code can" "'t respond to this request wi" "th Fable 5.", True),
+    # Curly-apostrophe variant.
+    ("Fable 5’s " + _SG + " this message", True),
+    # No version number after Fable.
+    ("Fable's " + _SG + " this message", True),
+    # Unrelated prose mentioning Fable — must NOT match.
+    ("everything is fine, still running on Fable 5", False),
+    # Stale — buried far up scrollback. Padded off the CODE's own allowance so
+    # the test tracks the constant instead of hard-coding a stale number.
+    ("Fable 5's " + _SG + " this message\n"
+     + "x" * (NETWORK_POST_MATCH_TAIL + 1000), False),
+]
+
+print()
+print("---- parse_fable_refusal ----")
+for i, (text, expected) in enumerate(fable_refusal_samples):
+    got = parse_fable_refusal(text)
+    ok = got == expected
+    status = "OK " if ok else "FAIL"
+    print(f"[{status}] fable sample {i}: got={got!r} expected={expected!r}")
+    if not ok:
+        failures += 1
+
+
+# ---------- parse_switch_model_prompt ----------
+switch_model_samples = [
+    # The dialog from the user's Image #6 (switching to Fable 5).
+    ("Switch model?\nYour next response will be slower and use more tokens\n\n"
+     "This conversation is cached for the current model. Switching to Fable 5 "
+     "means the full history gets re-read on your next message.\n\n"
+     "> 1. " + _YES + " Fable 5\n  2. " + _NO, True),
+    # Switching-to-Opus variant.
+    ("Switch model?\n\n> 1. " + _YES + " Opus 4.8\n  2. " + _NO, True),
+    # No dialog.
+    ("just some normal output here", False),
+    # 'Switch model?' words but no Yes/No options — not the dialog.
+    ("should we Switch model? maybe later", False),
+    # Affirmative option WITHOUT the negative one — not the dialog, so a bare
+    # Enter must not be pressed.
+    ("> 1. " + _YES + " Fable 5", False),
+    # A full-width terminal stacks its footer (input box, rules, status bar)
+    # below the modal; the dialog must still be detected through it.
+    ("Switch model?\n> 1. " + _YES + " Fable 5\n  2. " + _NO + "\n"
+     + "x" * (SWITCH_POST_MATCH_TAIL - 500), True),
+    # Stale — buried far up scrollback. Padded off the CODE's own allowance so
+    # the test tracks the constant instead of hard-coding a stale number.
+    ("Switch model?\n> 1. " + _YES + " Fable 5\n  2. " + _NO + "\n"
+     + "x" * (SWITCH_POST_MATCH_TAIL + 500), False),
+]
+
+print()
+print("---- parse_switch_model_prompt ----")
+for i, (text, expected) in enumerate(switch_model_samples):
+    got = parse_switch_model_prompt(text)
+    ok = got == expected
+    status = "OK " if ok else "FAIL"
+    print(f"[{status}] switch-model sample {i}: got={got!r} expected={expected!r}")
+    if not ok:
+        failures += 1
+
+
 # ---------- parse_limit_prompt ----------
 # The interactive limit picker. NOTE: key phrases below are built via string
 # concatenation so that DISPLAYING this test file inside a watched terminal
@@ -367,5 +446,61 @@ for i, (text, expected) in enumerate(oauth_samples):
     print(f"[{status}] oauth sample {i}: got={got!r} expected={expected!r}")
     if not ok:
         failures += 1
+
+
+# ---------- compile_trigger_patterns (user-editable triggers) ----------
+# The Advanced dialog lets users rewrite these regexes when Anthropic changes
+# a banner's wording. A bad override must never silently disable a trigger or
+# make one fire on everything, so validation is enforced here, not in the UI.
+print()
+print("---- compile_trigger_patterns ----")
+
+
+def tcheck(label, cond):
+    global failures
+    print(f"[{'OK ' if cond else 'FAIL'}] {label}")
+    if not cond:
+        failures += 1
+
+
+pats, errs = compile_trigger_patterns({})
+tcheck("no overrides -> nothing compiled, no errors", pats == {} and errs == [])
+
+pats, errs = compile_trigger_patterns({"econnreset": "BO" "OM"})
+tcheck("valid override is accepted", list(pats) == ["econnreset"] and not errs)
+
+pats, errs = compile_trigger_patterns({"econnreset": "(unclosed"})
+tcheck("invalid regex rejected, default kept", pats == {} and len(errs) == 1)
+
+# The limit banner's 4 groups feed the reset-time scheduler; fewer would raise
+# mid-tick, so the override must be refused up front.
+pats, errs = compile_trigger_patterns({"limit": "no groups here"})
+tcheck("too-few-groups rejected", pats == {} and len(errs) == 1)
+
+pats, errs = compile_trigger_patterns({"retry": r"tried (\d+) of (\d+)"})
+tcheck("group-bearing override with enough groups accepted",
+       list(pats) == ["retry"] and not errs)
+
+# A pattern that can match the empty string matches at EVERY position — the
+# tail anchor always passes, so every window would look stuck forever.
+for empty_matcher in (".*", "x*", "fo" "o|"):
+    pats, errs = compile_trigger_patterns({"econnreset": empty_matcher})
+    tcheck(f"empty-matching {empty_matcher!r} rejected",
+           pats == {} and len(errs) == 1)
+
+# An override equal to the built-in default is not stored, so a future build's
+# improved default still wins for triggers the user never really changed.
+from auto_continue import TRIGGER_DEFAULTS as _TD
+pats, errs = compile_trigger_patterns({"fable": _TD["fable"]})
+tcheck("override identical to default is a no-op", pats == {} and not errs)
+
+pats, errs = compile_trigger_patterns({"not_a_real_trigger": "x"})
+tcheck("unknown trigger key ignored", pats == {} and not errs)
+
+# End to end: a custom pattern actually drives the parser it belongs to.
+pats, _ = compile_trigger_patterns({"fable": "custom" + " refusal wording"})
+tcheck("custom pattern drives its parser",
+       parse_fable_refusal("custom" " refusal wording", pats["fable"]) is True
+       and parse_fable_refusal("Fable's " + _SG, pats["fable"]) is False)
 
 sys.exit(1 if failures else 0)

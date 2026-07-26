@@ -40,6 +40,7 @@ jobs:
           python test_parse.py
           python test_updater.py
           python test_tick.py
+          python test_fable.py
 
       - name: Build onefile exe
         run: pyinstaller Auto-Continue.spec --clean --noconfirm

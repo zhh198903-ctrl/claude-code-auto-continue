@@ -38,7 +38,7 @@ import uiautomation as auto
 
 # Bumped on every shipped build so the running version is visible in the GUI
 # title bar (and thus in the Windows Terminal window title the watchdog reads).
-APP_VERSION = "1.0.15"
+APP_VERSION = "1.0.16"
 
 
 def _force_utf8_console() -> None:
@@ -432,42 +432,85 @@ NETWORK_POST_MATCH_TAIL = 6000
 # whatever they have typed in the input box).
 PROMPT_POST_MATCH_TAIL = 1500
 
+# The "Switch model?" dialog needs a LOOSER allowance than the limit picker.
+# Both are modals, but this one is detected in order to press Enter *on it*
+# during a Fable recovery, and Claude Code stacks its full footer below the
+# modal — input box, border rules, multi-line status bar, hints — every line
+# padded to the terminal width, so the 1500 used for the limit picker is far
+# too tight here — an OPEN dialog would look stale and stall the recovery.
+#
+# 4000 rather than the 6000 network allowance, because the two failure modes
+# are NOT equally bad:
+#   too small → the dialog isn't seen, <esc> fires and cancels it, <confirm>
+#     times out, and the turn resumes on the old model. Wasteful, but it stays
+#     inside the recovery and FABLE_MAX_RUNS stops it repeating.
+#   too large → a dialog the USER dismissed a while ago still matches, so
+#     <confirm> presses Enter into their input box and submits whatever they
+#     had half-typed as a prompt. That has side effects in their session and
+#     cannot be undone.
+# Prefer the recoverable failure. ~20 padded rows at 200 columns clears a
+# normal footer; FABLE_CONFIRM_MAX_S bounds the stall if it ever doesn't.
+SWITCH_POST_MATCH_TAIL = 4000
 
-def parse_limit_message(text: str) -> tuple[int, int, str, str] | None:
+
+def parse_limit_message(
+    text: str, pattern=None
+) -> tuple[int, int, str, str] | None:
     """Return (hour_12, minute, ampm, tz_name) from the *latest* limit line.
 
     Returns None if no match. The match must be near the end of the buffer —
     a stale limit message further back means Claude has already moved on.
     `minute` is 0 when the message omits minutes (e.g. `resets 11pm`).
+
+    `pattern` may be a user-supplied compiled regex from the Advanced dialog
+    (see TRIGGER_SPECS); it MUST expose the same four groups as LIMIT_RE
+    (hour, minute, am/pm, tz) — `compile_trigger_patterns` enforces that
+    before the override ever reaches here.
     """
-    matches = list(LIMIT_RE.finditer(text))
+    rx = pattern or LIMIT_RE
+    matches = list(rx.finditer(text))
     if not matches:
         return None
     m = matches[-1]
     if len(text) - m.end() > MAX_POST_MATCH_TAIL:
         return None
-    minute = int(m.group(2)) if m.group(2) else 0
-    return int(m.group(1)), minute, m.group(3).lower(), m.group(4).strip()
+    try:
+        hour = int(m.group(1))
+        minute = int(m.group(2)) if m.group(2) else 0
+        ampm = (m.group(3) or "").lower()
+        tz = (m.group(4) or "").strip()
+    except (IndexError, ValueError):
+        # A user override that compiled but yields non-numeric / missing
+        # groups must not kill the tick — treat it as "no limit seen".
+        return None
+    return hour, minute, ampm, tz
 
 
-def parse_retry_exhausted(text: str) -> bool:
+def parse_retry_exhausted(text: str, pattern=None) -> bool:
     """True if the most recent network-retry banner shows N == total (e.g.
     `attempt 10/10`) and the banner sits near the tail of the buffer.
 
     A retry banner buried far up in scrollback (e.g. from a previous outage
     the user already cleared manually) is ignored.
+
+    `pattern` may be a user-supplied compiled regex; it MUST expose the two
+    numeric groups (attempt, total) that RETRY_RE does.
     """
-    matches = list(RETRY_RE.finditer(text))
+    rx = pattern or RETRY_RE
+    matches = list(rx.finditer(text))
     if not matches:
         return False
     m = matches[-1]
     if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
         return False
-    n, total = int(m.group(1)), int(m.group(2))
+    try:
+        n, total = int(m.group(1)), int(m.group(2))
+    except (IndexError, ValueError, TypeError):
+        return False
     return n >= total > 0
 
 
-def parse_econnreset_stuck(text: str) -> bool:
+def parse_econnreset_stuck(text: str, pattern=None) -> bool:
     """True if a bare `API Error: Unable to connect to API (E...)` (any
     errno / UND_ERR_* code) or `API Error: fetch failed` appears near the
     tail of the buffer — i.e. Claude is currently stuck on a network error
@@ -475,7 +518,8 @@ def parse_econnreset_stuck(text: str) -> bool:
     `parse_retry_exhausted`, so stale errors from a previous outage don't
     retrigger.
     """
-    matches = list(ECONNRESET_RE.finditer(text))
+    rx = pattern or ECONNRESET_RE
+    matches = list(rx.finditer(text))
     if not matches:
         return False
     m = matches[-1]
@@ -484,7 +528,7 @@ def parse_econnreset_stuck(text: str) -> bool:
     return True
 
 
-def parse_server_error_stuck(text: str) -> bool:
+def parse_server_error_stuck(text: str, pattern=None) -> bool:
     """True if a server-side truncation marker sits near the tail of the
     buffer — the response was cut off mid-stream (the 500 "Server-error"
     wording or the later "Response-stalled" one, both closing with the shared
@@ -493,7 +537,8 @@ def parse_server_error_stuck(text: str) -> bool:
     so a stale marker from an earlier, already-resolved outage doesn't
     retrigger.
     """
-    matches = list(SERVER_ERROR_RE.finditer(text))
+    rx = pattern or SERVER_ERROR_RE
+    matches = list(rx.finditer(text))
     if not matches:
         return False
     m = matches[-1]
@@ -502,7 +547,70 @@ def parse_server_error_stuck(text: str) -> bool:
     return True
 
 
-def parse_limit_prompt(text: str) -> bool:
+# Fable refusal-recovery (opt-in GUI feature). When Fable's safety guardrails
+# block a turn, Claude Code stalls here (CC auto-switch off) with a safeguard
+# notice that names Fable and says it can't respond with that model. The GUI's
+# Advanced feature detects this per opted-in window and drives a recovery
+# (switch to a fallback model, continue, then switch back to Fable after a
+# delay). The default pattern is user-overridable in the Advanced dialog; its
+# `\s+` usage also keeps this source from self-matching in a watched terminal.
+DEFAULT_FABLE_PATTERN = (
+    r"Fable\s*\d*[’']?s?\s+safeguards\s+flagged"
+    r"|can[’']?t\s+respond\s+to\s+this\s+request\s+with\s+Fable"
+)
+FABLE_REFUSAL_RE = re.compile(DEFAULT_FABLE_PATTERN, re.IGNORECASE)
+
+
+def parse_fable_refusal(text: str, pattern=None) -> bool:
+    """True if a Fable safety-guardrail block sits near the tail of the buffer.
+    `pattern` may be a user-compiled re.Pattern from the Advanced dialog;
+    defaults to FABLE_REFUSAL_RE. Tail-anchored like the other network parsers
+    so a stale notice further up scrollback doesn't retrigger."""
+    rx = pattern or FABLE_REFUSAL_RE
+    matches = list(rx.finditer(text))
+    if not matches:
+        return False
+    m = matches[-1]
+    if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
+        return False
+    return True
+
+
+# The "Switch model?" confirmation dialog Claude Code shows when switching to a
+# model whose cache differs (e.g. `/model fable` from a cached Opus). Option 1
+# (the affirmative "Yes, switch…" line) is pre-selected, so a plain Enter
+# confirms it. We anchor on the affirmative + negative option PAIR — not the
+# far-above "Switch model?" header, which the padded multi-line description
+# pushes ~900 chars away on a real (full-width) terminal. The recovery WAITS
+# for this and confirms it BEFORE sending 'continue' — a blind Enter fired
+# before the dialog renders lands in the input box and the continue then runs
+# on the old model.
+# NOTE: the two option strings are deliberately NOT written out together
+# anywhere in this file. This source is routinely displayed inside a watched
+# terminal, and a verbatim pair here would make the tool detect a dialog that
+# isn't there and press Enter into whatever the user was typing — the same
+# de-fanging convention the limit / network patterns above follow.
+SWITCH_MODEL_RE = re.compile(
+    r"Yes,\s+switch\s+to[\s\S]{0,300}?No,\s+go\s+back",
+    re.IGNORECASE,
+)
+
+
+def parse_switch_model_prompt(text: str, pattern=None) -> bool:
+    """True if the 'Switch model?' Yes/No dialog is open at the tail of the
+    buffer (a plain Enter confirms the pre-selected 'Yes, switch to …').
+    Tail-anchored so a stale one further up scrollback doesn't retrigger."""
+    rx = pattern or SWITCH_MODEL_RE
+    matches = list(rx.finditer(text))
+    if not matches:
+        return False
+    m = matches[-1]
+    if len(text) - m.end() > SWITCH_POST_MATCH_TAIL:
+        return False
+    return True
+
+
+def parse_limit_prompt(text: str, pattern=None, limit_pattern=None) -> bool:
     """True if the interactive limit picker ("What do you want to do?" /
     "Stop and wait for limit to reset" / "Enter to confirm") is currently
     open at the tail of the buffer.
@@ -512,27 +620,163 @@ def parse_limit_prompt(text: str) -> bool:
         drawn at the very bottom when open;
       * if the regular limit banner appears AFTER the picker text, the picker
         was already confirmed — don't press Enter again.
+
+    `limit_pattern` overrides the banner regex used by that second guard, so
+    a user who customises the limit banner keeps the guard working.
     """
-    matches = list(LIMIT_PROMPT_RE.finditer(text))
+    rx = pattern or LIMIT_PROMPT_RE
+    matches = list(rx.finditer(text))
     if not matches:
         return False
     m = matches[-1]
     if len(text) - m.end() > PROMPT_POST_MATCH_TAIL:
         return False
-    banner = list(LIMIT_RE.finditer(text))
+    banner = list((limit_pattern or LIMIT_RE).finditer(text))
     if banner and banner[-1].start() >= m.end():
         return False
     return True
 
 
-def parse_oauth_expired(text: str) -> bool:
+def parse_oauth_expired(text: str, pattern=None) -> bool:
     """True if the session is dead on an expired OAuth token near the tail.
     'continue' cannot fix this — callers should warn the user instead."""
-    matches = list(OAUTH_EXPIRED_RE.finditer(text))
+    rx = pattern or OAUTH_EXPIRED_RE
+    matches = list(rx.finditer(text))
     if not matches:
         return False
     m = matches[-1]
     return len(text) - m.end() <= NETWORK_POST_MATCH_TAIL
+
+
+# ---------------------------------------------------------------------------
+# User-editable trigger patterns
+# ---------------------------------------------------------------------------
+#
+# Anthropic re-words these banners without warning (see the /extra-usage →
+# /usage-credits rename, and the separator-glyph churn in LIMIT_RE), and each
+# rename silently stops auto-continue from firing until the tool ships a new
+# build. Exposing the patterns in the GUI's Advanced dialog lets a user fix a
+# wording change themselves the same day.
+#
+# `groups` is the number of capture groups the parser INDEXES INTO. An
+# override with fewer groups would raise mid-tick, so compile_trigger_patterns
+# rejects it up front and the built-in default stays in force. Defaults are
+# read back off the compiled objects (`.pattern`) so there is exactly one
+# source of truth for each regex.
+TRIGGER_SPECS = [
+    {
+        "key": "limit",
+        "label": "Rate-limit banner",
+        "default": LIMIT_RE.pattern,
+        "groups": 4,
+        "help": "The “you’ve hit your limit · resets …” line. "
+                "Must keep 4 capture groups in order: hour, minute, am/pm, "
+                "timezone — they schedule the resume.",
+    },
+    {
+        "key": "limit_prompt",
+        "label": "Limit picker (modal)",
+        "default": LIMIT_PROMPT_RE.pattern,
+        "groups": 0,
+        "help": "The interactive “What do you want to do?” chooser. "
+                "Matching it presses Enter to accept “Stop and wait”.",
+    },
+    {
+        "key": "retry",
+        "label": "Network retry exhausted",
+        "default": RETRY_RE.pattern,
+        "groups": 2,
+        "help": "The “Retrying in Ns · attempt N/M” banner. Must keep "
+                "2 numeric capture groups: attempt and total.",
+    },
+    {
+        "key": "econnreset",
+        "label": "Connection error",
+        "default": ECONNRESET_RE.pattern,
+        "groups": 0,
+        "help": "Bare API connection failures (errno / fetch failed) with no "
+                "retry banner.",
+    },
+    {
+        "key": "server_error",
+        "label": "Truncated / stalled response",
+        "default": SERVER_ERROR_RE.pattern,
+        "groups": 0,
+        "help": "Server-side mid-stream truncation — the turn ended early "
+                "and ‘continue’ resumes it.",
+    },
+    {
+        "key": "oauth",
+        "label": "Dead session (login needed)",
+        "default": OAUTH_EXPIRED_RE.pattern,
+        "groups": 0,
+        "help": "Expired OAuth token. Matching it only WARNS — no keys are "
+                "ever sent, since ‘continue’ cannot fix it.",
+    },
+    {
+        "key": "fable",
+        "label": "Fable safeguard block",
+        "default": DEFAULT_FABLE_PATTERN,
+        "groups": 0,
+        "help": "Starts the Fable refusal-recovery (only when that feature is "
+                "enabled above).",
+    },
+    {
+        "key": "switch_model",
+        "label": "“Switch model?” dialog",
+        "default": SWITCH_MODEL_RE.pattern,
+        "groups": 0,
+        "help": "The Yes/No confirmation shown when changing model. The "
+                "recovery waits for this before pressing Enter.",
+    },
+]
+
+TRIGGER_DEFAULTS = {s["key"]: s["default"] for s in TRIGGER_SPECS}
+
+
+def compile_trigger_patterns(overrides) -> tuple[dict, list]:
+    """Compile user pattern overrides into {key: re.Pattern}.
+
+    Returns (patterns, errors). Only keys that differ from the built-in
+    default AND validate appear in `patterns`; everything else is omitted so
+    callers fall back to the module-level default by passing None. `errors` is
+    a list of human-readable strings for the GUI to surface — a bad override
+    is REJECTED (default stays in force) rather than silently disabling a
+    trigger, because a trigger that never fires is the failure mode this
+    feature exists to prevent.
+    """
+    patterns, errors = {}, []
+    specs = {s["key"]: s for s in TRIGGER_SPECS}
+    for key, raw in (overrides or {}).items():
+        spec = specs.get(key)
+        if spec is None:
+            continue
+        src = str(raw or "").strip()
+        if not src or src == spec["default"]:
+            continue                      # unchanged → use the built-in
+        try:
+            rx = re.compile(src, re.IGNORECASE)
+        except re.error as e:
+            errors.append(f"{spec['label']}: invalid regex ({e}); "
+                          f"keeping the built-in pattern")
+            continue
+        if rx.groups < spec["groups"]:
+            errors.append(
+                f"{spec['label']}: needs {spec['groups']} capture group(s) "
+                f"but has {rx.groups}; keeping the built-in pattern")
+            continue
+        if rx.search("") is not None:
+            # A pattern that can match nothing (".*", "x*", "foo|") matches at
+            # every position, including a zero-width one at the very end — so
+            # the tail anchor always passes and EVERY window looks stuck.
+            # Left in, it would type 'continue' into every Claude session on
+            # a loop, so reject it rather than let it through.
+            errors.append(
+                f"{spec['label']}: matches empty text, so it would fire on "
+                f"every window; keeping the built-in pattern")
+            continue
+        patterns[key] = rx
+    return patterns, errors
 
 
 # Timezone ABBREVIATIONS Anthropic sometimes prints instead of IANA names.
@@ -678,7 +922,67 @@ def send_text_lines(window_ctrl, lines, dry_run: bool = False) -> bool:
                 # Code's TUI needs a beat to render the resulting state
                 # before the next "continue" submission lands.
                 time.sleep(0.6)
-            auto.SendKeys(str(line) + "{Enter}", interval=0.02)
+            auto.SendKeys(sendkeys_literal(line) + "{Enter}", interval=0.02)
+        return True
+    finally:
+        time.sleep(0.15)
+        if saved_fg and saved_fg != target_hwnd:
+            _set_foreground_hwnd(saved_fg)
+
+
+def sendkeys_literal(text) -> str:
+    """Escape text so uiautomation.SendKeys types it VERBATIM.
+
+    SendKeys reads `{...}` as key syntax, so an unescaped brace doesn't just
+    type the wrong thing — it RAISES (`{` → ValueError, `{task}` → TypeError).
+    That exception used to escape send_text_lines and abort the whole tick,
+    which meant every window enumerated after the offending one silently
+    stopped being watched. Recovery steps are free text typed by the user in
+    the Advanced dialog, so braces are entirely plausible ("continue with the
+    {plan}"). Only braces are special here — %, ^, + and parentheses are
+    literal to SendKeys unless they follow a modifier key spec.
+    """
+    # Single pass on purpose: chained str.replace would re-escape the braces
+    # the first replacement just emitted ("{" → "{{}" → "{{{}}").
+    out = []
+    for ch in str(text):
+        out.append("{{}" if ch == "{" else "{}}" if ch == "}" else ch)
+    return "".join(out)
+
+
+def send_keys(window_ctrl, keyspec: str, dry_run: bool = False) -> bool:
+    """Activate the window's TermControl and send a raw uiautomation SendKeys
+    spec (e.g. "{Esc}") with NO trailing Enter. Same foreground-safety and
+    return contract as send_text_lines — used for interrupt keys like ESC that
+    surface the "Switch model?" dialog without waiting for the turn to end."""
+    if not keyspec:
+        return True
+    term = find_termcontrol(window_ctrl)
+    if term is None:
+        return False
+    if dry_run:
+        return True
+    try:
+        target_hwnd = int(window_ctrl.NativeWindowHandle or 0)
+    except Exception:
+        target_hwnd = 0
+    saved_fg = _get_foreground_hwnd()
+    try:
+        for _ in range(2):
+            try:
+                window_ctrl.SetActive()
+            except Exception:
+                pass
+            try:
+                term.SetFocus()
+            except Exception:
+                pass
+            time.sleep(0.25)
+            if not target_hwnd or _get_foreground_hwnd() == target_hwnd:
+                break
+        if target_hwnd and _get_foreground_hwnd() != target_hwnd:
+            return False
+        auto.SendKeys(str(keyspec), interval=0.02)
         return True
     finally:
         time.sleep(0.15)
