@@ -48,7 +48,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "1.0.16"
+APP_VERSION = "1.0.17"
 
 
 def _force_utf8_console() -> None:
@@ -606,6 +606,43 @@ SWITCH_MODEL_RE = re.compile(
 )
 
 
+# The picker Claude Code shows WITH the safeguard notice ("Session paused"):
+# a numbered pair whose first option offers to switch to a fallback model and
+# whose second offers to edit the prompt and retry on the blocked one. The two
+# option strings are deliberately NOT reproduced verbatim here — writing them
+# out on adjacent lines makes THIS FILE match the pattern below, so merely
+# viewing the source in a watched terminal would look like an open picker and
+# earn a blind Enter. (Same de-fanging convention as the patterns above; the
+# test file splits the literals with string concatenation for this reason.)
+#
+# Option 1 is pre-selected, so a bare Enter accepts the model switch — the
+# session recovers without typing /model at all. This is the real recovery
+# path; the /model + "Switch model?" dance is only needed to go BACK to the
+# blocked model afterwards.
+# Anchored on the option PAIR, and deliberately not naming either model: the
+# fallback ("Opus 4.8") changes with every release. Written with \s+ so this
+# source can't self-match in a watched terminal.
+FABLE_PICKER_RE = re.compile(
+    r"Switch\s+to\s+[\s\S]{0,120}?Edit\s+prompt\s+and\s+retry",
+    re.IGNORECASE,
+)
+
+
+def parse_fable_picker(text: str, pattern=None) -> bool:
+    """True if the safeguard picker is open at the tail of the buffer, i.e. a
+    bare Enter accepts the pre-selected "Switch to <fallback>" option.
+    Tail-anchored like the other modals so a stale one further up scrollback
+    can't make us press Enter into the input box."""
+    rx = pattern or FABLE_PICKER_RE
+    matches = list(rx.finditer(text))
+    if not matches:
+        return False
+    m = matches[-1]
+    if len(text) - m.end() > SWITCH_POST_MATCH_TAIL:
+        return False
+    return True
+
+
 def parse_switch_model_prompt(text: str, pattern=None) -> bool:
     """True if the 'Switch model?' Yes/No dialog is open at the tail of the
     buffer (a plain Enter confirms the pre-selected 'Yes, switch to …').
@@ -732,12 +769,24 @@ TRIGGER_SPECS = [
                 "enabled above).",
     },
     {
+        "key": "fable_picker",
+        "label": "Safeguard picker",
+        "default": FABLE_PICKER_RE.pattern,
+        "groups": 0,
+        # Help text avoids quoting both option strings together — see the
+        # de-fanging note above FABLE_PICKER_RE.
+        "help": "The two-option chooser shown with the safeguard notice "
+                "(“Session paused”). Option 1 offers the fallback model and "
+                "is pre-selected, so Enter alone performs the whole "
+                "recovery — no /model needed.",
+    },
+    {
         "key": "switch_model",
         "label": "“Switch model?” dialog",
         "default": SWITCH_MODEL_RE.pattern,
         "groups": 0,
-        "help": "The Yes/No confirmation shown when changing model. The "
-                "recovery waits for this before pressing Enter.",
+        "help": "The Yes/No confirmation shown when changing model with "
+                "/model. The recovery waits for this before pressing Enter.",
     },
 ]
 

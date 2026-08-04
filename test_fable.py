@@ -115,8 +115,15 @@ gui.list_tab_titles = lambda w: []
 _SG = "safegu" "ards flagged"
 _YES = "Yes, swi" "tch to"
 _NO = "No, go b" "ack"
+_SW = "Switch t" "o"
+_ED = "Edit promp" "t and retry"
 NOTICE = f"API Error: Fable 5's {_SG} this message. They may flag safe content."
 DIALOG = f"Switch model?\n> 1. {_YES} Opus 4.8\n  2. {_NO}"
+# What Claude Code actually shows: the notice comes WITH a two-option picker
+# whose first entry is pre-selected, so one Enter performs the switch.
+PICKER = (f"Session paused\n\nFable 5's {_SG} this message. The safeguards "
+          f"are intentionally broad right now.\n\n"
+          f"> 1. {_SW} Opus 4.8\n  2. {_ED} with Fable 5")
 CLEAN = "all good here, nothing to see"
 ECONN = "API Error: Unable to connect to API (ECONN" "RESET)"
 BANNER = ("You've hit your li" "mit · resets 11pm (Asia/Shanghai)\n"
@@ -461,6 +468,43 @@ w._tick()
 check("N1 opted-in window runs", texts_sent(1) == [["/model opus"]])
 check("N2 non-opted window ignored",
       texts_sent(2) == [] and w._states[2].fable_step == -1)
+
+
+# =============================================================================
+print("---- O: the safeguard picker IS the recovery ----")
+# Regression from a real block (2026-08-04): the notice arrives WITH a picker
+# whose option 1 ("Switch to <fallback>") is pre-selected. One Enter completes
+# the switch — the old default script instead typed /model into an open modal
+# and then ESC'd, which would have cancelled the picker.
+reset([(1, "claude")], {1: PICKER})
+w = new_watcher(steps="<confirm>")
+w._tick()                                    # detect
+check("O1 the picker's notice still triggers detection",
+      w._states[1].fable_step == 0)
+w._tick()                                    # <confirm> accepts the picker
+check("O2 <confirm> accepts the picker with one Enter",
+      texts_sent() == [[""]])
+advance(gui.FABLE_KEY_GAP_S + 1)
+w._tick()
+check("O3 run completes after the single Enter",
+      w._states[1].fable_step == -1 and w._states[1].fable_handled is True)
+
+# <esc> must treat the picker as "a modal is already showing" — ESC would
+# dismiss it, losing the offered switch.
+reset([(1, "claude")], {1: PICKER})
+w = new_watcher(steps="<esc>\n<confirm>")
+w._tick()
+w._tick()
+check("O4 <esc> skipped while the picker is showing", keys_sent() == [])
+
+# The shipped default script must run cleanly against the real UI.
+reset([(1, "claude")], {1: PICKER})
+w = new_watcher()                            # DEFAULT_FABLE_STEPS
+w._tick()                                    # detect
+w._tick()                                    # <confirm> -> Enter on picker
+check("O5 default script confirms the picker first", texts_sent() == [[""]])
+check("O6 default script does NOT type /model into the picker",
+      not any("/model" in str(t) for t in texts_sent()))
 
 
 print()

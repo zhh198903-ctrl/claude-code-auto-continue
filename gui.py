@@ -84,7 +84,8 @@ from auto_continue import (
     TRIGGER_DEFAULTS,
     TRIGGER_SPECS, compile_trigger_patterns, find_terminal_windows,
     init_uia_thread, list_tab_titles, next_reset_datetime,
-    parse_econnreset_stuck, parse_fable_refusal, parse_limit_message,
+    parse_econnreset_stuck, parse_fable_picker, parse_fable_refusal,
+    parse_limit_message,
     parse_limit_prompt, parse_oauth_expired, parse_retry_exhausted,
     parse_server_error_stuck, parse_switch_model_prompt, read_terminal_text,
     send_continue, send_keys, send_text_lines,
@@ -145,11 +146,13 @@ def title_key(title: str) -> str:
 # → run on Opus for <wait> seconds → switch back to Fable (ESC if busy) +
 # confirm + continue. EITHER /model can queue behind a running turn and not pop
 # the dialog; <esc> surfaces it, and it's skipped when a dialog is already up.
+# Default flow, matched to the UI Claude Code actually shows. The safeguard
+# notice comes WITH a picker whose option 1 ("Switch to <fallback>") is already
+# selected, so <confirm> — one Enter — performs the whole switch. Typing
+# /model is only needed to come BACK to the blocked model afterwards, and that
+# path does raise the "Switch model?" dialog, hence the second <esc>/<confirm>.
 DEFAULT_FABLE_STEPS = (
-    "/model opus\n"
-    "<esc>\n"
     "<confirm>\n"
-    "continue\n"
     "<wait>\n"
     "/model fable\n"
     "<esc>\n"
@@ -745,9 +748,14 @@ class Watcher(QObject):
                                 else:
                                     failed = True
                             elif kind == "esc":
-                                if tail and parse_switch_model_prompt(
-                                        tail,
-                                        self._patterns.get("switch_model")):
+                                if tail and (
+                                        parse_switch_model_prompt(
+                                            tail,
+                                            self._patterns.get("switch_model"))
+                                        or parse_fable_picker(
+                                            tail,
+                                            self._patterns.get(
+                                                "fable_picker"))):
                                     # Dialog already up — ESC would CANCEL it. Skip;
                                     # the next <confirm> accepts the showing dialog.
                                     advance = True
@@ -766,8 +774,17 @@ class Watcher(QObject):
                                         failed = True
                                 # else: wait a moment for an idle dialog to appear
                             elif kind == "confirm":
-                                dlg_up = bool(tail and parse_switch_model_prompt(
-                                    tail, self._patterns.get("switch_model")))
+                                # Either confirmable modal counts: the
+                                # safeguard picker (Enter = "Switch to
+                                # <fallback>", which IS the whole recovery) or
+                                # the /model "Switch model?" Yes/No dialog.
+                                dlg_up = bool(tail and (
+                                    parse_switch_model_prompt(
+                                        tail,
+                                        self._patterns.get("switch_model"))
+                                    or parse_fable_picker(
+                                        tail,
+                                        self._patterns.get("fable_picker"))))
                                 overdue = (
                                     st.fable_step_at is not None
                                     and now - st.fable_step_at

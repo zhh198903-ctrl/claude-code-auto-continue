@@ -6,7 +6,8 @@ from auto_continue import (
     NETWORK_POST_MATCH_TAIL, SWITCH_POST_MATCH_TAIL,
     compile_trigger_patterns, parse_limit_message, parse_retry_exhausted,
     parse_econnreset_stuck, parse_server_error_stuck, parse_fable_refusal,
-    parse_switch_model_prompt, parse_limit_prompt, parse_oauth_expired,
+    parse_fable_picker, parse_switch_model_prompt, parse_limit_prompt,
+    parse_oauth_expired,
     next_reset_datetime,
 )
 from datetime import datetime, timedelta
@@ -375,6 +376,40 @@ switch_model_samples = [
     ("Switch model?\n> 1. " + _YES + " Fable 5\n  2. " + _NO + "\n"
      + "x" * (SWITCH_POST_MATCH_TAIL + 500), False),
 ]
+
+# ---------- parse_fable_picker ----------
+# The chooser Claude Code shows WITH the safeguard notice. Option 1 is
+# pre-selected, so a bare Enter performs the model switch — this, not /model,
+# is the real recovery path. Literals split like everything else here.
+_SW = "Switch t" "o"
+_ED = "Edit promp" "t and retry"
+fable_picker_samples = [
+    # Verbatim from a real block (2026-08-04).
+    ("Session paused\n\nFable 5's " + _SG + " this message. The safeguards "
+     "are intentionally broad right now and may flag safe and routine "
+     "coding, cybersecurity, or biology work.\n\n"
+     "> 1. " + _SW + " Opus 4.8\n  2. " + _ED + " with Fable 5", True),
+    # The fallback model name changes every release — must not be hardcoded.
+    ("> 1. " + _SW + " Sonnet 5\n  2. " + _ED + " with Fable 5", True),
+    # Only the first option, no pair — not the picker, so no blind Enter.
+    ("> 1. " + _SW + " Opus 4.8", False),
+    # Ordinary prose.
+    ("I had to switch to a different model yesterday", False),
+    # Stale — scrolled too far up to still be open.
+    ("> 1. " + _SW + " Opus 4.8\n  2. " + _ED + " with Fable 5\n"
+     + "x" * (SWITCH_POST_MATCH_TAIL + 500), False),
+]
+
+print()
+print("---- parse_fable_picker ----")
+for i, (text, expected) in enumerate(fable_picker_samples):
+    got = parse_fable_picker(text)
+    ok = got == expected
+    print(f"[{'OK ' if ok else 'FAIL'}] picker sample {i}: "
+          f"got={got!r} expected={expected!r}")
+    if not ok:
+        failures += 1
+
 
 print()
 print("---- parse_switch_model_prompt ----")
