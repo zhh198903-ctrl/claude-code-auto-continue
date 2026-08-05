@@ -507,6 +507,50 @@ check("O6 default script does NOT type /model into the picker",
       not any("/model" in str(t) for t in texts_sent()))
 
 
+# =============================================================================
+print("---- P: the broken v1.0.16 step script is migrated on load ----")
+# Saved settings win over the built-in default, so upgrading alone would leave
+# every existing user on the script that ESC'd the picker away. Only the
+# untouched legacy string is rewritten; a customised one must survive.
+check("P1 legacy default differs from the current one",
+      gui.LEGACY_FABLE_STEPS_V1016 != gui.DEFAULT_FABLE_STEPS)
+check("P2 legacy script is the one that typed /model first",
+      gui._parse_recovery_steps(gui.LEGACY_FABLE_STEPS_V1016)[0]
+      == ("send", "/model opus"))
+check("P3 current script confirms the picker first",
+      gui._parse_recovery_steps(gui.DEFAULT_FABLE_STEPS)[0]
+      == ("confirm", None))
+
+# Exercise the load-path migration itself against a stored config.
+import json as _json
+
+
+class _FakeSettings:
+    def __init__(self, store):
+        self._s = store
+
+    def value(self, key, default=None, type=None):
+        return self._s.get(key, default)
+
+
+def _migrate(stored_steps):
+    """Mirror _load_settings' merge + migration on a stored fable_cfg."""
+    cfg = {"enabled": False, "all_windows": True, "delay": 180,
+           "steps": gui.DEFAULT_FABLE_STEPS, "windows": []}
+    cfg.update(_json.loads(_json.dumps({"steps": stored_steps})))
+    if cfg.get("steps") == gui.LEGACY_FABLE_STEPS_V1016:
+        cfg["steps"] = gui.DEFAULT_FABLE_STEPS
+    return cfg["steps"]
+
+
+check("P4 untouched legacy script is migrated",
+      _migrate(gui.LEGACY_FABLE_STEPS_V1016) == gui.DEFAULT_FABLE_STEPS)
+_custom = "/model haiku\n<confirm>\ncontinue"
+check("P5 a customised script is NOT touched", _migrate(_custom) == _custom)
+check("P6 the current script is left as-is",
+      _migrate(gui.DEFAULT_FABLE_STEPS) == gui.DEFAULT_FABLE_STEPS)
+
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

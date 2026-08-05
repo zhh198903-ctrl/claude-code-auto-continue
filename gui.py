@@ -159,6 +159,24 @@ DEFAULT_FABLE_STEPS = (
     "<confirm>\n"
     "continue"
 )
+
+# The v1.0.16 default, which typed /model into the already-open picker and
+# then ESC'd it away. Saved settings take precedence over the built-in
+# default, so upgrading alone would leave every existing user on the broken
+# script forever. If the stored steps are byte-identical to this — i.e. the
+# user never edited them — they get migrated to the new default; a customised
+# script is always left alone.
+LEGACY_FABLE_STEPS_V1016 = (
+    "/model opus\n"
+    "<esc>\n"
+    "<confirm>\n"
+    "continue\n"
+    "<wait>\n"
+    "/model fable\n"
+    "<esc>\n"
+    "<confirm>\n"
+    "continue"
+)
 SWITCH_SETTLE_S = 10       # if no dialog within this after a step, move on
 FABLE_RETICK_MS = 6000     # fast follow-up tick while a recovery is running
 # Every step is bounded. Without these a recovery can wedge a window: the
@@ -1505,6 +1523,8 @@ class MainWindow(QMainWindow):
         # user actually changed are stored, so a future build's improved
         # default still wins for every trigger they never touched.
         self._trigger_patterns: dict = {}
+        # Set when _load_settings rewrote a stale v1.0.16 step script.
+        self._migrated_fable_steps = False
         # The release dict from the latest "update available" result, if any.
         self._pending_release: Optional[dict] = None
         # Single-instance "show me" listener thread (attached in main()).
@@ -2156,6 +2176,15 @@ class MainWindow(QMainWindow):
                 loaded_f = json.loads(raw_f) if raw_f else {}
                 if isinstance(loaded_f, dict):
                     self._fable_cfg.update(loaded_f)
+                    # Saved settings win over the built-in default, so a user
+                    # who never customised the script would stay on the
+                    # v1.0.16 one — which types /model into the open picker
+                    # and then ESCs it away — even after upgrading. Migrate
+                    # that exact string; anything edited is left untouched.
+                    if (self._fable_cfg.get("steps")
+                            == LEGACY_FABLE_STEPS_V1016):
+                        self._fable_cfg["steps"] = DEFAULT_FABLE_STEPS
+                        self._migrated_fable_steps = True
             except Exception:
                 pass
             raw_t = self.settings.value("trigger_patterns", "", type=str) or ""
@@ -2192,6 +2221,12 @@ class MainWindow(QMainWindow):
         self.sig_set_model_overrides.emit(dict(self._model_overrides))
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self.sig_set_trigger_patterns.emit(dict(self._trigger_patterns))
+        if self._migrated_fable_steps:
+            self._append_log(
+                "warn",
+                "Fable-recover steps migrated from the v1.0.16 script "
+                "(it typed /model into the picker and then ESC'd it "
+                "away); the new one confirms the picker instead")
         # Apply keep-awake state immediately if the user had it ON before.
         if self.keep_awake_check.isChecked():
             self._apply_keep_awake(True)
