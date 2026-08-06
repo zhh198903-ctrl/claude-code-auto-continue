@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 import pytz
 from PyQt6.QtWidgets import QApplication
 
+import auto_continue as ac
 import gui
 
 _app = QApplication.instance() or QApplication([])
@@ -701,6 +702,45 @@ advance(10 * 60)                             # far past every deadline
 w._tick()
 check("S4 a showing modal is confirmed however late the tick lands",
       texts_sent() == [[""]])
+
+
+# =============================================================================
+print("---- T: a run must say what model it actually ended on ----")
+# The 7th live recovery logged a plain "done" while the session had been left
+# on the fallback model. Nothing in the log said so, and the failure went
+# unnoticed for an hour. Completion now reports the model, and warns on a
+# mismatch with what the script's last /model step asked for.
+_BAR_F = "  " + chr(91) + "Fable 5" + chr(93) + " ~~ 44% | usage"
+_BAR_O = "  " + chr(91) + "Opus 4.8" + chr(93) + " ~~ 63% | usage"
+
+check("T1 last /model step is read from the script",
+      gui._last_model_step(
+          gui._parse_recovery_steps(gui.DEFAULT_FABLE_STEPS)) == "fable")
+check("T2 no /model step -> nothing to compare",
+      gui._last_model_step(gui._parse_recovery_steps("continue")) is None)
+check("T3 status bar parses", ac.current_model(_BAR_F) == "Fable"
+      and ac.current_model(_BAR_O) == "Opus")
+check("T4 absent status bar is None", ac.current_model("no bar here") is None)
+
+# Ended on the right model -> informational only.
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
+w = new_watcher(steps="/model fable")
+LOGS = []
+w.log.connect(lambda k, m: LOGS.append((k, m)))
+w._tick()
+w._tick()
+warns = [m for k, m in LOGS if k == "warn" and "NOT switched back" in m]
+check("T5 correct end model logs no warning", not warns)
+
+# Ended on the WRONG model -> loud.
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_O})
+w = new_watcher(steps="/model fable")
+LOGS = []
+w.log.connect(lambda k, m: LOGS.append((k, m)))
+w._tick()
+w._tick()
+warns = [m for k, m in LOGS if k == "warn" and "NOT switched back" in m]
+check("T6 wrong end model is reported loudly", len(warns) == 1)
 
 
 print()

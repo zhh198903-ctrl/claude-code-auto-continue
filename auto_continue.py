@@ -571,6 +571,27 @@ DEFAULT_FABLE_PATTERN = (
 FABLE_REFUSAL_RE = re.compile(DEFAULT_FABLE_PATTERN, re.IGNORECASE)
 
 
+# Claude Code's status bar names the active model in square brackets near the
+# very bottom of the viewport. Only used to REPORT what a recovery ended on —
+# never to drive keystrokes — so a missed read costs a log line, nothing more.
+# Written with \s so this source can't match its own pattern in a watched
+# terminal, and the family list is open-ended enough to survive renames.
+MODEL_BAR_RE = re.compile(
+    r"\[\s*(Fable|Opus|Sonnet|Haiku|Mythos)[^\]\n]{0,24}\]",
+    re.IGNORECASE,
+)
+
+
+def current_model(text: str):
+    """Model family shown in the status bar, or None if it isn't visible.
+
+    Takes the LAST occurrence: the bar is redrawn at the bottom, so the most
+    recent one is the live state.
+    """
+    matches = MODEL_BAR_RE.findall(text or "")
+    return matches[-1] if matches else None
+
+
 def fable_refusal_distance(text: str, pattern=None):
     """Chars between the END of the latest safeguard notice and the end of the
     buffer, or None if there is no in-range notice.

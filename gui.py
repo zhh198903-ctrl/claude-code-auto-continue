@@ -84,7 +84,8 @@ from auto_continue import (
     TRIGGER_DEFAULTS,
     TRIGGER_SPECS, compile_trigger_patterns, find_terminal_windows,
     init_uia_thread, list_tab_titles, next_reset_datetime,
-    fable_refusal_distance, parse_econnreset_stuck, parse_fable_picker,
+    current_model, fable_refusal_distance, parse_econnreset_stuck,
+    parse_fable_picker,
     parse_fable_refusal,
     parse_limit_message,
     parse_limit_prompt, parse_oauth_expired, parse_retry_exhausted,
@@ -204,6 +205,21 @@ FABLE_MAX_RUNS = 2         # consecutive recoveries before we stop retrying
 # re-trigger the recovery on every one — do not "optimise" it without
 # re-measuring against captured snapshots.
 FABLE_FRESH_MARGIN = 400
+
+
+def _last_model_step(steps):
+    """Model name from the LAST `/model X` line in a step script, if any.
+
+    That is what the run is meant to end on, so it is what the completion
+    check compares the status bar against.
+    """
+    want = None
+    for kind, arg in steps or ():
+        if kind == "send" and str(arg).strip().lower().startswith("/model"):
+            parts = str(arg).split()
+            if len(parts) > 1:
+                want = parts[1]
+    return want
 
 
 def _fable_reset(st) -> None:
@@ -911,8 +927,30 @@ class Watcher(QObject):
                                 if st.fable_step >= len(steps):
                                     _fable_reset(st)
                                     st.fable_handled = True
-                                    self.log.emit(
-                                        "info", f"Fable-recover done → {title!r}")
+                                    # Say what it actually ended ON, and warn
+                                    # when that isn't the model the last
+                                    # /model step asked for. A run once
+                                    # reported "done" while the session was
+                                    # left on the fallback model — the failure
+                                    # went unnoticed for an hour because the
+                                    # log only ever said "done".
+                                    ended_on = current_model(tail)
+                                    wanted = _last_model_step(steps)
+                                    if (wanted and ended_on
+                                            and wanted.lower()
+                                            not in ended_on.lower()):
+                                        self.log.emit(
+                                            "warn",
+                                            f"Fable-recover finished on "
+                                            f"{ended_on!r} but the script asked "
+                                            f"for {wanted!r} → {title!r}; the "
+                                            f"session was NOT switched back")
+                                    else:
+                                        self.log.emit(
+                                            "info",
+                                            f"Fable-recover done → {title!r}"
+                                            + (f" (on {ended_on})"
+                                               if ended_on else ""))
                             st.status = ST_FABLE
                             self._retick_soon()
                             continue
