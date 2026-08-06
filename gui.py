@@ -216,6 +216,7 @@ def _fable_reset(st) -> None:
     st.fable_tries = 0
     st.fable_wait_from = None
     st.fable_last_key_at = None
+    st.fable_picker_used = False
 
 
 def _parse_recovery_steps(text: str) -> list:
@@ -304,6 +305,7 @@ class _WState:
     fable_last_key_at: Optional[datetime] = None  # rate-limit repeated Enter
     fable_runs: int = 0                           # recoveries since idle
     fable_notice_dist: Optional[int] = None       # tail-distance when latched
+    fable_picker_used: bool = False               # picker accepted this run
 
 
 class Watcher(QObject):
@@ -574,6 +576,25 @@ class Watcher(QObject):
         except Exception:
             pass
 
+    def _modal_up(self, tail: str, st) -> bool:
+        """True if a modal a bare Enter can accept is showing.
+
+        The safeguard picker is only counted until this run has ACCEPTED it
+        once. Its text stays in the scrollback afterwards, and at the picker's
+        tail allowance that stale copy kept reading as "a modal is open" for
+        the rest of the run — which made <esc> skip (so a switch queued behind
+        a busy turn was never surfaced, the case <esc> exists for) and made the
+        next <confirm> fire a bare Enter into a running turn. Four live
+        recoveries hid this: the fallback model always finished in time, so a
+        real dialog was there to accept.
+        """
+        if parse_switch_model_prompt(
+                tail, self._patterns.get("switch_model")):
+            return True
+        if st.fable_picker_used:
+            return False
+        return parse_fable_picker(tail, self._patterns.get("fable_picker"))
+
     def _retick_fire(self) -> None:
         """Target of the coalescing timer. Only a tick that the retick timer
         itself triggered may clear the pending marker — clearing it at the top
@@ -782,14 +803,7 @@ class Watcher(QObject):
                                 else:
                                     failed = True
                             elif kind == "esc":
-                                if tail and (
-                                        parse_switch_model_prompt(
-                                            tail,
-                                            self._patterns.get("switch_model"))
-                                        or parse_fable_picker(
-                                            tail,
-                                            self._patterns.get(
-                                                "fable_picker"))):
+                                if tail and self._modal_up(tail, st):
                                     # Dialog already up — ESC would CANCEL it. Skip;
                                     # the next <confirm> accepts the showing dialog.
                                     advance = True
@@ -812,13 +826,7 @@ class Watcher(QObject):
                                 # safeguard picker (Enter = "Switch to
                                 # <fallback>", which IS the whole recovery) or
                                 # the /model "Switch model?" Yes/No dialog.
-                                dlg_up = bool(tail and (
-                                    parse_switch_model_prompt(
-                                        tail,
-                                        self._patterns.get("switch_model"))
-                                    or parse_fable_picker(
-                                        tail,
-                                        self._patterns.get("fable_picker"))))
+                                dlg_up = bool(tail and self._modal_up(tail, st))
                                 overdue = (
                                     st.fable_step_at is not None
                                     and now - st.fable_step_at
@@ -849,6 +857,15 @@ class Watcher(QObject):
                                                        dry_run=self._dry_run):
                                         st.fable_dlg_seen = True
                                         st.fable_last_key_at = now
+                                        # If this Enter went to the picker (no
+                                        # switch dialog present), it is spent:
+                                        # its text lingers and must not read
+                                        # as an open modal again this run.
+                                        if not parse_switch_model_prompt(
+                                                tail,
+                                                self._patterns.get(
+                                                    "switch_model")):
+                                            st.fable_picker_used = True
                                     else:
                                         failed = True
                                 elif (st.fable_step_at is not None

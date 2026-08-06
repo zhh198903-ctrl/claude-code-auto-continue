@@ -615,6 +615,56 @@ for label, seq in (("run3", [732, 1083, 939, 981, 1083]),
           not spurious)
 
 
+# =============================================================================
+print("---- R: the spent picker must stop reading as an open modal ----")
+# Found by driving the branch four live recoveries never reached: the fallback
+# model still mid-turn when /model fires. The picker's text stays in the
+# scrollback after it is accepted, so at its tail allowance it kept looking
+# like an open modal — <esc> skipped (never surfacing the queued switch, the
+# one thing <esc> exists for) and the next <confirm> fired a bare Enter into a
+# running turn.
+BUSY_AFTER_PICKER = (
+    PICKER + "\n* Synthesizing... (turn still running)\n"
+    "GOT '/model fable'\n"
+    "   (switch queued behind the running turn - no dialog yet)\n")
+
+reset([(1, "claude")], {1: PICKER})
+w = new_watcher(steps="<confirm>\n/model fable\n<esc>\n<confirm>\ncontinue")
+w._tick()                                    # detect
+w._tick()                                    # <confirm> accepts the picker
+check("R1 picker accepted with one Enter", texts_sent() == [[""]])
+check("R2 picker marked spent", w._states[1].fable_picker_used is True)
+
+advance(gui.FABLE_KEY_GAP_S + 1)
+TEXTS[1] = BUSY_AFTER_PICKER                 # picker text lingers, no real modal
+w._tick()                                    # advance off <confirm>
+w._tick()                                    # send /model fable
+check("R3 sent /model fable", texts_sent()[-1] == ["/model fable"])
+
+# <esc> must now SEE no modal and fire, instead of being fooled by the stale
+# picker text sitting in the scrollback.
+w._tick()
+advance(5)                                   # past the 4s settle
+w._tick()
+check("R4 <esc> fires to surface the queued switch",
+      keys_sent() == ["{Esc}"])
+
+# And a plain buffer with only the stale picker must not read as a modal.
+st = w._states[1]
+check("R5 spent picker no longer counts as an open modal",
+      w._modal_up(BUSY_AFTER_PICKER, st) is False)
+st2 = gui._WState(hwnd=9, title="x")
+check("R6 an unspent picker still counts",
+      w._modal_up(BUSY_AFTER_PICKER, st2) is True)
+check("R7 a real switch dialog always counts",
+      w._modal_up(BUSY_AFTER_PICKER + "\n" + DIALOG, st) is True)
+
+# A fresh run re-arms the picker (it is per-run, not permanent).
+gui._fable_reset(st)
+check("R8 reset re-arms the picker for the next run",
+      st.fable_picker_used is False)
+
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)
