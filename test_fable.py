@@ -742,6 +742,20 @@ w._tick()
 warns = [m for k, m in LOGS if k == "warn" and "NOT switched back" in m]
 check("T6 wrong end model is reported loudly", len(warns) == 1)
 
+# The status bar is genuinely absent whenever a full-screen modal covers the
+# viewport — seen live when the session sat on Claude Code's interrupt menu.
+# An unreadable bar must stay silent, never manufacture a "not switched back".
+reset([(1, "claude")], {1: NOTICE + "\n4. Type something.\n5. Chat about this"})
+w = new_watcher(steps="/model fable")
+LOGS = []
+w.log.connect(lambda k, m: LOGS.append((k, m)))
+w._tick()
+w._tick()
+warns = [m for k, m in LOGS if k == "warn" and "NOT switched back" in m]
+dones = [m for k, m in LOGS if "Fable-recover done" in m]
+check("T7 unreadable status bar produces no false warning", not warns)
+check("T8 completion is still reported", len(dones) == 1)
+
 
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
