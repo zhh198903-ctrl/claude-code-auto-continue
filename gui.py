@@ -190,9 +190,19 @@ FABLE_SEND_RETRIES = 3     # re-attempts when a send can't reach foreground
 FABLE_WAIT_MAX_MULT = 4    # <wait> can stretch to N× on stalls, then gives up
 FABLE_STALE_RUN_S = 900    # a run older than this is abandoned, not resumed
 FABLE_MAX_RUNS = 2         # consecutive recoveries before we stop retrying
-# A handled notice drifts further from the tail as the session prints. A
-# match this much CLOSER than the one we latched is a genuinely new block,
-# not the old text; the margin absorbs redraw jitter in the trailing rows.
+# A handled notice drifts further from the tail as the session prints, so a
+# match much CLOSER than the furthest we've seen is a genuinely new block.
+#
+# The margin is NOT cosmetic, and "distance only grows" is only true in the
+# large. What we read is a live terminal viewport, not an append-only log:
+# modals opening and closing rewrite the trailing rows, so the distance
+# oscillates. Measured across two real recoveries on this session:
+#     run 3: 732 -> 1083 -> 939 -> 981 -> 1083   (shrank 144)
+#     run 4: 878 -> 1017 -> 837 -> 1017 -> 1119  (shrank 180)
+# Worst real shrink was 180 chars, so 400 leaves ~2.2x headroom. Tightening
+# this below ~250 would make ordinary redraws read as a fresh block and
+# re-trigger the recovery on every one — do not "optimise" it without
+# re-measuring against captured snapshots.
 FABLE_FRESH_MARGIN = 400
 
 

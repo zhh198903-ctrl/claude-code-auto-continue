@@ -599,6 +599,21 @@ w._tick()
 check("Q6 sub-margin drift is not mistaken for a new block",
       w._states[1].fable_step == -1 and SENT == [])
 
+# Replay of the real oscillation measured on a live session (see the comment
+# on FABLE_FRESH_MARGIN). The terminal is a viewport, not an append-only log:
+# modals opening and closing rewrite the trailing rows, so the distance dips.
+# None of these dips may read as a new block.
+for label, seq in (("run3", [732, 1083, 939, 981, 1083]),
+                   ("run4", [878, 1017, 837, 1017, 1119])):
+    furthest = None
+    spurious = []
+    for d in seq:
+        if furthest is not None and d + gui.FABLE_FRESH_MARGIN < furthest:
+            spurious.append(d)
+        furthest = d if furthest is None else max(furthest, d)
+    check(f"Q7 {label}: real redraw jitter never reads as a new block",
+          not spurious)
+
 
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
