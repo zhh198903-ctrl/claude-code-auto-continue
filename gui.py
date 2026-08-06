@@ -827,10 +827,24 @@ class Watcher(QObject):
                                 # <fallback>", which IS the whole recovery) or
                                 # the /model "Switch model?" Yes/No dialog.
                                 dlg_up = bool(tail and self._modal_up(tail, st))
+                                # A SHOWING modal is confirmed no matter how
+                                # long this step has waited — the timeouts
+                                # below only decide when to give up on a modal
+                                # that never appeared. Checking overdue first
+                                # was a live failure: at a 60s poll with a
+                                # fixed 30s deadline, the first tick to reach
+                                # this step was already overdue, so it advanced
+                                # without ever looking at the open picker. The
+                                # modal just sat there and the recovery
+                                # silently did nothing.
+                                # The deadline is also poll-relative now, so a
+                                # slow poll can't expire it before a tick lands.
+                                confirm_max = max(FABLE_CONFIRM_MAX_S,
+                                                  2 * self._interval)
                                 overdue = (
                                     st.fable_step_at is not None
                                     and now - st.fable_step_at
-                                    >= timedelta(seconds=FABLE_CONFIRM_MAX_S))
+                                    >= timedelta(seconds=confirm_max))
                                 if st.fable_dlg_seen:
                                     # EXACTLY ONE Enter per dialog, ever. The
                                     # confirmed modal's text STAYS in the
@@ -846,8 +860,6 @@ class Watcher(QObject):
                                             >= timedelta(
                                                 seconds=FABLE_KEY_GAP_S)):
                                         advance = True
-                                elif overdue:
-                                    advance = True   # no dialog ever appeared
                                 elif dlg_up:
                                     self.log.emit(
                                         "fire",
@@ -868,9 +880,11 @@ class Watcher(QObject):
                                             st.fable_picker_used = True
                                     else:
                                         failed = True
-                                elif (st.fable_step_at is not None
-                                      and now - st.fable_step_at
-                                      >= timedelta(seconds=SWITCH_SETTLE_S)):
+                                elif (overdue
+                                      or (st.fable_step_at is not None
+                                          and now - st.fable_step_at
+                                          >= timedelta(
+                                              seconds=SWITCH_SETTLE_S))):
                                     advance = True      # no dialog appeared
                             else:
                                 advance = True          # unknown step → skip

@@ -665,6 +665,44 @@ check("R8 reset re-arms the picker for the next run",
       st.fable_picker_used is False)
 
 
+# =============================================================================
+print("---- S: <confirm> must outlast the poll interval ----")
+# Observed live: with a 60s poll and a fixed 30s confirm deadline, the first
+# tick to evaluate <confirm> was already overdue, so the step advanced without
+# ever pressing Enter. The modal stayed open and the recovery did nothing —
+# silently, since the "confirming" line only logs when an attempt is made.
+reset([(1, "claude")], {1: PICKER})
+w = new_watcher(steps="<confirm>\ncontinue")
+w._interval = 60                             # the real configured poll
+w._tick()                                    # detect / arm
+advance(59)                                  # one poll later, retick missed
+w._tick()
+check("S1 still attempts the confirm a whole poll later",
+      texts_sent() == [[""]])
+
+# And it must still give up eventually rather than pressing forever.
+reset([(1, "claude")], {1: NOTICE})          # notice but NO modal to accept
+w = new_watcher(steps="<confirm>\ncontinue")
+w._interval = 60
+w._tick()
+advance(59)
+w._tick()
+check("S2 no Enter when there is no modal", texts_sent() == [])
+check("S3 with nothing to accept it moves on instead of stalling",
+      w._states[1].fable_step == 1)
+
+# The decisive case: a modal STILL showing long past every timeout must still
+# be confirmed. Testing the deadline before the modal is what broke live.
+reset([(1, "claude")], {1: PICKER})
+w = new_watcher(steps="<confirm>\ncontinue")
+w._interval = 60
+w._tick()                                    # arm
+advance(10 * 60)                             # far past every deadline
+w._tick()
+check("S4 a showing modal is confirmed however late the tick lands",
+      texts_sent() == [[""]])
+
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)
