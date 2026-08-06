@@ -571,19 +571,32 @@ DEFAULT_FABLE_PATTERN = (
 FABLE_REFUSAL_RE = re.compile(DEFAULT_FABLE_PATTERN, re.IGNORECASE)
 
 
+def fable_refusal_distance(text: str, pattern=None):
+    """Chars between the END of the latest safeguard notice and the end of the
+    buffer, or None if there is no in-range notice.
+
+    Callers use this to tell a NEW block from the one they already handled.
+    The notice lingers in scrollback long after a recovery finishes (measured:
+    tens of minutes), so "is a notice visible" cannot answer that question. The
+    distance can only GROW as the session prints more, so a match that is
+    suddenly CLOSER to the tail is a fresh notice — which matters because the
+    recovery ends by retrying the very message that was flagged, making an
+    immediate re-block the likeliest next event.
+    """
+    rx = pattern or FABLE_REFUSAL_RE
+    matches = list(rx.finditer(text))
+    if not matches:
+        return None
+    dist = len(text) - matches[-1].end()
+    return dist if dist <= NETWORK_POST_MATCH_TAIL else None
+
+
 def parse_fable_refusal(text: str, pattern=None) -> bool:
     """True if a Fable safety-guardrail block sits near the tail of the buffer.
     `pattern` may be a user-compiled re.Pattern from the Advanced dialog;
     defaults to FABLE_REFUSAL_RE. Tail-anchored like the other network parsers
     so a stale notice further up scrollback doesn't retrigger."""
-    rx = pattern or FABLE_REFUSAL_RE
-    matches = list(rx.finditer(text))
-    if not matches:
-        return False
-    m = matches[-1]
-    if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
-        return False
-    return True
+    return fable_refusal_distance(text, pattern) is not None
 
 
 # The "Switch model?" confirmation dialog Claude Code shows when switching to a

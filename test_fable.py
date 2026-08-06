@@ -551,6 +551,55 @@ check("P6 the current script is left as-is",
       _migrate(gui.DEFAULT_FABLE_STEPS) == gui.DEFAULT_FABLE_STEPS)
 
 
+# =============================================================================
+print("---- Q: a SECOND block is caught while the first notice lingers ----")
+# Observed live: after a recovery, the handled notice stays matchable in the
+# scrollback for tens of minutes. The script ends by retrying the very message
+# that was flagged, so an immediate re-block is the likeliest next event — and
+# with a plain "already handled" latch it would go unnoticed, stalling the
+# session with nobody watching.
+reset([(1, "claude")], {1: NOTICE})
+w = new_watcher(steps="continue")
+w._tick()                                    # detect
+w._tick()                                    # run + finish
+check("Q1 first run handled", w._states[1].fable_handled is True)
+first_dist = w._states[1].fable_notice_dist
+check("Q1b latched the notice's distance", first_dist is not None)
+
+# The old notice drifts away as the session prints — no re-trigger.
+TEXTS[1] = NOTICE + "\n" + ("output line\n" * 40)
+SENT.clear()
+w._tick()
+check("Q2 drifting old notice does not re-trigger",
+      w._states[1].fable_step == -1 and SENT == [])
+
+# Now a genuinely NEW notice appears at the tail: closer than the latched one.
+TEXTS[1] = NOTICE + "\n" + ("output line\n" * 40) + "\n" + NOTICE
+w._tick()
+check("Q3 fresh notice re-arms the recovery", w._states[1].fable_step == 0)
+check("Q4 counted as a second run", w._states[1].fable_runs == 2)
+
+# ...but still bounded: a third consecutive block gives up rather than looping.
+w._tick()                                    # runs step 0 of run 2
+for _ in range(4):
+    advance(30)
+    TEXTS[1] = TEXTS[1] + "\n" + NOTICE      # keep re-blocking
+    w._tick()
+check("Q5 repeated fresh blocks stay capped",
+      w._states[1].fable_runs <= gui.FABLE_MAX_RUNS)
+
+# A notice that merely jitters slightly must NOT count as new.
+reset([(1, "claude")], {1: NOTICE})
+w = new_watcher(steps="continue")
+w._tick()
+w._tick()
+SENT.clear()
+TEXTS[1] = NOTICE + "\n" + ("x" * (gui.FABLE_FRESH_MARGIN // 2))
+w._tick()
+check("Q6 sub-margin drift is not mistaken for a new block",
+      w._states[1].fable_step == -1 and SENT == [])
+
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)
