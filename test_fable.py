@@ -313,26 +313,50 @@ check("F4 wait expires and advances", w._states[1].fable_step == 2)
 
 
 # =============================================================================
-print("---- G: <wait> stalls reset the countdown, but are capped ----")
+print("---- G: <wait> banks only productive time ----")
+# <wait> means "N seconds of real work on the fallback model". A network stall
+# must cost the recovery nothing — real outages here ran 36 and 90 minutes, and
+# expiring the wait during one sends /model into a still-stuck session.
 reset([(1, "claude")], {1: NOTICE + "\n" + ECONN})
 w = new_watcher(steps="continue\n<wait>\n/model fable", delay=60)
 w._tick()                                    # arm
 w._tick()                                    # continue -> at <wait>
 check("G1 at <wait>", w._states[1].fable_step == 1)
-for _ in range(3):                           # 90s < the 240s cap
+
+for _ in range(6):                           # 180s of pure outage
     advance(30)
     w._tick()
-check("G2 stall keeps holding the wait open", w._states[1].fable_step == 1)
-check("G3 outer handler still pokes the stalled fallback model",
+check("G2 outage banks no run time", w._states[1].fable_wait_acc == 0.0)
+check("G3 wait is still open after 3x the delay in wall time",
+      w._states[1].fable_step == 1)
+check("G4 outer handler still pokes the stalled fallback model",
       ["continue"] in texts_sent())
-for _ in range(7):                           # push past delay * MAX_MULT
+
+# Network recovers: now the clock actually starts.
+TEXTS[1] = NOTICE + "\nworking normally now"
+advance(30)
+w._tick()
+check("G5 productive ticks bank time", w._states[1].fable_wait_acc >= 30)
+check("G6 not finished yet at 30s of 60s", w._states[1].fable_step == 1)
+advance(35)
+w._tick()
+check("G7 advances once the full run time is banked",
+      w._states[1].fable_step == 2)
+
+# Anti-wedge backstop: a stale error that never clears must not pin the run
+# forever — it gives up on wall time and says so.
+reset([(1, "claude")], {1: NOTICE + "\n" + ECONN})
+w = new_watcher(steps="continue\n<wait>\n/model fable", delay=60)
+LOGS = []
+w.log.connect(lambda k, m: LOGS.append((k, m)))
+w._tick()
+w._tick()
+for _ in range(45):                          # well past delay * MAX_MULT
     advance(30)
     w._tick()
-# What matters is that the session is NOT stranded on the fallback model:
-# the wait gave up and the script ran to the end, restoring Fable.
-check("G4 capped wait gives up and restores the model (no strand)",
+check("G8 permanent stall eventually gives up (no strand)",
       ["/model fable"] in texts_sent())
-check("G5 run completed", w._states[1].fable_step == -1)
+check("G9 and it says why", any("banked" in m for k, m in LOGS if k == "warn"))
 
 
 # =============================================================================

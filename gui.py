@@ -188,7 +188,13 @@ FABLE_RETICK_MS = 6000     # fast follow-up tick while a recovery is running
 FABLE_CONFIRM_MAX_S = 30   # hard deadline for <confirm>, even after a dialog
 FABLE_KEY_GAP_S = 3        # min gap between repeated Enters on one dialog
 FABLE_SEND_RETRIES = 3     # re-attempts when a send can't reach foreground
-FABLE_WAIT_MAX_MULT = 4    # <wait> can stretch to N× on stalls, then gives up
+# <wait> banks only PRODUCTIVE time, so a network outage genuinely costs the
+# recovery nothing. This multiplier is the anti-wedge backstop on WALL time:
+# a stale error line that never scrolls away would otherwise bank nothing
+# forever and strand the session on the fallback model. Generous on purpose —
+# real outages here have run 36 and 90 minutes, and cutting a wait short
+# during one sends /model into a session that is still stuck.
+FABLE_WAIT_MAX_MULT = 20   # wall-time ceiling = N× the requested wait
 FABLE_STALE_RUN_S = 900    # a run older than this is abandoned, not resumed
 FABLE_MAX_RUNS = 2         # consecutive recoveries before we stop retrying
 # A handled notice drifts further from the tail as the session prints, so a
@@ -231,6 +237,8 @@ def _fable_reset(st) -> None:
     st.fable_dlg_seen = False
     st.fable_tries = 0
     st.fable_wait_from = None
+    st.fable_wait_acc = 0.0
+    st.fable_wait_last = None
     st.fable_last_key_at = None
     st.fable_picker_used = False
 
@@ -318,6 +326,8 @@ class _WState:
     fable_handled: bool = False                   # latch (until notice clears)
     fable_tries: int = 0                          # failed sends on this step
     fable_wait_from: Optional[datetime] = None    # absolute <wait> start
+    fable_wait_acc: float = 0.0                   # productive secs banked
+    fable_wait_last: Optional[datetime] = None    # previous <wait> tick
     fable_last_key_at: Optional[datetime] = None  # rate-limit repeated Enter
     fable_runs: int = 0                           # recoveries since idle
     fable_notice_dist: Optional[int] = None       # tail-distance when latched
@@ -763,28 +773,45 @@ class Watcher(QObject):
                                     tail, self._patterns.get("econnreset"))
                                 or parse_server_error_stuck(
                                     tail, self._patterns.get("server_error"))))
-                            # A stall resets the countdown so <wait> measures real
-                            # run time — but CAPPED: a stale error line that never
-                            # scrolls away would otherwise strand the session on
-                            # the fallback model forever, silently.
+                            # Bank only time the session was actually RUNNING.
+                            # Network stalls contribute nothing, so <wait> means
+                            # "N seconds of real work on the fallback model", not
+                            # N seconds of wall clock. Resetting a countdown was
+                            # not enough: the old 4x wall cap expired during any
+                            # outage longer than 12 minutes, and real ones here
+                            # have lasted 36 and 90.
+                            if st.fable_wait_last is not None and not stuck:
+                                st.fable_wait_acc += max(
+                                    0.0,
+                                    (now - st.fable_wait_last).total_seconds())
+                            st.fable_wait_last = now
+                            # Keep the step's heartbeat fresh. FABLE_STALE_RUN_S
+                            # abandons a run whose step has not moved in a long
+                            # time, which is meant for a window that dropped out
+                            # of the block entirely — but a <wait> riding out a
+                            # long outage is alive and working as designed, and
+                            # would otherwise be killed at 15 minutes.
+                            st.fable_step_at = now
                             capped = (now - st.fable_wait_from
                                       >= timedelta(seconds=secs
                                                    * FABLE_WAIT_MAX_MULT))
-                            if stuck and not capped:
-                                st.fable_step_at = now   # reset; outer resends continue
-                            elif (capped
-                                  or (st.fable_step_at is not None
-                                      and now - st.fable_step_at
-                                      >= timedelta(seconds=secs))):
-                                if capped and stuck:
+                            if st.fable_wait_acc < secs and not capped:
+                                pass                     # still owed run time
+                            else:
+                                if capped and st.fable_wait_acc < secs:
                                     self.log.emit(
                                         "warn",
-                                        f"Fable-recover on {title!r}: wait capped "
-                                        f"after repeated stalls; moving on")
+                                        f"Fable-recover on {title!r}: only "
+                                        f"{int(st.fable_wait_acc)}s of {secs}s run "
+                                        f"time banked after "
+                                        f"{int((now - st.fable_wait_from).total_seconds())}s "
+                                        f"wall — moving on anyway")
                                 st.fable_step += 1        # wait done → next step
                                 st.fable_step_at = now
                                 st.fable_dlg_seen = False
                                 st.fable_wait_from = None
+                                st.fable_wait_acc = 0.0
+                                st.fable_wait_last = None
                                 st.fable_tries = 0
                                 st.status = ST_FABLE
                                 self._retick_soon()
