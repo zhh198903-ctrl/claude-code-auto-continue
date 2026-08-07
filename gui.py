@@ -139,25 +139,30 @@ def title_key(title: str) -> str:
 #   plain text (e.g. /model opus, continue) → type it + Enter
 #   <confirm> → wait for the "Switch model?" dialog, press Enter (= Yes)
 #   <esc>     → press ESC to surface a QUEUED switch dialog — but ONLY if one
-#               isn't already showing (ESC on an open dialog cancels it). Needed
-#               when the session is still busy on Opus; a no-op when it's idle
-#               (the dialog already popped from /model).
+#               isn't already showing (ESC on an open dialog cancels it).
+#               DANGEROUS: if a turn is running, ESC interrupts it. Not in the
+#               default script for that reason; opt in per window.
 #   <enter>   → press a bare Enter
 #   <wait> / <wait:N> → wait N seconds (bare <wait> uses the configured Delay)
-# Default flow: switch to Opus (ESC if the turn is busy) + confirm + continue
-# → run on Opus for <wait> seconds → switch back to Fable (ESC if busy) +
-# confirm + continue. EITHER /model can queue behind a running turn and not pop
-# the dialog; <esc> surfaces it, and it's skipped when a dialog is already up.
-# Default flow, matched to the UI Claude Code actually shows. The safeguard
-# notice comes WITH a picker whose option 1 ("Switch to <fallback>") is already
-# selected, so <confirm> — one Enter — performs the whole switch. Typing
-# /model is only needed to come BACK to the blocked model afterwards, and that
-# path does raise the "Switch model?" dialog, hence the second <esc>/<confirm>.
+# Default flow. Two shapes occur in the wild and this handles both:
+#   * Claude Code shows a picker whose first option is the fallback model —
+#     <confirm> accepts it with a single Enter.
+#   * Claude Code switches on its own ("Switched to <model>.") — there is no
+#     modal at all, <confirm> simply times out, and the run is really just the
+#     switch BACK afterwards.
+#
+# <esc> is deliberately NOT in the default. It exists to surface a /model
+# queued behind a running turn, but ESC interrupts that turn — and in practice
+# the turn is the user's real work. Observed twice: it ended a queued
+# instruction, and later killed a task 5m50s in. The damage is irreversible
+# while the benefit is only landing the switch-back sooner. Without it the
+# worst case is that /model applies late or not at all, and the completion
+# check now says so out loud. Add it back per-window in the Advanced dialog if
+# a session is genuinely wedged behind a hung turn.
 DEFAULT_FABLE_STEPS = (
     "<confirm>\n"
     "<wait>\n"
     "/model fable\n"
-    "<esc>\n"
     "<confirm>\n"
     "continue"
 )

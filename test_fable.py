@@ -781,6 +781,36 @@ check("T7 unreadable status bar produces no false warning", not warns)
 check("T8 completion is still reported", len(dones) == 1)
 
 
+# =============================================================================
+print("---- U: the default script must not interrupt running turns ----")
+# <esc> destroyed the user's work twice in production: once ending a queued
+# instruction, once killing a task 5m50s in. It only ever bought a slightly
+# earlier switch-back, which the completion check now reports on anyway.
+_steps = gui._parse_recovery_steps(gui.DEFAULT_FABLE_STEPS)
+check("U1 no <esc> in the shipped default",
+      not any(k == "esc" for k, _ in _steps))
+check("U2 <esc> is still available for people who opt in",
+      gui._parse_recovery_steps("<esc>") == [("esc", None)])
+
+# Claude Code sometimes switches by itself, leaving no modal to accept. The
+# script must survive that: <confirm> finds nothing, times out, and the run
+# becomes just the switch back.
+_AUTO = (NOTICE + "\nSwitched to Opus 4.8. Send feedback with /feedback\n"
+         + "  " + chr(91) + "Opus 4.8" + chr(93) + " ~~ 60%")
+reset([(1, "claude")], {1: _AUTO})
+w = new_watcher()                            # DEFAULT_FABLE_STEPS
+w._interval = 60
+w._tick()                                    # detect
+w._tick()                                    # <confirm> -> nothing to accept
+check("U3 no Enter pressed when Claude Code already switched",
+      texts_sent() == [])
+advance(2 * 60 + 5)                          # past the confirm deadline
+w._tick()
+check("U4 the run moves on instead of stalling",
+      w._states[1].fable_step >= 1)
+check("U5 and never sends ESC", keys_sent() == [])
+
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)
