@@ -564,9 +564,16 @@ def parse_server_error_stuck(text: str, pattern=None) -> bool:
 # (switch to a fallback model, continue, then switch back to Fable after a
 # delay). The default pattern is user-overridable in the Advanced dialog; its
 # `\s+` usage also keeps this source from self-matching in a watched terminal.
+# Model-agnostic on purpose. The phrase is what identifies a safeguard block;
+# the model in front of it is whatever is current, and that changes — Opus 4.8
+# retired and Opus 5 shipped inside this project's lifetime, so naming one
+# model here means the next one is simply not detected. `\w+` covers any
+# family and version ("Fable 5's", "Opus 6's", something not invented yet).
+# The `\s+` runs also keep this source from matching itself in a watched
+# terminal, which is why they must survive any edit here.
 DEFAULT_FABLE_PATTERN = (
-    r"Fable\s*\d*[’']?s?\s+safeguards\s+flagged"
-    r"|can[’']?t\s+respond\s+to\s+this\s+request\s+with\s+Fable"
+    r"\b\w[\w.]{1,20}\s*[\d.]*\s*[’']?s?\s+safeguards\s+flagged"
+    r"|can[’']?t\s+respond\s+to\s+this\s+request\s+with\s+\w[\w.]{1,20}"
 )
 FABLE_REFUSAL_RE = re.compile(DEFAULT_FABLE_PATTERN, re.IGNORECASE)
 

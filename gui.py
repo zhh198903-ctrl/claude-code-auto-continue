@@ -2617,24 +2617,40 @@ class MainWindow(QMainWindow):
             # Model dropdown — sent as `/model <name>` right before the
             # effort/continue sequence. "(none)" means skip /model and leave
             # the session on whatever model it's currently using.
+            # EDITABLE: the listed names are conveniences, not a whitelist.
+            # Anthropic ships new model families faster than this tool ships
+            # builds — Opus 4.8 retired and Opus 5 arrived inside its lifetime
+            # — so a fixed list would mean waiting for a release just to
+            # select a family that already exists. Whatever is typed is passed
+            # to /model verbatim, so a future alias works with no new build.
             model_combo = QComboBox()
+            model_combo.setEditable(True)
+            model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
             for level in MODEL_LEVELS:
                 model_combo.addItem(MODEL_LABEL[level], userData=level)
             current_m = row.get("model", "")
             try:
                 idx_m = MODEL_LEVELS.index(current_m)
+                model_combo.setCurrentIndex(idx_m)
             except ValueError:
-                idx_m = 0
-            model_combo.setCurrentIndex(idx_m)
+                # A custom name the user typed earlier — show it as-is.
+                model_combo.setCurrentIndex(0)
+                model_combo.setEditText(current_m)
             model_combo.setToolTip(
                 "Auto-prefix the next continue with `/model <name>`. "
-                "(none) leaves the session's model unchanged. "
-                "Setting persists per window across restarts."
+                "Pick from the list, or TYPE a name the list doesn't have yet "
+                "(a newer model family). (none) leaves the session's model "
+                "unchanged. Setting persists per window across restarts."
             )
-            model_combo.currentIndexChanged.connect(
-                lambda _i, t=row["title"], cb=model_combo:
-                self._on_model_changed(t, cb.currentData())
-            )
+
+            def _model_picked(_i=None, t=row["title"], cb=model_combo):
+                # currentData() is None for typed text, so fall back to it.
+                data = cb.currentData()
+                self._on_model_changed(
+                    t, data if data is not None else cb.currentText().strip())
+
+            model_combo.currentIndexChanged.connect(_model_picked)
+            model_combo.lineEdit().editingFinished.connect(_model_picked)
             self.table.setCellWidget(r, 5, model_combo)
 
             # Effort dropdown — sent as `/effort <level>` right before

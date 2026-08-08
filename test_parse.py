@@ -400,6 +400,30 @@ fable_picker_samples = [
      + "x" * (SWITCH_POST_MATCH_TAIL + 500), False),
 ]
 
+# The notice must be recognised for ANY model, including ones that do not
+# exist yet. Naming one model here is how detection silently dies at the next
+# rename — Opus 4.8 retired and Opus 5 shipped during this project's life.
+print()
+print("---- safeguard notice is model-agnostic ----")
+for _m in ("Fable 5", "Opus 5", "Opus 6", "Sonnet 5", "Haiku 4.5",
+           "Sonata 7", "Nova 12.3"):
+    _s = f"API Error: {_m}'s " + _SG + " this message."
+    _ok = parse_fable_refusal(_s) is True
+    print(f"[{'OK ' if _ok else 'FAIL'}] future model {_m!r} still detected")
+    if not _ok:
+        failures += 1
+
+for _s, _why in (
+    ("everything is fine, still running on Fable 5", "prose naming a model"),
+    ("the safeguards are intentionally broad right now", "safeguards, no flag"),
+    ("we flagged this for review later", "flagged, no safeguards"),
+):
+    _ok = parse_fable_refusal(_s) is False
+    print(f"[{'OK ' if _ok else 'FAIL'}] not fooled by {_why}")
+    if not _ok:
+        failures += 1
+
+
 print()
 print("---- parse_fable_picker ----")
 for i, (text, expected) in enumerate(fable_picker_samples):
