@@ -2337,10 +2337,21 @@ class MainWindow(QMainWindow):
                     + ", ".join(sorted(self._trigger_patterns))
                     + " — built-in defaults are overridden for these")
             if on:
-                self._append_log(
-                    "warn",
-                    "Fable-recover needs Claude Code /config → “Switch models "
-                    "when a message is flagged” = false, or no notice appears")
+                # NOT a prerequisite warning any more. It used to claim the
+                # feature needed /config → "Switch models when a message is
+                # flagged" = false, which measurement disproved: with that
+                # setting on, Claude Code switches by itself AND still prints
+                # the notice, so the recovery works either way. What actually
+                # surprises people is the part that types unprompted, so say
+                # that instead.
+                target = _last_model_step(
+                    _parse_recovery_steps(self._fable_cfg.get("steps", "")))
+                if target:
+                    self._append_log(
+                        "warn",
+                        f"any window in scope that is not on {target!r} will be "
+                        f"switched to it automatically, even without a "
+                        f"safeguard block")
 
     # ---- Settings persistence -------------------------------------------
 
