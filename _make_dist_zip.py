@@ -4,20 +4,33 @@ projects' convention:  <Name>_dist_v<X>_<Y>_<Z>.zip  containing a top
 folder <Name>_dist/ with the runnable distributable inside.
 """
 import os
+import re
 import sys
 import zipfile
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-VERSION = "1_0_8"
 NAME = "Auto-Continue"
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Derive the version from the source of truth. Hardcoding it here meant the
+# zip kept the previous release's name after a version bump, so the file on
+# disk claimed to be a version it wasn't.
+with open(os.path.join(HERE, "auto_continue.py"), encoding="utf-8") as fh:
+    _m = re.search(r'^APP_VERSION\s*=\s*"([\d.]+)"', fh.read(), re.M)
+if not _m:
+    print("ERROR: cannot read APP_VERSION from auto_continue.py")
+    sys.exit(1)
+VERSION = _m.group(1).replace(".", "_")
+
 TOP = f"{NAME}_dist"
 OUT = rf"D:\claude\{NAME}_dist_v{VERSION}.zip"
 
 # (source path, name inside the zip's top folder)
 MEMBERS = [
-    (r"D:\claude\auto_continue\dist\Auto-Continue.exe", "Auto-Continue.exe"),
-    (r"D:\claude\auto_continue\README.md", "README.md"),
+    (os.path.join(HERE, "dist", "Auto-Continue.exe"), "Auto-Continue.exe"),
+    (os.path.join(HERE, "README.md"), "README.md"),
+    (os.path.join(HERE, "LICENSE"), "LICENSE"),
 ]
 
 for src, _ in MEMBERS:
