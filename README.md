@@ -50,7 +50,7 @@ There's also a CLI runner:
 ```powershell
 python auto_continue.py --dry-run   # detect + log only
 python auto_continue.py             # live, all WT windows
-python auto_continue.py --interval 20 --buffer 30 --match peak
+python auto_continue.py --interval 60 --buffer 60 --match peak
 ```
 
 ## GUI features
@@ -62,6 +62,7 @@ python auto_continue.py --interval 20 --buffer 30 --match peak
   - **Skip** — cancel a pending continue for this row.
   - **Exclude** — never watch this window again (persisted across restarts).
   - **Clear cooldown** — reset the 15-min post-send suppression so the row can re-detect immediately (useful for testing).
+- **Reset** (v2.0.1+) — top-right, restores every setting to its shipped default: timings, per-window model/effort overrides, exclusions, trigger patterns, and model recovery (back to off). Asks first and names what it clears; dry-run, keep-awake and the start-up options are left alone.
 - **Model dropdown per row** — `(none)` / `default` / `opus` / `sonnet` / `haiku` / `fable`, matching Claude Code's `/model` aliases. The box is **editable**: type a family the list doesn't have yet and it is passed to `/model` verbatim, so a newly shipped model works without waiting for a new build. `(none)` leaves the session on whatever model it's already using; any other value prefixes the fire sequence with `/model <name>` + Enter so the session switches before continuing. Persisted per stable window title.
 - **Effort dropdown per row** — `(none)` / `low` / `medium` / `high` / `xhigh` / `max` / `ultracode`, matching Claude Code's own `/effort` slider. When set, the fire sequence becomes `/effort <level>` + Enter → wait 0.6 s → blank Enter (confirms the "Change effort level?" dialog) → wait 0.6 s → `continue` + Enter. (Model, if set, goes first: `/model <name>` → `/effort <level>` → `continue`.) Persisted per stable window title. (`ultracode` = xhigh + workflows; it's newer, so sessions on Claude Code older than 4.7 won't recognize it.)
 - **Dry-run** — detect, schedule, and log everything but never actually press keys. Useful for sanity-checking before going live.

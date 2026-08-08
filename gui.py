@@ -76,7 +76,8 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
     QTextBrowser,
-    QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QGridLayout, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QWidget,
 )
 
 from auto_continue import (
@@ -185,6 +186,19 @@ LEGACY_FABLE_STEPS_V1016 = (
     "<confirm>\n"
     "continue"
 )
+# Shipped defaults, in one place so first run and Reset agree.
+#   poll   60s — a UIA read of every window costs 100ms+, and nothing
+#                this tool reacts to needs sub-minute latency.
+#   buffer 60s — margin past the reset hour; the limit clears a little
+#                after the stated minute often enough to matter.
+#   retry 600s — a stuck session gets ONE nudge every 10 minutes. The
+#                old 30s default poked it ~180 times through a real
+#                90-minute outage, which helps nothing and buries the
+#                log; 600s is what a real deployment converged on.
+DEFAULT_INTERVAL_S = 60
+DEFAULT_BUFFER_S = 60
+DEFAULT_RETRY_S = 600
+
 SWITCH_SETTLE_S = 10       # if no dialog within this after a step, move on
 FABLE_RETICK_MS = 6000     # fast follow-up tick while a recovery is running
 # Every step is bounded. Without these a recovery can wedge a window: the
@@ -1980,7 +1994,7 @@ class MainWindow(QMainWindow):
 
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(5, 600)
-        self.interval_spin.setValue(30)
+        self.interval_spin.setValue(DEFAULT_INTERVAL_S)
         self.interval_spin.setSuffix(" s")
         self.interval_spin.setToolTip("Polling interval")
         self.interval_spin.valueChanged.connect(
@@ -1989,7 +2003,7 @@ class MainWindow(QMainWindow):
 
         self.buffer_spin = QSpinBox()
         self.buffer_spin.setRange(0, 600)
-        self.buffer_spin.setValue(20)
+        self.buffer_spin.setValue(DEFAULT_BUFFER_S)
         self.buffer_spin.setSuffix(" s")
         self.buffer_spin.setToolTip("Extra delay past the reset hour")
         self.buffer_spin.valueChanged.connect(
@@ -1997,8 +2011,8 @@ class MainWindow(QMainWindow):
         )
 
         self.retry_spin = QSpinBox()
-        self.retry_spin.setRange(5, 600)
-        self.retry_spin.setValue(30)
+        self.retry_spin.setRange(5, 3600)
+        self.retry_spin.setValue(DEFAULT_RETRY_S)
         self.retry_spin.setSuffix(" s")
         self.retry_spin.setToolTip(
             "When Claude shows 'attempt 10/10' (network retries exhausted), "
@@ -2038,22 +2052,42 @@ class MainWindow(QMainWindow):
         header.addWidget(QLabel("retry"))
         header.addWidget(self.retry_spin)
         header.addStretch()
+
+        # The four secondary actions sit in a 2x2 block so the header stays
+        # one row tall no matter how wide the window is.
         self.advanced_btn = QPushButton("Advanced…")
         self.advanced_btn.setToolTip(
-            "Advanced settings — edit the trigger patterns that decide when "
-            "auto-continue fires, and the opt-in Fable refusal-recovery")
+            "Trigger patterns, and the opt-in model recovery")
         self.advanced_btn.clicked.connect(self._open_advanced)
-        header.addWidget(self.advanced_btn)
+
         self.check_updates_btn = QPushButton("Check updates")
         self.check_updates_btn.setToolTip(
             "Check GitHub for a newer Auto-Continue release")
         self.check_updates_btn.clicked.connect(
             lambda: self.sig_update_check.emit(True))
-        header.addWidget(self.check_updates_btn)
+
         self.help_btn = QPushButton("Help")
         self.help_btn.setToolTip("How this watchdog works and how to use it")
         self.help_btn.clicked.connect(self._open_help)
-        header.addWidget(self.help_btn)
+
+        self.reset_btn = QPushButton("Reset")
+        self.reset_btn.setToolTip(
+            "Restore every setting to its shipped default — timings, model "
+            "and effort overrides, exclusions, trigger patterns and the model "
+            "recovery. Asks first.")
+        self.reset_btn.clicked.connect(self._reset_settings)
+
+        btn_grid = QGridLayout()
+        btn_grid.setSpacing(4)
+        btn_grid.setContentsMargins(0, 0, 0, 0)
+        btn_grid.addWidget(self.advanced_btn, 0, 0)
+        btn_grid.addWidget(self.check_updates_btn, 0, 1)
+        btn_grid.addWidget(self.help_btn, 1, 0)
+        btn_grid.addWidget(self.reset_btn, 1, 1)
+        for b in (self.advanced_btn, self.check_updates_btn,
+                  self.help_btn, self.reset_btn):
+            b.setMinimumWidth(110)
+        header.addLayout(btn_grid)
         root.addLayout(header)
 
         # Update banner (hidden until an update is found).
@@ -2445,6 +2479,70 @@ class MainWindow(QMainWindow):
             f"no longer steering {key!r} to the target model "
             f"(you switched it by hand); re-tick it in Advanced to resume")
 
+    def _reset_settings(self) -> None:
+        """Put every setting back to its shipped default.
+
+        Destructive and not obviously undoable, so it asks first and names
+        what goes. Model recovery returns to OFF, which is how it ships —
+        a reset that left an autonomous feature running would be a surprise
+        in the wrong direction.
+        """
+        if QMessageBox.question(
+                self, "Reset all settings?",
+                "This restores the shipped defaults:\n\n"
+                f"  • poll {DEFAULT_INTERVAL_S}s · buffer {DEFAULT_BUFFER_S}s "
+                f"· retry {DEFAULT_RETRY_S}s\n"
+                "  • clears per-window model and effort overrides\n"
+                "  • clears excluded windows\n"
+                "  • restores the built-in trigger patterns\n"
+                "  • turns model recovery OFF and clears its window list\n\n"
+                "Dry-run, keep-awake and the start-up options are left as "
+                "they are. Continue?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        widgets = [self.interval_spin, self.buffer_spin, self.retry_spin]
+        for wdg in widgets:
+            wdg.blockSignals(True)
+        try:
+            self.interval_spin.setValue(DEFAULT_INTERVAL_S)
+            self.buffer_spin.setValue(DEFAULT_BUFFER_S)
+            self.retry_spin.setValue(DEFAULT_RETRY_S)
+        finally:
+            for wdg in widgets:
+                wdg.blockSignals(False)
+
+        self._effort_overrides = {}
+        self._model_overrides = {}
+        self._excluded_titles = set()
+        self._trigger_patterns = {}
+        self._fable_cfg = {
+            "enabled": False, "all_windows": True,
+            "delay": 180, "steps": DEFAULT_FABLE_STEPS,
+            "windows": [], "optout": [],
+        }
+        self._pending_optouts.clear()
+
+        # Push everything to the worker, then persist, so a crash between the
+        # two cannot leave the running watcher and the saved state disagreeing.
+        self.sig_set_interval.emit(DEFAULT_INTERVAL_S)
+        self.sig_set_buffer.emit(DEFAULT_BUFFER_S)
+        self.sig_set_retry_interval.emit(DEFAULT_RETRY_S)
+        self.sig_set_excluded.emit([])
+        self.sig_set_effort_overrides.emit({})
+        self.sig_set_model_overrides.emit({})
+        self.sig_set_trigger_patterns.emit({})
+        self.sig_set_fable_config.emit(dict(self._fable_cfg))
+        self._save_settings()
+        self._append_log(
+            "info",
+            f"settings reset to defaults (poll {DEFAULT_INTERVAL_S}s, buffer "
+            f"{DEFAULT_BUFFER_S}s, retry {DEFAULT_RETRY_S}s; model recovery "
+            f"off)")
+
     def _open_help(self) -> None:
         """Usage notes, kept inside the app so they are there when the session
         is stuck at 3am and nobody is going to go read a README."""
@@ -2547,10 +2645,12 @@ class MainWindow(QMainWindow):
         for w in widgets:
             w.blockSignals(True)
         try:
-            self.interval_spin.setValue(self._settings_int("interval", 30))
-            self.buffer_spin.setValue(self._settings_int("buffer", 20))
+            self.interval_spin.setValue(
+                self._settings_int("interval", DEFAULT_INTERVAL_S))
+            self.buffer_spin.setValue(
+                self._settings_int("buffer", DEFAULT_BUFFER_S))
             self.retry_spin.setValue(
-                self._settings_int("retry_interval", 30)
+                self._settings_int("retry_interval", DEFAULT_RETRY_S)
             )
             self.dry_run_check.setChecked(
                 self.settings.value("dry_run", False, type=bool)
@@ -3183,6 +3283,14 @@ busy turn. <b>Not in the default script:</b> it interrupts that turn, and in
 practice the turn is your real work. Add it only for a session wedged behind a
 hung turn</li>
 </ul>
+
+<h3>Starting over</h3>
+<p><b>Reset</b> puts every setting back to how it ships — timings, the
+per-window model and effort overrides, exclusions, trigger patterns, and
+model recovery (off). It asks first and lists what it clears. Dry-run,
+keep-awake and the start-up options are left as they are.</p>
+<p>Everything else you change is remembered across restarts, so the app
+comes back exactly as you left it.</p>
 
 <h3>Good to know</h3>
 <ul>
