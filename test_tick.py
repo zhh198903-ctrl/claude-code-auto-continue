@@ -107,9 +107,9 @@ PICKER = ("What do you want to do?\n"
           "> 1. Stop and wait for li" "mit to reset\n"
           "  2. Upgrade your plan\n"
           "Enter to conf" "irm · Esc to cancel")
-ECONN = "API Error: Unable to connect to API (ECONN" "RESET)"
+ECONN = "API Error: Unable to conn" "ect to API (ECONN" "RESET)"
 SERVER_ERR = ("API Error: Server error mid-resp" "onse. "
-              "The response above may be incomplete.")
+              "The response above may be incom" "plete.")
 OAUTH = "OAuth token has exp" "ired · Please run /log" "in"
 
 # Base moment: 2026-07-03 10:00 UTC == 18:00 Asia/Shanghai.
@@ -256,7 +256,7 @@ SENT.clear()
 states = {}
 
 set_now(T0)
-TEXTS[105] = "Retrying in 0s · attempt 10/10"
+TEXTS[105] = "Retry" "ing in 0s · attempt 10/10"
 tick(states)
 st = states[105]
 check("E1 poke on attempt N/N", SENT == [(105, ["continue"])])

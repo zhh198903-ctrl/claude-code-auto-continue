@@ -64,6 +64,8 @@ jobs:
           python test_updater.py
           python test_tick.py
           python test_fable.py
+          python test_singleinstance.py
+          python test_selftrigger.py
 
       - name: Build onefile exe
         run: pyinstaller Auto-Continue.spec --clean --noconfirm

@@ -160,38 +160,38 @@ check_reset("DST round-trip America/New_York 11pm",
 # ---------- parse_retry_exhausted ----------
 retry_samples = [
     # Plain attempt 10/10 near the tail — exhausted.
-    ("· Working… (esc to interrupt)\n  Retrying in 0s · attempt 10/10",
+    ("· Working… (esc to interrupt)\n  Retry" "ing in 0s · attempt 10/10",
      True),
     # Mid-retry (7/10) — NOT exhausted.
-    ("Retrying in 0s · attempt 7/10", False),
+    ("Retry" "ing in 0s · attempt 7/10", False),
     # 1/10 — definitely not exhausted.
-    ("Retrying in 12s · attempt 1/10", False),
+    ("Retry" "ing in 12s · attempt 1/10", False),
     # Exhausted with bullet variant •
-    ("Retrying in 3s • attempt 10/10\n", True),
+    ("Retry" "ing in 3s • attempt 10/10\n", True),
     # Older Claude variants without space before s.
-    ("Retrying in 0s·attempt 10/10", True),
+    ("Retry" "ing in 0s·attempt 10/10", True),
     # Two retry sequences in the buffer — must look at the latest.
-    ("Retrying in 0s · attempt 10/10\n...later...\n"
-     "Retrying in 5s · attempt 3/10",
+    ("Retry" "ing in 0s · attempt 10/10\n...later...\n"
+     "Retry" "ing in 5s · attempt 3/10",
      False),
     # Latest is the exhausted one.
-    ("Retrying in 5s · attempt 3/10\n...later...\n"
-     "Retrying in 0s · attempt 10/10",
+    ("Retry" "ing in 5s · attempt 3/10\n...later...\n"
+     "Retry" "ing in 0s · attempt 10/10",
      True),
     # Trailing footer+recap of ~5000 chars (wide terminal) — within the
     # network tail allowance (6000), so still treated as current.
-    ("Retrying in 0s · attempt 10/10\n" + "x" * 5000, True),
+    ("Retry" "ing in 0s · attempt 10/10\n" + "x" * 5000, True),
     # Exhausted banner buried far above — stale, ignore.
-    ("Retrying in 0s · attempt 10/10\n" + "x" * 7000, False),
+    ("Retry" "ing in 0s · attempt 10/10\n" + "x" * 7000, False),
     # Unrelated text mentioning attempt 10/10 (no Retrying anchor).
     ("test failed on attempt 10/10 of the run", False),
     # No retry banner at all.
     ("nothing to see here", False),
     # 5/5 retry config (hypothetical lower max) — still exhausted (N >= total).
-    ("Retrying in 0s · attempt 5/5", True),
+    ("Retry" "ing in 0s · attempt 5/5", True),
     # Long-form wording some builds print.
-    ("Retrying in 8 seconds… (attempt 10/10)", True),
-    ("Retrying in 8 seconds… (attempt 3/10)", False),
+    ("Retry" "ing in 8 seconds… (attempt 10/10)", True),
+    ("Retry" "ing in 8 seconds… (attempt 3/10)", False),
 ]
 
 print()
@@ -209,18 +209,18 @@ for i, (text, expected) in enumerate(retry_samples):
 econn_samples = [
     # Exact form seen in the screenshot.
     ("⎿  · 电域模块 (S参数/RX Filter/CTLE/RX FFE/DFE) 直连光信号源...\n"
-     "  API Error: Unable to connect to API (ECONNRESET)\n"
+     "  API Error: Unable to conn" "ect to API (ECONNRESET)\n"
      "✻ Sautéed for 15m 46s · 1 shell still running",
      True),
     # Compact form.
-    ("API Error: Unable to connect to API (ECONNRESET)", True),
+    ("API Error: Unable to conn" "ect to API (ECONNRESET)", True),
     # Trailing footer + multi-line recap (~5000 chars, wide terminal) — the
     # exact regression from Image #14: error not at the very bottom but still
     # current. Within the 6000 network tail allowance → must detect.
-    ("API Error: Unable to connect to API (ECONNRESET)\n"
+    ("API Error: Unable to conn" "ect to API (ECONNRESET)\n"
      "* Worked for 15m 6s\n* recap: ...\n" + "x" * 5000, True),
     # Stale — buried far up in scrollback (beyond the network allowance).
-    ("API Error: Unable to connect to API (ECONNRESET)\n" + "x" * 7000,
+    ("API Error: Unable to conn" "ect to API (ECONNRESET)\n" + "x" * 7000,
      False),
     # No match.
     ("everything fine here", False),
@@ -228,23 +228,23 @@ econn_samples = [
     # (avoids false-matching log files / source code mentioning the constant).
     ("socket error: ECONNRESET on fd 7", False),
     # The Retrying banner alone shouldn't trip this function.
-    ("Retrying in 0s · attempt 5/10", False),
+    ("Retry" "ing in 0s · attempt 5/10", False),
     # Mixed case for the literal token.
-    ("API Error: Unable to connect to API (econnreset)", True),
+    ("API Error: Unable to conn" "ect to API (econnreset)", True),
     # Two ECONNRESET lines — newer one near tail, should match.
-    ("API Error: Unable to connect to API (ECONNRESET)\n...later...\n"
-     "API Error: Unable to connect to API (ECONNRESET)",
+    ("API Error: Unable to conn" "ect to API (ECONNRESET)\n...later...\n"
+     "API Error: Unable to conn" "ect to API (ECONNRESET)",
      True),
     # Sibling errnos — same stuck state, must all be detected.
-    ("API Error: Unable to connect to API (ETIMEDOUT)", True),
-    ("API Error: Unable to connect to API (ECONNREFUSED)", True),
-    ("API Error: Unable to connect to API (ENOTFOUND)", True),
-    ("API Error: Unable to connect to API (EAI_AGAIN)", True),
-    ("API Error: Unable to connect to API (EHOSTUNREACH)", True),
+    ("API Error: Unable to conn" "ect to API (ETIMEDOUT)", True),
+    ("API Error: Unable to conn" "ect to API (ECONNREFUSED)", True),
+    ("API Error: Unable to conn" "ect to API (ENOTFOUND)", True),
+    ("API Error: Unable to conn" "ect to API (EAI_AGAIN)", True),
+    ("API Error: Unable to conn" "ect to API (EHOSTUNREACH)", True),
     # undici error codes.
-    ("API Error: Unable to connect to API (UND_ERR_CONNECT_TIMEOUT)", True),
+    ("API Error: Unable to conn" "ect to API (UND_ERR_CONNECT_TIMEOUT)", True),
     # Node's generic wording.
-    ("API Error: fetch failed", True),
+    ("API Error: fetch fai" "led", True),
     # HTTP status errors are NOT network-stuck (Claude retries those itself).
     ("API Error: 500 {\"type\":\"error\"}", False),
     ("API Error: 529 overloaded", False),
@@ -264,39 +264,39 @@ for i, (text, expected) in enumerate(econn_samples):
 # ---------- parse_server_error_stuck ----------
 server_error_samples = [
     # Exact form from the user's 2026-07-11 screenshot (Image #7).
-    ("● API Error: Server error mid-response. The response above may be "
+    ("● API Error: Server error mid-resp" "onse. The response above may be "
      "incomplete.\n✻ Sautéed for 1m 6s", True),
     # Compact form.
-    ("API Error: Server error mid-response.", True),
+    ("API Error: Server error mid-resp" "onse.", True),
     # Trailing footer + recap (~5000 chars, wide terminal) — within the 6000
     # network tail allowance → still current.
-    ("API Error: Server error mid-response. The response above may be "
+    ("API Error: Server error mid-resp" "onse. The response above may be "
      "incomplete.\n" + "x" * 5000, True),
     # Stale — buried far up in scrollback (beyond the network allowance).
-    ("API Error: Server error mid-response.\n" + "x" * 7000, False),
+    ("API Error: Server error mid-resp" "onse.\n" + "x" * 7000, False),
     # No match.
     ("everything fine here", False),
     # Must NOT confuse with the connectivity error (that's econnreset's job,
     # but neither should false-match the other).
-    ("API Error: Unable to connect to API (ECONNRESET)", False),
+    ("API Error: Unable to conn" "ect to API (ECONNRESET)", False),
     # Prose merely mentioning a server error without the "API Error:" prefix
     # — must NOT match (avoids logs / this discussion in scrollback).
     ("the server returned an error mid-response, retrying", False),
     # Two markers — newer one near tail, should match.
-    ("API Error: Server error mid-response.\n...later...\n"
-     "API Error: Server error mid-response.", True),
+    ("API Error: Server error mid-resp" "onse.\n...later...\n"
+     "API Error: Server error mid-resp" "onse.", True),
     # 2026-07-23 re-wording (user Image #1): same truncation class, new
-    # leading phrase "Response stalled mid-stream" + the shared footer.
-    ("● API Error: Response stalled mid-stream. The response above may be "
+    # leading phrase "Response stalled mid-str·eam" + the shared footer.
+    ("● API Error: Response stalled mid-str" "eam. The response above may be "
      "incomplete.\n※ Baked for 26m 35s", True),
     # Compact stalled form (no footer).
-    ("API Error: Response stalled mid-stream.", True),
+    ("API Error: Response stalled mid-str" "eam.", True),
     # Forward-compat: an unseen leading phrase, but the shared footer within
     # the same `API Error` line still classifies it as a truncation.
     ("API Error: Streaming interrupted. The response above may be "
      "incomplete.", True),
     # Stale stalled marker buried far up scrollback (beyond the allowance).
-    ("API Error: Response stalled mid-stream.\n" + "x" * 7000, False),
+    ("API Error: Response stalled mid-str" "eam.\n" + "x" * 7000, False),
 ]
 
 print()

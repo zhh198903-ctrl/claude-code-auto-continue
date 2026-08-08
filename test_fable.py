@@ -133,16 +133,22 @@ BANNER = ("You've hit your li" "mit · resets 11pm (Asia/Shanghai)\n"
           "/upgra" "de to increase your usage limit.")
 
 
-def new_watcher(steps=None, enabled=True, delay=180):
-    """A Watcher wired for tests: running, feature on, default step script."""
+def new_watcher(steps=None, enabled=True, delay=180, scope=None):
+    """A Watcher wired for tests: running, feature on, default step script.
+
+    `scope` gives an explicit per-window list. Without it the watcher runs in
+    all-windows mode, where drift enforcement is deliberately inactive — it
+    would otherwise steer every watched session onto the target, including
+    ones the user deliberately put elsewhere that never saw a block.
+    """
     w = gui.Watcher()
     w._running = True
     w.set_fable_config({
         "enabled": enabled,
-        "all_windows": True,
+        "all_windows": scope is None,
         "delay": delay,
         "steps": steps if steps is not None else gui.DEFAULT_FABLE_STEPS,
-        "windows": [],
+        "windows": list(scope or []),
     })
     return w
 
@@ -822,7 +828,7 @@ _BAR_FABLE = "  " + chr(91) + "Fable 5" + chr(93) + " " + _BARGLYPH + " 44%"
 _BAR_OPUS = "  " + chr(91) + "Opus 5" + chr(93) + " " + _BARGLYPH + " 63%"
 
 reset([(1, "claude")], {1: "working away\n" + _BAR_OPUS})
-w = new_watcher()                            # target = fable, no notice at all
+w = new_watcher(scope=["claude"])            # target = fable, no notice
 w._tick()
 check("V1 grace period holds off the first correction", texts_sent() == [])
 advance(gui.FABLE_DRIFT_GRACE_S + 5)
@@ -834,7 +840,7 @@ check("V3 restore script is a switch, not a work injection",
 
 # On target: nothing happens, ever.
 reset([(1, "claude")], {1: "working away\n" + _BAR_FABLE})
-w = new_watcher()
+w = new_watcher(scope=["claude"])
 for _ in range(4):
     advance(gui.FABLE_DRIFT_GRACE_S + 5)
     w._tick()
@@ -854,7 +860,7 @@ check("V5 no correction while the notice is still showing",
 
 # Bounded: it must not fight the user forever.
 reset([(1, "claude")], {1: "working away\n" + _BAR_OPUS})
-w = new_watcher()
+w = new_watcher(scope=["claude"])
 for _ in range(10):
     advance(gui.FABLE_DRIFT_RETRY_S + gui.FABLE_DRIFT_GRACE_S + 10)
     w._tick()
@@ -903,7 +909,7 @@ check("X5 it keeps its hands off afterwards", texts_sent() == [])
 # A window that has been off-target since a failed run never CHANGED under us,
 # so it is still repaired rather than unticked.
 reset([(1, "claude")], {1: "working away\n" + _BAR_OPUS})
-w = new_watcher()
+w = new_watcher(scope=["claude"])
 unticked = []
 w.fable_untick.connect(lambda k: unticked.append(k))
 w._tick()
@@ -941,6 +947,97 @@ w.set_fable_config({"enabled": True, "all_windows": False, "delay": 180,
                     "steps": gui.DEFAULT_FABLE_STEPS, "windows": ["claude"]})
 check("X10 re-ticking it in Advanced resumes enforcement",
       w._states[1].fable_user_optout is False)
+
+
+# =============================================================================
+print("---- Y: the opt-out must actually hold, in every mode ----")
+# Everything here was found by a pre-release audit. Each check corresponds to
+# a way the feature could still type into a window it had promised to leave
+# alone, or steer one it was never asked to.
+
+# An opted-out window is off limits to EVERYTHING, not just drift. Gating only
+# the drift branch left a genuine safeguard block free to run a full recovery.
+reset([(1, "claude")], {1: PICKER + "\n" + _BAR_OPUS})
+w = new_watcher()                            # all_windows=True
+w._states[1] = gui._WState(hwnd=1, title="claude")
+w._states[1].fable_user_optout = True
+for _ in range(4):
+    advance(60)
+    w._tick()
+check("Y1 a safeguard block does not act on an opted-out window",
+      SENT == [])
+
+# The opt-out is carried in the config, so it survives a restart even in
+# all-windows mode where there is no tick to remove.
+w2 = new_watcher()
+w2.set_fable_config({"enabled": True, "all_windows": True, "delay": 180,
+                     "steps": gui.DEFAULT_FABLE_STEPS, "windows": [],
+                     "optout": ["claude"]})
+reset([(1, "claude")], {1: PICKER + "\n" + _BAR_OPUS})
+for _ in range(3):
+    advance(60)
+    w2._tick()
+check("Y2 a persisted opt-out survives a fresh worker", SENT == [])
+
+# Drift enforcement needs an explicit tick. In all-windows mode it would
+# switch every watched session onto the target, including ones deliberately
+# put on another model that never saw a block.
+reset([(1, "claude")], {1: "working away\n" + _BAR_OPUS})
+w = new_watcher()                            # all_windows=True
+for _ in range(4):
+    advance(gui.FABLE_DRIFT_GRACE_S + gui.FABLE_DRIFT_RETRY_S + 10)
+    w._tick()
+check("Y3 all-windows mode never drift-steers an unticked window",
+      texts_sent() == [])
+
+# ...but an explicitly ticked window still is.
+reset([(1, "claude")], {1: "working away\n" + _BAR_OPUS})
+w = gui.Watcher()
+w._running = True
+w.set_fable_config({"enabled": True, "all_windows": False, "delay": 180,
+                    "steps": gui.DEFAULT_FABLE_STEPS, "windows": ["claude"]})
+advance(gui.FABLE_DRIFT_GRACE_S + 5)
+w._tick()
+w._tick()
+check("Y4 an explicitly ticked window is still steered",
+      any("/model" in str(t) for t in texts_sent()))
+
+# An unreadable status bar is UNKNOWN, not on-target: treating it as on-target
+# reset the counters and made the cap unreachable.
+reset([(1, "claude")], {1: "working away\n" + _BAR_OPUS})
+w = gui.Watcher()
+w._running = True
+w.set_fable_config({"enabled": True, "all_windows": False, "delay": 180,
+                    "steps": gui.DEFAULT_FABLE_STEPS, "windows": ["claude"]})
+for _ in range(3):
+    advance(gui.FABLE_DRIFT_GRACE_S + gui.FABLE_DRIFT_RETRY_S + 10)
+    w._tick()
+    w._tick()
+    TEXTS[1] = "modal covers the bar\n4. Type something."   # unreadable
+    advance(30)
+    w._tick()
+    TEXTS[1] = "working away\n" + _BAR_OPUS
+check("Y5 an unreadable bar does not reset the drift cap",
+      w._states[1].fable_drift_runs <= gui.FABLE_DRIFT_MAX)
+
+# A /model we typed can land minutes later, after the quiet window expires.
+# The clock alone cannot tell that from a hand switch, so we remember what we
+# asked for.
+reset([(1, "claude")], {1: "working away\n" + _BAR_FABLE})
+w = gui.Watcher()
+w._running = True
+w.set_fable_config({"enabled": True, "all_windows": False, "delay": 180,
+                    "steps": "/model opus\ncontinue", "windows": ["claude"]})
+w._states[1] = gui._WState(hwnd=1, title="claude")
+w._states[1].fable_last_model = "Fable 5"
+w._states[1].fable_our_models.add("opus")
+unticked = []
+w.fable_untick.connect(lambda k: unticked.append(k))
+advance(gui.FABLE_USER_SWITCH_QUIET_S + 300)     # long past the quiet window
+TEXTS[1] = "working away\n" + _BAR_OPUS
+w._tick()
+check("Y6 a late landing of a model WE asked for is not blamed on the user",
+      w._states[1].fable_user_optout is False and unticked == [])
 
 
 # =============================================================================

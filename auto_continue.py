@@ -139,7 +139,7 @@ RETRY_RE = re.compile(
 # The parenthesized code varies with the underlying failure — ECONN·RESET,
 # ETIMED·OUT, ECONN·REFUSED, ENOT·FOUND, EAI_·AGAIN, EHOST·UNREACH, undici's
 # UND_·ERR_* family — so we accept any parenthesized E*/UND_ERR_* code after
-# the fixed sentence. Node's generic "API Error: fetch failed" is the same
+# the fixed sentence. Node's generic "API Error: fetch fai·led" is the same
 # stuck-until-continue state and is accepted too. (Examples de-fanged with ·
 # so viewing this file in a watched terminal can't false-trigger.)
 # Treat all of these the same as retry-exhausted: keep poking 'continue'
@@ -522,7 +522,7 @@ def parse_retry_exhausted(text: str, pattern=None) -> bool:
 
 def parse_econnreset_stuck(text: str, pattern=None) -> bool:
     """True if a bare `API Error: Unable to connect to API (E...)` (any
-    errno / UND_ERR_* code) or `API Error: fetch failed` appears near the
+    errno / UND_ERR_* code) or the generic fetch-fai·led one appears near the
     tail of the buffer — i.e. Claude is currently stuck on a network error
     without the usual retry banner. Tail-anchored just like
     `parse_retry_exhausted`, so stale errors from a previous outage don't
@@ -718,9 +718,11 @@ def parse_switch_model_prompt(text: str, pattern=None) -> bool:
 
 
 def parse_limit_prompt(text: str, pattern=None, limit_pattern=None) -> bool:
-    """True if the interactive limit picker ("What do you want to do?" /
-    "Stop and wait for limit to reset" / "Enter to confirm") is currently
-    open at the tail of the buffer.
+    """True if the interactive limit picker is currently open at the tail of
+    the buffer — the "What do you want to do?" modal whose first option waits
+    for the li·mit to reset. (Spelled with a · here for the same reason as the
+    pattern above: the verbatim phrases would make THIS file read as an open
+    picker in a watched terminal, and this detector presses Enter.)
 
     Two guards against pressing Enter into a session that already moved on:
       * tight tail anchor (PROMPT_POST_MATCH_TAIL) — the picker is a modal
