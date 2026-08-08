@@ -217,6 +217,18 @@ FABLE_MAX_RUNS = 2         # consecutive recoveries before we stop retrying
 # re-measuring against captured snapshots.
 FABLE_FRESH_MARGIN = 400
 
+# Sitting on the fallback model is NOT an acceptable resting state: the
+# whole point of enabling the recovery is to keep working on the chosen
+# model. A run can end off-target (a switch-back that never landed, or
+# Claude Code switching by itself and the notice scrolling away), and
+# nothing used to bring it home — the window just stayed on the fallback
+# indefinitely. So when a window is opted in, its script names a target via
+# a /model step, and the status bar shows something else with no safeguard
+# notice in sight, steer it back.
+FABLE_DRIFT_GRACE_S = 120  # leave a finished run alone this long first
+FABLE_DRIFT_RETRY_S = 300  # min gap between correction attempts
+FABLE_DRIFT_MAX = 3        # give up rather than fight the user forever
+
 
 def _last_model_step(steps):
     """Model name from the LAST `/model X` line in a step script, if any.
@@ -246,6 +258,7 @@ def _fable_reset(st) -> None:
     st.fable_wait_last = None
     st.fable_last_key_at = None
     st.fable_picker_used = False
+    st.fable_restore = None
 
 
 def _parse_recovery_steps(text: str) -> list:
@@ -337,6 +350,9 @@ class _WState:
     fable_runs: int = 0                           # recoveries since idle
     fable_notice_dist: Optional[int] = None       # tail-distance when latched
     fable_picker_used: bool = False               # picker accepted this run
+    fable_drift_at: Optional[datetime] = None     # last drift correction
+    fable_drift_runs: int = 0                     # corrections since on-target
+    fable_restore: Optional[list] = None          # one-off restore script
 
 
 class Watcher(QObject):
@@ -742,7 +758,9 @@ class Watcher(QObject):
                 _fable_ok = (self._fable_all_windows
                              or title_key(title) in self._fable_windows)
                 if self._fable_enabled and _fable_ok:
-                    steps = self._fable_steps
+                    # A drift correction runs its own short script; the
+                    # configured one is for recovering from a safeguard.
+                    steps = st.fable_restore or self._fable_steps
                     if 0 <= st.fable_step < len(steps):
                         # Abandon a run parked too long. A window can drop out
                         # of this block entirely (title drift, with per-window
@@ -1061,6 +1079,50 @@ class Watcher(QObject):
                         # the exact overnight stall this tool exists to prevent.
                         if st.fable_handled:
                             st.status = ST_FABLE
+
+                        # Steer back to the model the script targets. Being
+                        # parked on the fallback is a FAILURE, not a resting
+                        # state — the point of enabling this is to keep
+                        # working on the chosen model. Only runs when idle
+                        # (no recovery in flight) and with no notice on
+                        # screen, so it never races the recovery itself.
+                        want = _last_model_step(steps)
+                        cur = current_model(tail) if tail else None
+                        on_target = (not want or not cur
+                                     or want.lower() in cur.lower())
+                        if on_target:
+                            st.fable_drift_runs = 0
+                            st.fable_drift_at = None
+                        elif not fable_hit and not st.fable_handled:
+                            settled = (
+                                st.fable_step_at is None
+                                or now - st.fable_step_at
+                                >= timedelta(seconds=FABLE_DRIFT_GRACE_S))
+                            spaced = (
+                                st.fable_drift_at is None
+                                or now - st.fable_drift_at
+                                >= timedelta(seconds=FABLE_DRIFT_RETRY_S))
+                            if (settled and spaced
+                                    and st.fable_drift_runs < FABLE_DRIFT_MAX):
+                                st.fable_drift_runs += 1
+                                self.log.emit(
+                                    "warn",
+                                    f"{dr}{title!r} is on {cur!r} but should be "
+                                    f"on {want!r}; steering it back "
+                                    f"({st.fable_drift_runs}/"
+                                    f"{FABLE_DRIFT_MAX})")
+                                _fable_reset(st)   # clears fable_restore
+                                st.fable_drift_at = now
+                                st.fable_step = 0
+                                st.fable_step_at = now
+                                st.status = ST_FABLE
+                                # Restore-only script: switch and accept the
+                                # dialog. No 'continue' — the session's own
+                                # work is not ours to resume here.
+                                st.fable_restore = [("send", f"/model {want}"),
+                                                    ("confirm", None)]
+                                self._retick_soon()
+                                continue
 
             except Exception as e:
                 self.log.emit(

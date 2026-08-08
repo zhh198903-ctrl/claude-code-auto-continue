@@ -811,6 +811,65 @@ check("U4 the run moves on instead of stalling",
 check("U5 and never sends ESC", keys_sent() == [])
 
 
+# =============================================================================
+print("---- V: parked on the fallback model is a failure, not a resting state ----")
+# The point of enabling this is to keep WORKING on the chosen model. A run can
+# end off-target (switch-back never landed, or Claude Code switched by itself
+# and the notice scrolled away) and nothing used to bring it home.
+_BAR_FABLE = "  " + chr(91) + "Fable 5" + chr(93) + " ~~ 44%"
+_BAR_OPUS = "  " + chr(91) + "Opus 4.8" + chr(93) + " ~~ 63%"
+
+reset([(1, "claude")], {1: "working away\n" + _BAR_OPUS})
+w = new_watcher()                            # target = fable, no notice at all
+w._tick()
+check("V1 grace period holds off the first correction", texts_sent() == [])
+advance(gui.FABLE_DRIFT_GRACE_S + 5)
+w._tick()                                    # arms the restore script
+w._tick()                                    # sends it
+check("V2 steers back with /model fable", texts_sent() == [["/model fable"]])
+check("V3 restore script is a switch, not a work injection",
+      not any("continue" in str(t) for t in texts_sent()))
+
+# On target: nothing happens, ever.
+reset([(1, "claude")], {1: "working away\n" + _BAR_FABLE})
+w = new_watcher()
+for _ in range(4):
+    advance(gui.FABLE_DRIFT_GRACE_S + 5)
+    w._tick()
+check("V4 on-target window is left alone", texts_sent() == [])
+
+# A safeguard notice on screen means the normal recovery owns it — drift
+# correction must not race that.
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_OPUS})
+w = new_watcher(steps="continue")
+w._tick()
+w._tick()                                    # recovery runs and finishes
+SENT.clear()
+advance(gui.FABLE_DRIFT_GRACE_S + 5)
+w._tick()
+check("V5 no correction while the notice is still showing",
+      not any("/model" in str(t) for t in texts_sent()))
+
+# Bounded: it must not fight the user forever.
+reset([(1, "claude")], {1: "working away\n" + _BAR_OPUS})
+w = new_watcher()
+for _ in range(10):
+    advance(gui.FABLE_DRIFT_RETRY_S + gui.FABLE_DRIFT_GRACE_S + 10)
+    w._tick()
+    w._tick()
+sent = [t for t in texts_sent() if "/model" in str(t)]
+check("V6 corrections are capped", len(sent) <= gui.FABLE_DRIFT_MAX)
+
+# A script with no /model step names no target, so nothing is enforced.
+reset([(1, "claude")], {1: "working away\n" + _BAR_OPUS})
+w = new_watcher(steps="continue")
+for _ in range(3):
+    advance(gui.FABLE_DRIFT_GRACE_S + 5)
+    w._tick()
+check("V7 no /model step means no target to enforce",
+      not any("/model" in str(t) for t in texts_sent()))
+
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)
