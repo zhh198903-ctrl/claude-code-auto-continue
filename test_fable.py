@@ -872,6 +872,28 @@ check("V7 no /model step means no target to enforce",
       not any("/model" in str(t) for t in texts_sent()))
 
 
+# =============================================================================
+print("---- W: the in-app help must not describe itself into a trigger ----")
+# The help text explains the very phrases the detectors look for, so it is the
+# most natural place to accidentally paste a real banner. It is rendered into
+# a dialog, but it also lives in the source, which people read in watched
+# terminals.
+_help = gui.HELP_HTML.format(version=gui.APP_VERSION)
+check("W1 help formats with the version", gui.APP_VERSION in _help)
+for _name, _fn in (
+    ("safeguard notice", ac.parse_fable_refusal),
+    ("safeguard picker", ac.parse_fable_picker),
+    ("switch-model dialog", ac.parse_switch_model_prompt),
+    ("limit picker", ac.parse_limit_prompt),
+    ("connection error", ac.parse_econnreset_stuck),
+    ("truncated response", ac.parse_server_error_stuck),
+    ("oauth expired", ac.parse_oauth_expired),
+):
+    check(f"W2 help does not trip the {_name} detector", _fn(_help) is False)
+check("W3 help does not trip the limit banner",
+      ac.parse_limit_message(_help) is None)
+
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

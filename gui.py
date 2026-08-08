@@ -75,6 +75,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
+    QTextBrowser,
     QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -1923,6 +1924,10 @@ class MainWindow(QMainWindow):
         self.check_updates_btn.clicked.connect(
             lambda: self.sig_update_check.emit(True))
         header.addWidget(self.check_updates_btn)
+        self.help_btn = QPushButton("Help")
+        self.help_btn.setToolTip("How this watchdog works and how to use it")
+        self.help_btn.clicked.connect(self._open_help)
+        header.addWidget(self.help_btn)
         root.addLayout(header)
 
         # Update banner (hidden until an update is found).
@@ -2282,6 +2287,23 @@ class MainWindow(QMainWindow):
         url = rel.get("html_url")
         if url:
             QDesktopServices.openUrl(QUrl(url))
+
+    def _open_help(self) -> None:
+        """Usage notes, kept inside the app so they are there when the session
+        is stuck at 3am and nobody is going to go read a README."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Auto-Continue v{APP_VERSION} — Help")
+        dlg.resize(760, 640)
+        lay = QVBoxLayout(dlg)
+        view = QTextBrowser()
+        view.setOpenExternalLinks(True)
+        view.setHtml(HELP_HTML.format(version=APP_VERSION))
+        lay.addWidget(view)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(dlg.reject)
+        btns.accepted.connect(dlg.accept)
+        lay.addWidget(btns)
+        dlg.exec()
 
     def _open_advanced(self) -> None:
         # Current watched windows (title_key -> display) for the opt-in list.
@@ -2882,6 +2904,104 @@ class MainWindow(QMainWindow):
         # doesn't kill the app), so the X button path needs to ask the app
         # to quit explicitly.
         QApplication.instance().quit()
+
+
+# ---------------------------------------------------------------------------
+# In-app help
+# ---------------------------------------------------------------------------
+# Written in English at the user's request. Kept in the app rather than only
+# in the README: the moment you need it is when a session is wedged and you
+# are not about to go browsing GitHub.
+HELP_HTML = """
+<h2>Auto-Continue v{version}</h2>
+<p>A watchdog for Claude Code running in Windows Terminal. It reads each
+window's scrollback, notices when a session has stopped for a reason you can
+fix by typing something, waits for the right moment, and types it for you.</p>
+
+<h3>Getting started</h3>
+<ol>
+<li>Leave your Claude Code sessions running in Windows Terminal. Each
+<b>window</b> is watched separately (background tabs are invisible to Windows
+Terminal's accessibility layer, so run parallel sessions in separate windows).</li>
+<li>Press <b>Start</b>. The dot turns green and the table fills with every
+terminal window found.</li>
+<li>That's it. Leave it running. Nothing is typed until a session actually
+needs it.</li>
+</ol>
+<p>Not sure yet? Tick <b>Dry-run</b> first: everything is detected, scheduled
+and logged, but no keystroke is ever sent.</p>
+
+<h3>What it reacts to</h3>
+<ul>
+<li><b>The 5-hour usage limit.</b> Reads the reset time from the banner, waits
+until it passes (plus the buffer), then types <code>continue</code>. If the
+newer "What do you want to do?" chooser appears instead, it confirms
+<i>Stop and wait</i> so the banner shows up, then follows the normal flow.</li>
+<li><b>Network stalls.</b> Retry-exhausted banners and bare API connection
+errors get a <code>continue</code> every retry interval until the connection
+comes back.</li>
+<li><b>Truncated responses.</b> A reply cut off mid-stream is resumed.</li>
+<li><b>Dead sessions.</b> An expired login cannot be fixed by typing, so it is
+only reported — never poked at.</li>
+</ul>
+
+<h3>The table</h3>
+<ul>
+<li><b>Model</b> and <b>Effort</b> — optional. When set, the fire sequence
+becomes <code>/model …</code> → <code>/effort …</code> → <code>continue</code>.
+The model box is editable: type a name the list doesn't have yet and it is
+passed through verbatim, so a newly released model works right away.</li>
+<li><b>Now</b> fires immediately · <b>Skip</b> cancels a pending continue ·
+<b>Exclude</b> stops watching that window for good · <b>Clear cooldown</b>
+lifts the 15-minute post-send suppression.</li>
+</ul>
+
+<h3>Advanced…</h3>
+<p><b>Triggers</b> — every detection pattern, editable. Anthropic re-words
+these banners without warning, and a rename silently stops detection. Paste
+the terminal text into the test box and it tells you what matched, which
+capture groups it produced, and whether the match sits too far up the
+scrollback to count. Invalid patterns are refused rather than silently
+ignored; <b>Reset all</b> restores the built-ins.</p>
+<p><b>Model recovery</b> (opt-in, off by default) — when a model's safeguards
+block a turn, Claude Code either offers a chooser or switches by itself;
+either way the session ends up off the model you wanted. This accepts the
+chooser if there is one, waits, then switches back. It also <b>keeps the
+window on the target model</b>: if the session is left on the fallback with no
+notice showing, it steers back — after a grace period, spaced out and capped
+so it never fights you. The target is simply the last <code>/model</code> step
+in your script.</p>
+<p>Step script, one per line:</p>
+<ul>
+<li>plain text — typed, then Enter</li>
+<li><code>&lt;confirm&gt;</code> — accept whichever confirmable dialog is
+showing; does nothing if there is none</li>
+<li><code>&lt;wait&gt;</code> / <code>&lt;wait:N&gt;</code> — pause. Counts
+only time the session is actually <i>running</i>, so a network outage costs
+the recovery nothing</li>
+<li><code>&lt;esc&gt;</code> — surfaces a <code>/model</code> queued behind a
+busy turn. <b>Not in the default script:</b> it interrupts that turn, and in
+practice the turn is your real work. Add it only for a session wedged behind a
+hung turn</li>
+</ul>
+
+<h3>Good to know</h3>
+<ul>
+<li>Before typing, the target window must actually reach the foreground. If
+Windows refuses — you're typing elsewhere — it retries later rather than
+typing into the wrong app.</li>
+<li><b>Keep awake</b> stops Modern Standby from killing the watcher during a
+long unattended wait.</li>
+<li>The minimize button hides to the tray; the X button quits.</li>
+<li>Everything in the log pane is also appended to
+<code>%LOCALAPPDATA%\auto_continue\activity.log</code> for morning-after
+postmortems.</li>
+<li>Settings persist per window <i>title</i>, so two windows with identical
+titles share one setting.</li>
+</ul>
+
+<p><a href="https://github.com/zhh198903-ctrl/claude-code-auto-continue">Project page on GitHub</a></p>
+"""
 
 
 # ===========================================================================
