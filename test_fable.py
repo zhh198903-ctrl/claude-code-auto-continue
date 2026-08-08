@@ -117,14 +117,16 @@ _SG = "safegu" "ards flagged"
 _YES = "Yes, swi" "tch to"
 _NO = "No, go b" "ack"
 _SW = "Switch t" "o"
+# Status-bar context meter, as escapes so this file can't self-match.
+_BARGLYPH = chr(0x2588) * 3 + chr(0x2591) * 7
 _ED = "Edit promp" "t and retry"
 NOTICE = f"API Error: Fable 5's {_SG} this message. They may flag safe content."
-DIALOG = f"Switch model?\n> 1. {_YES} Opus 4.8\n  2. {_NO}"
+DIALOG = f"Switch model?\n> 1. {_YES} Opus 5\n  2. {_NO}"
 # What Claude Code actually shows: the notice comes WITH a two-option picker
 # whose first entry is pre-selected, so one Enter performs the switch.
 PICKER = (f"Session paused\n\nFable 5's {_SG} this message. The safeguards "
           f"are intentionally broad right now.\n\n"
-          f"> 1. {_SW} Opus 4.8\n  2. {_ED} with Fable 5")
+          f"> 1. {_SW} Opus 5\n  2. {_ED} with Fable 5")
 CLEAN = "all good here, nothing to see"
 ECONN = "API Error: Unable to connect to API (ECONN" "RESET)"
 BANNER = ("You've hit your li" "mit · resets 11pm (Asia/Shanghai)\n"
@@ -734,16 +736,16 @@ print("---- T: a run must say what model it actually ended on ----")
 # on the fallback model. Nothing in the log said so, and the failure went
 # unnoticed for an hour. Completion now reports the model, and warns on a
 # mismatch with what the script's last /model step asked for.
-_BAR_F = "  " + chr(91) + "Fable 5" + chr(93) + " ~~ 44% | usage"
-_BAR_O = "  " + chr(91) + "Opus 4.8" + chr(93) + " ~~ 63% | usage"
+_BAR_F = "  " + chr(91) + "Fable 5" + chr(93) + " " + _BARGLYPH + " 44% | usage"
+_BAR_O = "  " + chr(91) + "Opus 5" + chr(93) + " " + _BARGLYPH + " 63% | usage"
 
 check("T1 last /model step is read from the script",
       gui._last_model_step(
           gui._parse_recovery_steps(gui.DEFAULT_FABLE_STEPS)) == "fable")
 check("T2 no /model step -> nothing to compare",
       gui._last_model_step(gui._parse_recovery_steps("continue")) is None)
-check("T3 status bar parses", ac.current_model(_BAR_F) == "Fable"
-      and ac.current_model(_BAR_O) == "Opus")
+check("T3 status bar parses", ac.current_model(_BAR_F) == "Fable 5"
+      and ac.current_model(_BAR_O) == "Opus 5")
 check("T4 absent status bar is None", ac.current_model("no bar here") is None)
 
 # Ended on the right model -> informational only.
@@ -795,8 +797,8 @@ check("U2 <esc> is still available for people who opt in",
 # Claude Code sometimes switches by itself, leaving no modal to accept. The
 # script must survive that: <confirm> finds nothing, times out, and the run
 # becomes just the switch back.
-_AUTO = (NOTICE + "\nSwitched to Opus 4.8. Send feedback with /feedback\n"
-         + "  " + chr(91) + "Opus 4.8" + chr(93) + " ~~ 60%")
+_AUTO = (NOTICE + "\nSwitched to Opus 5. Send feedback with /feedback\n"
+         + "  " + chr(91) + "Opus 5" + chr(93) + " ~~ 60%")
 reset([(1, "claude")], {1: _AUTO})
 w = new_watcher()                            # DEFAULT_FABLE_STEPS
 w._interval = 60
@@ -816,8 +818,8 @@ print("---- V: parked on the fallback model is a failure, not a resting state --
 # The point of enabling this is to keep WORKING on the chosen model. A run can
 # end off-target (switch-back never landed, or Claude Code switched by itself
 # and the notice scrolled away) and nothing used to bring it home.
-_BAR_FABLE = "  " + chr(91) + "Fable 5" + chr(93) + " ~~ 44%"
-_BAR_OPUS = "  " + chr(91) + "Opus 4.8" + chr(93) + " ~~ 63%"
+_BAR_FABLE = "  " + chr(91) + "Fable 5" + chr(93) + " " + _BARGLYPH + " 44%"
+_BAR_OPUS = "  " + chr(91) + "Opus 5" + chr(93) + " " + _BARGLYPH + " 63%"
 
 reset([(1, "claude")], {1: "working away\n" + _BAR_OPUS})
 w = new_watcher()                            # target = fable, no notice at all

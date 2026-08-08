@@ -359,7 +359,7 @@ switch_model_samples = [
      "means the full history gets re-read on your next message.\n\n"
      "> 1. " + _YES + " Fable 5\n  2. " + _NO, True),
     # Switching-to-Opus variant.
-    ("Switch model?\n\n> 1. " + _YES + " Opus 4.8\n  2. " + _NO, True),
+    ("Switch model?\n\n> 1. " + _YES + " Opus 5\n  2. " + _NO, True),
     # No dialog.
     ("just some normal output here", False),
     # 'Switch model?' words but no Yes/No options — not the dialog.
@@ -388,15 +388,15 @@ fable_picker_samples = [
     ("Session paused\n\nFable 5's " + _SG + " this message. The safeguards "
      "are intentionally broad right now and may flag safe and routine "
      "coding, cybersecurity, or biology work.\n\n"
-     "> 1. " + _SW + " Opus 4.8\n  2. " + _ED + " with Fable 5", True),
+     "> 1. " + _SW + " Opus 5\n  2. " + _ED + " with Fable 5", True),
     # The fallback model name changes every release — must not be hardcoded.
     ("> 1. " + _SW + " Sonnet 5\n  2. " + _ED + " with Fable 5", True),
     # Only the first option, no pair — not the picker, so no blind Enter.
-    ("> 1. " + _SW + " Opus 4.8", False),
+    ("> 1. " + _SW + " Opus 5", False),
     # Ordinary prose.
     ("I had to switch to a different model yesterday", False),
     # Stale — scrolled too far up to still be open.
-    ("> 1. " + _SW + " Opus 4.8\n  2. " + _ED + " with Fable 5\n"
+    ("> 1. " + _SW + " Opus 5\n  2. " + _ED + " with Fable 5\n"
      + "x" * (SWITCH_POST_MATCH_TAIL + 500), False),
 ]
 

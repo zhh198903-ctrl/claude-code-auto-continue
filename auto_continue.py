@@ -576,19 +576,38 @@ FABLE_REFUSAL_RE = re.compile(DEFAULT_FABLE_PATTERN, re.IGNORECASE)
 # never to drive keystrokes — so a missed read costs a log line, nothing more.
 # Written with \s so this source can't match its own pattern in a watched
 # terminal, and the family list is open-ended enough to survive renames.
+# Matched by STRUCTURE, not by a list of model names. The status line renders
+# the active model in brackets followed by a context bar and a percentage, and
+# that shape is stable while the names are not: Opus 4.8 was retired and Opus 5
+# arrived within this project's lifetime. Enumerating families means the next
+# rename silently turns the drift check into a no-op — the same wording drift
+# that has broken detection here before. Bracketed tokens that are NOT the
+# status line (build tags like the ones a statusline plugin prints) lack the
+# bar-and-percentage tail and are ignored. Bar glyphs are written as escapes so
+# this source cannot match its own pattern in a watched terminal.
 MODEL_BAR_RE = re.compile(
-    r"\[\s*(Fable|Opus|Sonnet|Haiku|Mythos)[^\]\n]{0,24}\]",
+    r"\[\s*([^\]\n]{1,32}?)\s*\]\s+[█▓▒░]{2,}\s*\d{1,3}\s*%"
+)
+
+# Fallback for a customised status line with no bar: the known families. Kept
+# only as a second chance — the structural match above is the primary path.
+MODEL_FAMILY_RE = re.compile(
+    r"\[\s*((?:Fable|Opus|Sonnet|Haiku|Mythos)[^\]\n]{0,24}?)\s*\]",
     re.IGNORECASE,
 )
 
 
 def current_model(text: str):
-    """Model family shown in the status bar, or None if it isn't visible.
+    """Model label shown in the status bar, or None if it isn't visible.
 
-    Takes the LAST occurrence: the bar is redrawn at the bottom, so the most
-    recent one is the live state.
+    Returns what the bar actually says (e.g. the family plus its version), so
+    a log line can name it exactly. Takes the LAST occurrence: the bar is
+    redrawn at the bottom, so the most recent one is the live state.
     """
     matches = MODEL_BAR_RE.findall(text or "")
+    if matches:
+        return matches[-1]
+    matches = MODEL_FAMILY_RE.findall(text or "")
     return matches[-1] if matches else None
 
 
@@ -654,7 +673,7 @@ SWITCH_MODEL_RE = re.compile(
 # path; the /model + "Switch model?" dance is only needed to go BACK to the
 # blocked model afterwards.
 # Anchored on the option PAIR, and deliberately not naming either model: the
-# fallback ("Opus 4.8") changes with every release. Written with \s+ so this
+# fallback model name changes with every release. Written with \s+ so this
 # source can't self-match in a watched terminal.
 FABLE_PICKER_RE = re.compile(
     r"Switch\s+to\s+[\s\S]{0,120}?Edit\s+prompt\s+and\s+retry",
