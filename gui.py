@@ -229,6 +229,11 @@ FABLE_FRESH_MARGIN = 400
 FABLE_DRIFT_GRACE_S = 120  # leave a finished run alone this long first
 FABLE_DRIFT_RETRY_S = 300  # min gap between correction attempts
 FABLE_DRIFT_MAX = 3        # give up rather than fight the user forever
+# A model change observed while this tool sent nothing is the USER doing
+# it by hand. That is an instruction, not a fault to repair: stop enforcing
+# the target on that window and untick it, rather than switching it back
+# and turning the feature into something that fights its owner.
+FABLE_USER_SWITCH_QUIET_S = 120   # our keystrokes count as ours this long
 
 
 def _last_model_step(steps):
@@ -354,6 +359,9 @@ class _WState:
     fable_drift_at: Optional[datetime] = None     # last drift correction
     fable_drift_runs: int = 0                     # corrections since on-target
     fable_restore: Optional[list] = None          # one-off restore script
+    fable_last_model: Optional[str] = None        # model seen last tick
+    fable_acted_at: Optional[datetime] = None     # last keystroke WE sent
+    fable_user_optout: bool = False               # user took manual control
 
 
 class Watcher(QObject):
@@ -364,6 +372,9 @@ class Watcher(QObject):
 
     # snapshot is a list[dict] — see _make_snapshot for the schema.
     snapshot = pyqtSignal(list)
+    # Emitted with a title_key when the user has taken manual control of
+    # a window's model and it should be dropped from the recovery scope.
+    fable_untick = pyqtSignal(str)
     log = pyqtSignal(str, str)  # (level, message). level ∈ {info,warn,err,fire}
     running_changed = pyqtSignal(bool)
 
@@ -485,9 +496,16 @@ class Watcher(QObject):
         wins = cfg.get("windows")
         if not isinstance(wins, (list, tuple, set)):
             wins = []
-        self._fable_windows = {
+        new_scope = {
             title_key(str(t)) for t in wins if title_key(str(t))
         }
+        # Re-ticking a window is the user asking for enforcement again, so it
+        # clears any manual-control opt-out recorded for it.
+        for st in self._states.values():
+            if st.fable_user_optout and title_key(st.title) in (
+                    new_scope - self._fable_windows):
+                st.fable_user_optout = False
+        self._fable_windows = new_scope
         # A live edit can shorten the step script while a recovery is mid-run
         # (index would point past the end), and switching the feature OFF must
         # not leave a half-finished run armed to resume — hours later, into a
@@ -848,6 +866,10 @@ class Watcher(QObject):
                             # that's cosmetic and `fable_step` still owns the run.
 
                         else:
+                            # Anything in this branch types into the window;
+                            # stamping it is what lets a later model change be
+                            # attributed to us rather than to the user.
+                            st.fable_acted_at = now
                             # send / enter / esc / confirm own the window (skip outer).
                             # Every send is CHECKED: send_text_lines / send_keys
                             # return False when they can't bring the window to the
@@ -1091,9 +1113,38 @@ class Watcher(QObject):
                         cur = current_model(tail) if tail else None
                         on_target = (not want or not cur
                                      or want.lower() in cur.lower())
+                        # A model change we did NOT cause is the user taking
+                        # manual control. Steering that back would make the
+                        # feature fight its owner, so treat it as an
+                        # instruction: untick the window and stop enforcing.
+                        # Only a TRANSITION counts — a window that has been
+                        # sitting off-target since a failed run never changed
+                        # under us, and still deserves repair.
+                        quiet = (
+                            st.fable_acted_at is None
+                            or now - st.fable_acted_at
+                            >= timedelta(seconds=FABLE_USER_SWITCH_QUIET_S))
+                        if (cur and st.fable_last_model
+                                and cur != st.fable_last_model
+                                and not on_target and quiet
+                                and not fable_hit
+                                and not st.fable_user_optout):
+                            st.fable_user_optout = True
+                            self.log.emit(
+                                "warn",
+                                f"{title!r} was switched by hand from "
+                                f"{st.fable_last_model!r} to {cur!r}; taking "
+                                f"that as your call — unticking it and no "
+                                f"longer steering it back")
+                            self.fable_untick.emit(title_key(title))
+                        if cur:
+                            st.fable_last_model = cur
+
                         if on_target:
                             st.fable_drift_runs = 0
                             st.fable_drift_at = None
+                        elif st.fable_user_optout:
+                            pass                 # the user is driving this one
                         elif not fable_hit and not st.fable_handled:
                             settled = (
                                 st.fable_step_at is None
@@ -1114,6 +1165,7 @@ class Watcher(QObject):
                                     f"{FABLE_DRIFT_MAX})")
                                 _fable_reset(st)   # clears fable_restore
                                 st.fable_drift_at = now
+                                st.fable_acted_at = now
                                 st.fable_step = 0
                                 st.fable_step_at = now
                                 st.status = ST_FABLE
@@ -2145,6 +2197,7 @@ class MainWindow(QMainWindow):
         # Receive snapshots and logs.
         self.worker.snapshot.connect(self._on_snapshot)
         self.worker.log.connect(self._append_log)
+        self.worker.fable_untick.connect(self._on_fable_untick)
         self.worker.running_changed.connect(self._on_running_changed)
 
         self.worker_thread.start()
@@ -2287,6 +2340,25 @@ class MainWindow(QMainWindow):
         url = rel.get("html_url")
         if url:
             QDesktopServices.openUrl(QUrl(url))
+
+    @pyqtSlot(str)
+    def _on_fable_untick(self, key: str) -> None:
+        """Drop a window from the recovery scope after the user switched its
+        model by hand. Persisted, so the choice survives a restart — the
+        window stays unticked until it is ticked again in Advanced."""
+        if not key:
+            return
+        wins = [w for w in self._fable_cfg.get("windows", [])
+                if title_key(str(w)) != key]
+        if len(wins) == len(self._fable_cfg.get("windows", [])):
+            return                       # not in scope (all-windows mode)
+        self._fable_cfg["windows"] = wins
+        self.sig_set_fable_config.emit(dict(self._fable_cfg))
+        self._save_settings()
+        self._append_log(
+            "info",
+            f"unticked {key!r} from model recovery; "
+            f"{len(wins)} window(s) still in scope")
 
     def _open_help(self) -> None:
         """Usage notes, kept inside the app so they are there when the session
@@ -2982,6 +3054,9 @@ window on the target model</b>: if the session is left on the fallback with no
 notice showing, it steers back — after a grace period, spaced out and capped
 so it never fights you. The target is simply the last <code>/model</code> step
 in your script.</p>
+<p>If <b>you</b> switch a window's model by hand, that is taken as your
+decision: the window is unticked and left alone from then on. Tick it again
+in Advanced to resume enforcement.</p>
 <p>Step script, one per line:</p>
 <ul>
 <li>plain text — typed, then Enter</li>

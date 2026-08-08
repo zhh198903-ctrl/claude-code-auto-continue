@@ -873,6 +873,77 @@ check("V7 no /model step means no target to enforce",
 
 
 # =============================================================================
+print("---- X: a switch the user makes by hand is an instruction ----")
+# Steering back a model the user chose deliberately turns the feature into
+# something that fights its owner. A change observed while this tool typed
+# nothing is the user; untick the window and stop enforcing it.
+reset([(1, "claude")], {1: "working away\n" + _BAR_FABLE})
+w = new_watcher()
+unticked = []
+w.fable_untick.connect(lambda k: unticked.append(k))
+w._tick()                                    # observes it on target
+check("X1 on-target window is quietly tracked",
+      w._states[1].fable_last_model == "Fable 5")
+
+# The user switches it themselves; we sent nothing.
+advance(gui.FABLE_USER_SWITCH_QUIET_S + 10)
+TEXTS[1] = "working away\n" + _BAR_OPUS
+SENT.clear()
+w._tick()
+check("X2 the manual switch is noticed", w._states[1].fable_user_optout is True)
+check("X3 the window is unticked", unticked == [gui.title_key("claude")])
+check("X4 nothing is typed to undo it", texts_sent() == [])
+
+# And it stays hands-off from then on.
+for _ in range(4):
+    advance(gui.FABLE_DRIFT_GRACE_S + gui.FABLE_DRIFT_RETRY_S + 10)
+    w._tick()
+check("X5 it keeps its hands off afterwards", texts_sent() == [])
+
+# A window that has been off-target since a failed run never CHANGED under us,
+# so it is still repaired rather than unticked.
+reset([(1, "claude")], {1: "working away\n" + _BAR_OPUS})
+w = new_watcher()
+unticked = []
+w.fable_untick.connect(lambda k: unticked.append(k))
+w._tick()
+advance(gui.FABLE_DRIFT_GRACE_S + 5)
+w._tick()
+w._tick()
+check("X6 a never-on-target window is still steered back",
+      any("/model" in str(t) for t in texts_sent()))
+check("X7 and is not unticked", unticked == [])
+
+# A change right after our own keystrokes is ours, not the user's.
+reset([(1, "claude")], {1: "working away\n" + _BAR_FABLE})
+w = new_watcher()
+unticked = []
+w.fable_untick.connect(lambda k: unticked.append(k))
+w._tick()
+w._states[1].fable_acted_at = FakeDT._now      # pretend we just typed
+TEXTS[1] = "working away\n" + _BAR_OPUS
+advance(5)                                    # well inside the quiet window
+w._tick()
+check("X8 a change we caused is not mistaken for the user",
+      w._states[1].fable_user_optout is False and unticked == [])
+
+# Re-ticking the window in Advanced clears the opt-out.
+reset([(1, "claude")], {1: "working away\n" + _BAR_FABLE})
+w = new_watcher()
+w._tick()
+advance(gui.FABLE_USER_SWITCH_QUIET_S + 10)
+TEXTS[1] = "working away\n" + _BAR_OPUS
+w._tick()
+check("X9 opted out after the manual switch",
+      w._states[1].fable_user_optout is True)
+w._states[1].title = "claude"
+w.set_fable_config({"enabled": True, "all_windows": False, "delay": 180,
+                    "steps": gui.DEFAULT_FABLE_STEPS, "windows": ["claude"]})
+check("X10 re-ticking it in Advanced resumes enforcement",
+      w._states[1].fable_user_optout is False)
+
+
+# =============================================================================
 print("---- W: the in-app help must not describe itself into a trigger ----")
 # The help text explains the very phrases the detectors look for, so it is the
 # most natural place to accidentally paste a real banner. It is rendered into
