@@ -1062,6 +1062,40 @@ check("W3 help does not trip the limit banner",
       ac.parse_limit_message(_help) is None)
 
 
+# =============================================================================
+print("---- Z: the Advanced dialog must fit on a normal screen ----")
+# A QLabel without setWordWrap reports its whole one-line text as its minimum
+# width, and a layout can never go below a child's minimum — so one forgotten
+# wrap silently overrides resize() and the dialog opens wider than the screen.
+from PyQt6.QtWidgets import QLabel                       # noqa: E402
+
+_dlg = gui.AdvancedDialog(
+    None,
+    {"enabled": True, "windows": ["some-window"], "steps": "continue"},
+    {"some-window": "✳ some-window", "other": "⠂ other"},
+    {},
+)
+_MAXW = 900                        # comfortably inside a 1366-wide laptop
+check(f"Z1 dialog opens under {_MAXW}px wide", _dlg.width() <= _MAXW)
+# The real invariant: resize() can never go below a child's minimum, so if the
+# minimum exceeds the size we ask for, the resize() call is a no-op and the
+# dialog opens as wide as its longest line of text.
+check("Z2 the requested size is actually achievable "
+      f"(min {_dlg.minimumSizeHint().width()} <= {_dlg.width()})",
+      _dlg.minimumSizeHint().width() <= _dlg.width())
+
+_unwrapped = [
+    lbl.text()[:60] for lbl in _dlg.findChildren(QLabel)
+    if len(lbl.text()) > 55 and not lbl.wordWrap()
+]
+check("Z3 every long label wraps: " + (_unwrapped[0] if _unwrapped else "-"),
+      not _unwrapped)
+
+# Both tabs, not just the one that happens to be showing: a hidden tab's
+# labels still contribute to the dialog's minimum width.
+_dlg.deleteLater()
+
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

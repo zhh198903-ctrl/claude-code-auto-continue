@@ -3384,13 +3384,15 @@ class AdvancedDialog(QDialog):
         detect_hint.setWordWrap(True)
         root.addWidget(detect_hint)
 
-        root.addWidget(QLabel(
+        steps_hint = QLabel(
             "Recovery steps (one per line):  plain line = type it + Enter · "
             "<confirm> = accept whichever chooser/dialog is showing (does "
             "nothing if none) · <enter> = a bare Enter · <wait> = wait Delay "
             "seconds of RUNNING time (outages don't count) · <esc> = surface a "
             "queued switch — WARNING: interrupts a running turn, which is why "
-            "it is not in the default script"))
+            "it is not in the default script")
+        steps_hint.setWordWrap(True)
+        root.addWidget(steps_hint)
         _steps_src = cfg.get("steps")
         if not isinstance(_steps_src, str) or not _steps_src.strip():
             _steps_src = DEFAULT_FABLE_STEPS
@@ -3497,8 +3499,10 @@ class AdvancedDialog(QDialog):
         row.addWidget(self.reset_all_btn)
         lay.addLayout(row)
 
-        lay.addWidget(QLabel(
-            "Test — paste terminal text here to check what it matches:"))
+        test_hint = QLabel(
+            "Test — paste terminal text here to check what it matches:")
+        test_hint.setWordWrap(True)
+        lay.addWidget(test_hint)
         self.test_edit = QPlainTextEdit()
         self.test_edit.setPlaceholderText(
             "e.g. paste the banner Claude Code printed…")
