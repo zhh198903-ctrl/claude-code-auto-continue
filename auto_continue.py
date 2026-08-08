@@ -496,6 +496,30 @@ def parse_limit_message(
     return hour, minute, ampm, tz
 
 
+# Claude Code's live spinner, e.g. "✽ Swirling… (2m 0s · ↓ 5.0k tokens)".
+# The verb is randomised and the suffix varies, so anchor on the part that
+# doesn't move: an elapsed clock followed by a middot, inside parentheses.
+# The status bar's own parenthesised times ("(4h 37m / 5h)") use a slash, not
+# a middot, and the finished-turn line ("Brewed for 3m 2s · …") has no
+# parentheses — neither can match. Second alternative is the older wording,
+# split so this source file cannot suppress a real banner when someone reads
+# it inside a watched terminal.
+RUNNING_RE = re.compile(
+    r"\((?:\s*\d+\s*[hms])+\s*·" r"|esc" r"\s+to\s+interrupt", re.I)
+
+
+def session_running_after(text: str, pos: int) -> bool:
+    """True if the session is streaming a turn *after* offset `pos`.
+
+    An error banner only means "stuck" while nothing has run since. Once
+    Claude Code is streaming again the banner is just scrollback, and resending
+    'continue' does not unstick anything — it queues another prompt that lands
+    when the turn ends. An 80-minute outage put eight of them into one session
+    that way.
+    """
+    return RUNNING_RE.search(text, pos) is not None
+
+
 def parse_retry_exhausted(text: str, pattern=None) -> bool:
     """True if the most recent network-retry banner shows N == total (e.g.
     `attempt 10/10`) and the banner sits near the tail of the buffer.
@@ -512,6 +536,8 @@ def parse_retry_exhausted(text: str, pattern=None) -> bool:
         return False
     m = matches[-1]
     if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
+        return False
+    if session_running_after(text, m.end()):
         return False
     try:
         n, total = int(m.group(1)), int(m.group(2))
@@ -535,6 +561,8 @@ def parse_econnreset_stuck(text: str, pattern=None) -> bool:
     m = matches[-1]
     if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
         return False
+    if session_running_after(text, m.end()):
+        return False
     return True
 
 
@@ -553,6 +581,8 @@ def parse_server_error_stuck(text: str, pattern=None) -> bool:
         return False
     m = matches[-1]
     if len(text) - m.end() > NETWORK_POST_MATCH_TAIL:
+        return False
+    if session_running_after(text, m.end()):
         return False
     return True
 

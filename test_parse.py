@@ -562,4 +562,49 @@ tcheck("custom pattern drives its parser",
        parse_fable_refusal("custom" " refusal wording", pats["fable"]) is True
        and parse_fable_refusal("Fable's " + _SG, pats["fable"]) is False)
 
+
+# ---------- a streaming session is not stuck ----------
+# Observed 2026-08-08: an 80-minute outage put EIGHT 'continue' prompts into
+# one session. Each resend fired because the banner was still within the tail
+# allowance — but the session had already recovered and was streaming, so every
+# 'continue' just queued behind the running turn and all eight landed at once
+# when it finished. A banner only means "stuck" while nothing has run since it.
+print()
+print("---- running-session gate ----")
+
+_ERR = "API Error: Unable to conn" "ect to API (ECONNRESET)"
+_RETRY = "Retry" "ing in 8s · attempt 10/10"
+_TRUNC = "API Error: Server error mid-resp" "onse."
+_BAR = "  [Opus 5] ███ 46% | 用量 █ 12% (2h 23m / 5h)\n  ⏱️  3h 59m"
+
+running_samples = [
+    # Live spinner after the banner: recovered, do not poke.
+    (f"{_ERR}\n> \n  ✽ Swirling… (2m 0s · ↓ 5.0k tokens)", False),
+    (f"{_ERR}\n  ✻ Misting… (2m 3s · ↓ 2.8k tokens · thinking)", False),
+    # Older wording with no token counter.
+    (f"{_ERR}\n  ✽ Working… (12s · " "esc to interrupt)", False),
+    # Idle at the prompt: still stuck. The status bar's own parenthesised
+    # times use a slash, not a middot, so they must not read as a spinner.
+    (f"{_ERR}\n> \n{_BAR}", True),
+    # Turn FINISHED after the banner — "Brewed for 3m 2s · …" carries no
+    # parentheses, so it is not a spinner and the session is idle and stuck.
+    (f"{_ERR}\n  ✻ Brewed for 3m 2s · 1 shell still running\n> ", True),
+    # Spinner ABOVE the banner: that turn is the one that died. Still stuck.
+    (f"  ✽ Swirling… (2m 0s · ↓ 5.0k tokens)\n{_ERR}\n> ", True),
+]
+for i, (text, expected) in enumerate(running_samples):
+    tcheck(f"econnreset running-gate sample {i}",
+           parse_econnreset_stuck(text) is expected)
+
+# The gate applies to all three network detectors, so both tick loops inherit
+# it — the GUI's and the CLI's — rather than one of them being fixed alone.
+tcheck("retry-exhausted honours the gate",
+       parse_retry_exhausted(f"{_RETRY}\n  ✽ Swirling… (9s · ↓ 1k tokens)")
+       is False
+       and parse_retry_exhausted(f"{_RETRY}\n> \n{_BAR}") is True)
+tcheck("mid-stream truncation honours the gate",
+       parse_server_error_stuck(f"{_TRUNC}\n  ✽ Swirling… (9s · ↓ 1k tokens)")
+       is False
+       and parse_server_error_stuck(f"{_TRUNC}\n> \n{_BAR}") is True)
+
 sys.exit(1 if failures else 0)
