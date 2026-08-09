@@ -246,17 +246,31 @@ check("C12 latched as handled", w._states[1].fable_handled is True)
 
 
 # =============================================================================
-print("---- D: <esc> fires only when no dialog appeared ----")
+print("---- D: <esc> interrupts a running turn, and only then ----")
+# ESC exists so the NEXT step lands as a command. Claude Code queues anything
+# typed during a turn, and a queued /model never takes effect — live, a whole
+# recovery spent its wait believing it was on the fallback while the session
+# had never left the target. An idle session has nothing to interrupt, so ESC
+# there is pure risk: it would only clear whatever the user had half-typed.
+_SPIN_D = "  ✽ Swirling… (9s · ↓ 1k tokens)"
+
 reset([(1, "claude")], {1: NOTICE})
 w = new_watcher(steps="/model opus\n<esc>\ncontinue")
 w._tick()                                    # arm
 w._tick()                                    # /model opus
 check("D1 at <esc>", w._states[1].fable_step == 1)
-w._tick()                                    # no dialog, settle not elapsed
-check("D2 waits out the settle before ESC", keys_sent() == [])
-advance(5)                                   # > 4s settle
 w._tick()
-check("D3 sends ESC to surface a queued dialog", keys_sent() == ["{Esc}"])
+check("D2 an idle session is left alone", keys_sent() == [])
+check("D2b and the step does not stall waiting for one",
+      w._states[1].fable_step == 2)
+
+reset([(1, "claude")], {1: NOTICE + "\n" + _SPIN_D})
+w = new_watcher(steps="/model opus\n<esc>\ncontinue")
+w._tick()
+w._tick()                                    # /model opus
+advance(1)
+w._tick()
+check("D3 a running turn IS interrupted", keys_sent() == ["{Esc}"])
 check("D4 advances after ESC", w._states[1].fable_step == 2)
 
 
@@ -657,7 +671,9 @@ print("---- R: the spent picker must stop reading as an open modal ----")
 # one thing <esc> exists for) and the next <confirm> fired a bare Enter into a
 # running turn.
 BUSY_AFTER_PICKER = (
-    PICKER + "\n* Synthesizing... (turn still running)\n"
+    # A real spinner line, because that is what tells the tick the turn is
+    # still running — and ESC now fires on exactly that signal.
+    PICKER + "\n✽ Synthesizing… (41s · ↓ 3.2k tokens)\n"
     "GOT '/model fable'\n"
     "   (switch queued behind the running turn - no dialog yet)\n")
 
@@ -794,13 +810,19 @@ check("T8 completion is still reported", len(ends) == 1)
 
 
 # =============================================================================
-print("---- U: the default script must not interrupt running turns ----")
-# <esc> destroyed the user's work twice in production: once ending a queued
-# instruction, once killing a task 5m50s in. It only ever bought a slightly
-# earlier switch-back, which the completion check now reports on anyway.
+print("---- U: the default script interrupts, but only the fallback's turn ----")
+# <esc> was pulled from the default after it destroyed the user's work twice —
+# once ending a queued instruction, once killing a task 5m50s in. It is back,
+# because the thing it interrupts changed: the recovery now deliberately cuts
+# the FALLBACK's turn short, and without ESC the /model that follows is merely
+# queued and never takes effect. The safety property that made it dangerous is
+# now enforced in the step itself rather than by leaving it out: ESC fires only
+# when a turn is actually running (group D).
 _steps = gui._parse_recovery_steps(gui.DEFAULT_FABLE_STEPS)
-check("U1 no <esc> in the shipped default",
-      not any(k == "esc" for k, _ in _steps))
+check("U1 every /model in the default is preceded by an <esc>",
+      all(_steps[i - 1][0] == "esc"
+          for i, (k, a) in enumerate(_steps)
+          if k == "send" and gui._model_step_target(a)))
 check("U2 <esc> is still available for people who opt in",
       gui._parse_recovery_steps("<esc>") == [("esc", None)])
 
@@ -1355,6 +1377,22 @@ w._tick()
 check("AA15c a notice gone for good does end the episode",
       w._states[1].fable_runs == 0
       and w._states[1].fable_notice_id is None)
+
+# The patient attempt exists to let the fallback FINISH. Interrupting it there
+# would defeat the only strategy left after three impatient ones failed.
+w = _bouncing("<esc>\n/model fable", NOTICE + _BAR_SPIN, runs=0)
+w._states[1].fable_runs = gui.FABLE_IMPATIENT_RUNS + 1
+advance(1)
+w._tick()
+check("AA16a the patient attempt does not interrupt the turn",
+      keys_sent() == [])
+
+# ...but the impatient ones do, or the /model that follows is only queued.
+w = _bouncing("<esc>\n/model fable", NOTICE + _BAR_SPIN, runs=0)
+advance(1)
+w._tick()
+check("AA16b an impatient attempt interrupts so the switch can land",
+      keys_sent() == ["{Esc}"])
 
 check("AA12f every legacy script is distinct and none equals the new default",
       len(set(_legacies.values())) == len(_legacies)

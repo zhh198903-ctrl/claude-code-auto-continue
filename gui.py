@@ -174,10 +174,12 @@ def title_key(title: str) -> str:
 # without it the session would sit at the prompt holding half-finished work.
 DEFAULT_FABLE_STEPS = (
     "<confirm>\n"
+    "<esc>\n"
     "/model opus\n"
     "<confirm>\n"
     "continue\n"
     "<wait>\n"
+    "<esc>\n"
     "/model fable\n"
     "<confirm>\n"
     "continue"
@@ -231,6 +233,22 @@ LEGACY_FABLE_STEPS_V201_NOCONT = (
     "<wait>\n"
     "/model fable\n"
     "<confirm>"
+)
+
+# The 8-step script: switched mid-turn, but without interrupting the turn
+# first. Claude Code queues everything typed while a turn runs, and a QUEUED
+# /model never takes effect — so the run spent its whole wait believing it was
+# on the fallback while the session had not left the target at all, and the
+# closing 'continue' was refused by the very model it was supposed to escape.
+LEGACY_FABLE_STEPS_V202 = (
+    "<confirm>\n"
+    "/model opus\n"
+    "<confirm>\n"
+    "continue\n"
+    "<wait>\n"
+    "/model fable\n"
+    "<confirm>\n"
+    "continue"
 )
 # Shipped defaults, in one place so first run and Reset agree.
 #   poll   60s — a UIA read of every window costs 100ms+, and nothing
@@ -1138,24 +1156,45 @@ class Watcher(QObject):
                                 else:
                                     failed = True
                             elif kind == "esc":
+                                # ESC exists to make the session idle so the
+                                # NEXT step lands as a command instead of being
+                                # queued. Claude Code queues everything typed
+                                # during a turn, and a queued /model does not
+                                # take effect — measured live: a whole recovery
+                                # ran its 180s wait believing it was on the
+                                # fallback while the session had never left the
+                                # target, because the switch was still sitting
+                                # in the queue.
+                                _busy = bool(tail and session_running(tail))
+                                _patient = (
+                                    st.fable_runs > FABLE_IMPATIENT_RUNS
+                                    or st.fable_drift_runs
+                                    >= FABLE_IMPATIENT_RUNS)
                                 if tail and self._modal_up(tail, st):
                                     # Dialog already up — ESC would CANCEL it. Skip;
                                     # the next <confirm> accepts the showing dialog.
                                     advance = True
-                                elif (st.fable_step_at is not None
-                                      and now - st.fable_step_at
-                                      >= timedelta(seconds=4)):
-                                    # No dialog after a brief settle → the switch is
-                                    # queued behind a busy turn; ESC surfaces it.
+                                elif not _busy:
+                                    advance = True   # nothing to interrupt
+                                elif _patient:
+                                    # This attempt is the one that lets the
+                                    # fallback finish. Interrupting it here
+                                    # would defeat the only strategy left.
+                                    self.log.emit(
+                                        "info",
+                                        f"{dr}Fable-recover: {title!r} "
+                                        f"(attempt {st.fable_runs}) — not "
+                                        f"interrupting, letting the turn end")
+                                    advance = True
+                                else:
                                     self.log.emit(
                                         "fire",
                                         f"{dr}Fable-recover → {title!r}: ESC "
-                                        f"(surface switch dialog)")
+                                        f"(interrupt so the switch lands)")
                                     if send_keys(w, "{Esc}", dry_run=self._dry_run):
                                         advance = True
                                     else:
                                         failed = True
-                                # else: wait a moment for an idle dialog to appear
                             elif kind == "confirm":
                                 # Either confirmable modal counts: the
                                 # safeguard picker (Enter = "Switch to
@@ -2979,6 +3018,7 @@ class MainWindow(QMainWindow):
                         LEGACY_FABLE_STEPS_V1016: "v1.0.16",
                         LEGACY_FABLE_STEPS_V201: "v2.0.1",
                         LEGACY_FABLE_STEPS_V201_NOCONT: "v2.0.1a",
+                        LEGACY_FABLE_STEPS_V202: "v2.0.2",
                     }
                     if _old in _legacy:
                         self._fable_cfg["steps"] = DEFAULT_FABLE_STEPS
@@ -3039,6 +3079,9 @@ class MainWindow(QMainWindow):
                 "v2.0.1a": ("it ended on the switch back, leaving the session "
                             "parked at the prompt holding half-finished work; "
                             "the new one resumes it with 'continue'"),
+                "v2.0.2": ("it typed /model into a busy session, where Claude "
+                           "Code queues it and the switch never takes effect; "
+                           "the new one presses ESC first"),
             }.get(self._migrated_fable_steps,
                   "it no longer matches how Claude Code behaves")
             self._append_log(
