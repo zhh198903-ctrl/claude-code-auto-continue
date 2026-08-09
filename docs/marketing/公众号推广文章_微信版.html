@@ -23,17 +23,17 @@
   <table width="100%" bgcolor="#1c1917" cellpadding="0" cellspacing="0" border="0">
     <tr>
       <td align="center" style="padding:52px 32px 44px;">
-        <div style="display:inline-block;border:1px solid #fb923c;color:#fdba74;font-size:12px;padding:3px 12px;border-radius:12px;margin-bottom:16px;letter-spacing:0.08em;">🎉 v1.0.1 首发 · 免费开源</div>
+        <div style="display:inline-block;border:1px solid #fb923c;color:#fdba74;font-size:12px;padding:3px 12px;border-radius:12px;margin-bottom:16px;letter-spacing:0.08em;">🎉 v2.0.1 发布 · 免费开源</div>
         <h1 style="font-size:26px;font-weight:800;color:#fff;line-height:1.4;margin:0 0 12px;">
-          Claude Code 跑长任务<br>
-          <span style="color:#fb923c;">再也不怕 5 小时限制</span>
+          任务被安全拦截卡住了？<br>
+          <span style="color:#fb923c;">它替你换个模型接着跑</span>
         </h1>
-        <div style="font-size:14px;color:#a8a29e;margin-bottom:20px;">Auto-Continue — 自动检测限制、定点续命的 Windows 守护工具</div>
+        <div style="font-size:14px;color:#a8a29e;margin-bottom:20px;">Auto-Continue — Claude Code 的 Windows 守护工具，v2.0.1 带来模型恢复</div>
         <div>
+          <span style="border:1px solid #fb923c;color:#fdba74;font-size:12px;padding:3px 10px;border-radius:4px;margin:3px;">⇄ 安全拦截自动恢复</span>
           <span style="border:1px solid #57534e;color:#d6d3d1;font-size:12px;padding:3px 10px;border-radius:4px;margin:3px;">5h 限制自动续</span>
-          <span style="border:1px solid #57534e;color:#d6d3d1;font-size:12px;padding:3px 10px;border-radius:4px;margin:3px;">网络重试恢复</span>
+          <span style="border:1px solid #57534e;color:#d6d3d1;font-size:12px;padding:3px 10px;border-radius:4px;margin:3px;">网络卡死恢复</span>
           <span style="border:1px solid #57534e;color:#d6d3d1;font-size:12px;padding:3px 10px;border-radius:4px;margin:3px;">多窗口并行</span>
-          <span style="border:1px solid #57534e;color:#d6d3d1;font-size:12px;padding:3px 10px;border-radius:4px;margin:3px;">深浅主题自适应</span>
           <span style="border:1px solid #57534e;color:#d6d3d1;font-size:12px;padding:3px 10px;border-radius:4px;margin:3px;">Windows 免安装</span>
         </div>
       </td>
@@ -42,11 +42,11 @@
 
   <div style="padding:28px 28px 0;">
 
-    <!-- v1.0.1 发布说明 -->
+    <!-- v2.0.1 发布说明 -->
     <div style="background:linear-gradient(135deg,#fff7ed 0%,#fef3c7 100%);border:1px solid #fed7aa;border-radius:10px;padding:18px 22px;margin:24px 0 20px;">
-      <div style="font-weight:700;color:#7c2d12;font-size:15px;margin-bottom:8px;">📢 v1.0.1 上线</div>
+      <div style="font-weight:700;color:#7c2d12;font-size:15px;margin-bottom:8px;">📢 v2.0.1 上线</div>
       <p style="font-size:14px;color:#92400e;line-height:1.8;margin:0;">
-        Anthropic 给 Claude 订阅用户的 <b>5 小时窗口配额</b>，是当下用 Claude Code 跑长任务最大的天花板。订阅期间用满后必须等下一个窗口才能续。这个工具帮你做的事很简单：<b>检测到限制 → 等到 reset 时刻 → 自动帮你输入 continue 让任务接着跑</b>。下面从头介绍，已经看过早期版本的朋友直接跳到"v1.0.1 有什么新的"。
+        这个工具最早只做一件事：<b>检测到 5 小时限制 → 等到 reset 时刻 → 自动输入 continue</b>。v2.0.0 起加入了一个新能力 —— <b>会话被模型安全策略拦住时，自动换到备用模型把这一轮做完，再切回来</b>。v2.0.1 把这套流程在真实会话里跑通了。已经在用旧版本的朋友，直接跳到 <b>"⇄ 模型恢复"</b> 一节。
       </p>
     </div>
 
@@ -60,27 +60,127 @@
       <div style="font-weight:700;color:#92400e;font-size:14px;margin-bottom:8px;">⚠ 日常之痛</div>
       <ul style="padding-left:20px;color:#78350f;font-size:14px;margin:0;">
         <li style="margin-bottom:4px;">睡前丢一个长任务给 Claude，醒来发现两小时后就被 limit 弹回去了，剩下的活全没干。</li>
-        <li style="margin-bottom:4px;">出差路上挂了个重构任务，回来一看：<code style="background:#fff7ed;padding:1px 5px;border-radius:3px;color:#7c2d12;border:1px solid #fed7aa;">You've hit your limit · resets 11pm</code>，傻坐了一晚上。</li>
-        <li style="margin-bottom:4px;">网络抖一下 → <code style="background:#fff7ed;padding:1px 5px;border-radius:3px;color:#7c2d12;border:1px solid #fed7aa;">Retrying in 0s · attempt 10/10</code> 卡死，得手动 continue 才能恢复。</li>
-        <li style="margin-bottom:4px;">同时开 3、4 个 Windows Terminal 跑不同分支的任务，谁被 limit 了、谁又恢复了，得挨个去翻。</li>
+        <li style="margin-bottom:4px;">写安全相关的代码，被模型的安全策略判定为敏感内容，<b>整轮直接停住</b>，人不在就一直停着。</li>
+        <li style="margin-bottom:4px;">网络抖一下就卡死，得手动敲 continue 才能恢复。</li>
+        <li style="margin-bottom:4px;">同时开 3、4 个 Windows Terminal 跑不同分支，谁被卡了、谁又恢复了，得挨个去翻。</li>
       </ul>
     </div>
 
     <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:18px;">
-      <b>这是一个免费开源的小工具</b>，把"看到 limit → 等到 reset → 手动输入 continue"这套机械动作自动化，双击 EXE 就能用，不需要装 Python，不需要配环境。
+      <b>这是一个免费开源的小工具</b>，把这些"人肉盯着、手动敲一下"的机械动作自动化，双击 EXE 就能用，不需要装 Python，不需要配环境。
     </p>
 
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
 
+    <!-- ══════════ 重点：模型恢复 ══════════ -->
+    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #fb923c;">⇄ 重点功能：模型安全拦截自动恢复</div>
+
+    <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:16px;">
+      先说这个功能解决的问题。做正经的安全审计、漏洞排查、协议分析这类工作时，模型的安全策略<b>有时会把合法的编码任务误判为敏感内容</b>，于是整轮回答直接中止，屏幕上留下这样一段：
+    </p>
+
+    <div style="background:#1c1917;border-radius:8px;padding:16px 18px;margin-bottom:16px;font-family:Consolas,Monaco,monospace;font-size:12px;line-height:1.7;color:#d6d3d1;overflow-x:auto;">
+      <span style="color:#fbbf24;">API Error:</span> ... safeguards flagged this message.<br>
+      Our intentionally broad safeguards allow us to deliver more<br>
+      capabilities faster, but <span style="color:#fdba74;">can sometimes flag legitimate coding,<br>
+      cybersecurity, and biology tasks.</span><br><br>
+      Double press esc to edit your last message, or<br>
+      <span style="color:#86efac;">try a different model with /model.</span>
+    </div>
+
+    <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:16px;">
+      注意最后一行 —— <b>Claude Code 自己给出的建议就是"换个模型试试"</b>。问题在于：这个动作必须有人坐在电脑前手动做。你睡着了、出门了、或者同时开了四个窗口没注意到，这个会话就一直停在那里，什么都不干。
+    </p>
+
+    <div style="background:#fff7ed;border-left:4px solid #fb923c;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0 20px;font-size:14px;color:#7c2d12;line-height:1.8;">
+      <b>这个功能做的事：</b>发现会话被拦住 → 按你配置的脚本换到备用模型 → 让它把这一轮做完 → 干满设定时长后切回原模型。全程不需要你在场。
+    </div>
+
+    <!-- 恢复流程 -->
+    <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:12px;">
+      默认的恢复脚本是这七步，<b>每一步都可以在 Advanced 里自己改</b>：
+    </p>
+
+    <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:13px;">
+      <tbody>
+        <tr>
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;confirm&gt;</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">如果弹了选择框就按确认；没有就跳过</td>
+        </tr>
+        <tr style="background:#fffbeb;">
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">/model opus</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;"><b>自己切到备用模型</b>（已经在上面了就跳过，不重复切）</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;confirm&gt;</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">确认切换对话框</td>
+        </tr>
+        <tr style="background:#fffbeb;">
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">continue</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">在备用模型上把被拦的那一轮重做</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;wait&gt;</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">等 180 秒 —— 注意是<b>实际运行时间</b>，断网的时间不算</td>
+        </tr>
+        <tr style="background:#fffbeb;">
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">/model fable</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">切回原模型</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;confirm&gt;</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">确认</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- 四条护栏 -->
+    <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:12px;">
+      会自动往终端里敲字的功能，最怕的是<b>帮倒忙</b>。所以它带了四条护栏，每一条都是真实踩过坑之后加的：
+    </p>
+
+    <table style="width:100%;border-collapse:separate;border-spacing:8px;margin-bottom:12px;">
+      <tr>
+        <td style="width:50%;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;vertical-align:top;">
+          <div style="font-size:20px;margin-bottom:6px;">⏸</div>
+          <div style="font-weight:700;font-size:14px;color:#14532d;margin-bottom:4px;">正在出词时绝不切模型</div>
+          <div style="font-size:13px;color:#4b5563;line-height:1.6;">切模型会在<b>这一轮内部</b>生效，等于把干到一半的活拦腰截断。所以切换前必须等这一轮跑完。实测拦下过一次：多等了 100 秒，保住了 86 秒的工作量。</div>
+        </td>
+        <td style="width:50%;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;vertical-align:top;">
+          <div style="font-size:20px;margin-bottom:6px;">✋</div>
+          <div style="font-weight:700;font-size:14px;color:#14532d;margin-bottom:4px;">你手动切了，它就不管了</div>
+          <div style="font-size:13px;color:#4b5563;line-height:1.6;">如果你自己把某个窗口切到别的模型，工具会认为这是你的决定，<b>自动取消该窗口的勾选</b>，不再往回掰。想恢复接管，在 Advanced 里重新勾上即可。</div>
+        </td>
+      </tr>
+      <tr>
+        <td style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;vertical-align:top;">
+          <div style="font-size:20px;margin-bottom:6px;">🚪</div>
+          <div style="font-weight:700;font-size:14px;color:#14532d;margin-bottom:4px;">默认关闭，逐窗口开启</div>
+          <div style="font-size:13px;color:#4b5563;line-height:1.6;">装好就是关的。要用得自己去 Advanced 打开，并<b>逐个勾选</b>允许它操作哪些窗口。没勾的窗口它一个键都不会敲。</div>
+        </td>
+        <td style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;vertical-align:top;">
+          <div style="font-size:20px;margin-bottom:6px;">📋</div>
+          <div style="font-weight:700;font-size:14px;color:#14532d;margin-bottom:4px;">失败就说失败</div>
+          <div style="font-size:13px;color:#4b5563;line-height:1.6;">收尾时不只看"停在哪个模型"，还看<b>拦截是不是真的解除了</b>。做了无用功会明确写成警告，不会含糊报一句 done 蒙混过去。</div>
+        </td>
+      </tr>
+    </table>
+
+    <div style="background:#fef9f0;border:1px solid #fde68a;border-radius:8px;padding:14px 18px;margin:16px 0 20px;font-size:13px;color:#78350f;line-height:1.8;">
+      🔍 <b>另外两条自动行为：</b>勾选的窗口如果漂到了别的模型（哪怕没被拦），会被自动拨回目标模型，最多 3 次就放弃；同一条拦截最多尝试 2 轮恢复，避免来回切一整夜。
+    </div>
+
+    <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
+
     <!-- 工具介绍 -->
-    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #c2410c;">它是什么？</div>
+    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #c2410c;">它整体是什么？</div>
 
     <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:18px;">
-      <b>Auto-Continue</b> 是一款专为 Claude Code 重度用户设计的 Windows 守护程序。它通过 Win32 UI Automation 实时读取所有 Windows Terminal 窗口的输出，识别 Claude 的限制提示和网络重试提示，到点之后自动把 <code style="background:#fff7ed;padding:1px 5px;border-radius:3px;color:#7c2d12;border:1px solid #fed7aa;font-family:Consolas,monospace;">continue</code> 输入到对应终端，让你的长任务跨越 5h 窗口、跨越网络抖动继续往下跑。
+      <b>Auto-Continue</b> 是一款给 Claude Code 重度用户的 Windows 守护程序。它通过 Win32 UI Automation 实时读取所有 Windows Terminal 窗口的可见文本，识别各种"会话被卡住"的信号，然后把对应的按键送到那个终端，让长任务继续往下跑。
     </p>
 
     <div style="background:#fff7ed;border-left:4px solid #fb923c;border-radius:0 6px 6px 0;padding:12px 16px;margin:14px 0 20px;font-size:14px;color:#7c2d12;">
-      ✅ 完全免费开源 &ensp;·&ensp; ✅ 单文件 EXE，55 MB &ensp;·&ensp; ✅ 双击即用，无 Python 依赖
+      ✅ 完全免费开源 &ensp;·&ensp; ✅ 单文件 EXE，25.5 MB &ensp;·&ensp; ✅ 双击即用，无 Python 依赖
     </div>
 
     <!-- 界面截图（发布时需在编辑器重新插入图片） -->
@@ -88,33 +188,32 @@
 
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
 
-    <!-- 三大场景 -->
-    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #c2410c;">三个核心场景</div>
+    <!-- 四大场景 -->
+    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #c2410c;">四个核心场景</div>
 
-    <!-- 场景卡片：两列 -->
     <table style="width:100%;border-collapse:separate;border-spacing:8px;margin-bottom:12px;">
       <tr>
+        <td style="width:50%;background:#fff7ed;border:2px solid #fb923c;border-radius:8px;padding:14px 16px;vertical-align:top;">
+          <div style="font-size:22px;margin-bottom:6px;">⇄</div>
+          <div style="font-weight:700;font-size:14px;color:#7c2d12;margin-bottom:4px;">安全拦截卡住 <span style="font-size:11px;background:#fb923c;color:#fff;padding:1px 6px;border-radius:3px;">v2.0 新增</span></div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">正经的安全/协议类编码任务被误判拦下，整轮停住。自动换到备用模型做完，再切回来。默认关闭，逐窗口开启。</div>
+        </td>
         <td style="width:50%;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:14px 16px;vertical-align:top;">
           <div style="font-size:22px;margin-bottom:6px;">⏰</div>
           <div style="font-weight:700;font-size:14px;color:#7c2d12;margin-bottom:4px;">5 小时窗口限制</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">检测到 "You've hit your limit · resets 11pm (Asia/Shanghai)" 之类的提示，解析出 reset 时刻，到点 + 20 秒缓冲后自动输入 continue。</div>
-        </td>
-        <td style="width:50%;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:22px;margin-bottom:6px;">🌐</div>
-          <div style="font-weight:700;font-size:14px;color:#7c2d12;margin-bottom:4px;">网络重试耗尽</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">家里 WiFi / 公司代理偶尔抽风，Claude 卡在 "Retrying in 0s · attempt 10/10"。守护程序每 30 秒自动 resend continue，网络一恢复任务就接着跑。</div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">识别到限制提示后解析出 reset 时刻，到点加缓冲后自动输入 continue。四种措辞、任意时区都认。</div>
         </td>
       </tr>
       <tr>
         <td style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:22px;margin-bottom:6px;">🪟</div>
-          <div style="font-weight:700;font-size:14px;color:#7c2d12;margin-bottom:4px;">多窗口并行监控</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">同时开 5 个 Windows Terminal 跑不同任务？一个 GUI 全部看到。每个窗口独立倒计时、独立冷却（避免重复触发）。</div>
+          <div style="font-size:22px;margin-bottom:6px;">🌐</div>
+          <div style="font-weight:700;font-size:14px;color:#7c2d12;margin-bottom:4px;">网络卡死 / 回答被截断</div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">重试耗尽、连接错误、回答中途断流，都会每 10 分钟补一次 continue，直到恢复。<b>会话一旦重新出词就立刻停手</b>，不会反复打扰。</div>
         </td>
         <td style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:22px;margin-bottom:6px;">🌓</div>
-          <div style="font-weight:700;font-size:14px;color:#7c2d12;margin-bottom:4px;">深浅主题跟随系统</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">Windows 亮色模式下浅色高亮，切到深色模式自动换深色面板和高对比文字，切换主题瞬间生效、连旧日志行也会按新配色重画。</div>
+          <div style="font-size:22px;margin-bottom:6px;">🪟</div>
+          <div style="font-weight:700;font-size:14px;color:#7c2d12;margin-bottom:4px;">多窗口并行监控</div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">同时开 5 个 Windows Terminal 跑不同任务？一个 GUI 全部看到。每个窗口独立倒计时、独立冷却、独立配置。</div>
         </td>
       </tr>
     </table>
@@ -122,56 +221,55 @@
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
 
     <!-- 主要功能 -->
-    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #c2410c;">主要功能</div>
+    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #c2410c;">其它主要功能</div>
 
-    <!-- 功能卡片：两列 -->
     <table style="width:100%;border-collapse:separate;border-spacing:8px;margin-bottom:12px;">
       <tr>
         <td style="width:50%;background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:22px;margin-bottom:6px;">🎯</div>
-          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">精准识别多种限制措辞</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">覆盖 <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">limit</code> / <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">session limit</code> / <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">weekly limit</code> / <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">usage limit</code> 四种措辞，弯/直引号都识别。</div>
+          <div style="font-size:22px;margin-bottom:6px;">✏️</div>
+          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">检测关键词自己可改 <span style="font-size:11px;background:#fbbf24;color:#713f12;padding:1px 6px;border-radius:3px;">v2.0 新增</span></div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">9 类检测规则全部开放编辑，还带实时测试框：把终端里的原文贴进去，立刻看到匹配结果。<b>官方哪天改了提示措辞，你自己就能修好，不用等我发新版。</b></div>
         </td>
         <td style="width:50%;background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:22px;margin-bottom:6px;">🌏</div>
-          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">全时区支持</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">不论你在 Asia/Shanghai、America/Los_Angeles、Europe/London、Asia/Tokyo 还是 UTC，pytz 自动计算下一次 reset 的本地时刻。</div>
+          <div style="font-size:22px;margin-bottom:6px;">🎯</div>
+          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">精准识别多种限制措辞</div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">覆盖 <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">limit</code> / <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">session limit</code> / <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">weekly limit</code> / <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">usage limit</code>，弯/直引号都识别。</div>
         </td>
       </tr>
       <tr>
+        <td style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:14px 16px;vertical-align:top;">
+          <div style="font-size:22px;margin-bottom:6px;">🌏</div>
+          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">全时区支持</div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">不论你在 Asia/Shanghai、America/Los_Angeles、Europe/London 还是 UTC，自动算出下一次 reset 的本地时刻。</div>
+        </td>
         <td style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:14px 16px;vertical-align:top;">
           <div style="font-size:22px;margin-bottom:6px;">⚡</div>
           <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">/effort 自动前置</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">每个窗口可独立配置 <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">max / xhigh / high / medium / low</code>，续命前自动 <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">/effort &lt;level&gt;</code> + 确认弹窗，再输入 continue。</div>
-        </td>
-        <td style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:22px;margin-bottom:6px;">🛡️</div>
-          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">15 分钟冷却防重发</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">发送后 15 分钟内不会被同一条残留的 limit 消息再次触发，新的 limit 消息（不同 reset 时间）则会自动覆盖旧的 pending。</div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">每个窗口可独立配置 <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">max / xhigh / high / medium / low</code>，续命前自动设好等级再输入 continue。</div>
         </td>
       </tr>
       <tr>
+        <td style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:14px 16px;vertical-align:top;">
+          <div style="font-size:22px;margin-bottom:6px;">🛡️</div>
+          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">抢不到焦点就不敲</div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">发送前先把目标窗口拉到前台并<b>验证真的拉到了</b>；没拉到就放弃这次、下轮再试。宁可不发，也绝不把 continue 打进你正在用的编辑器。</div>
+        </td>
         <td style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:14px 16px;vertical-align:top;">
           <div style="font-size:22px;margin-bottom:6px;">💤</div>
           <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">Keep Awake 防睡眠</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">勾选后调用 <code style="background:#fff;padding:1px 4px;border-radius:3px;color:#713f12;font-family:Consolas,monospace;">SetThreadExecutionState</code>，Windows 11 的 Modern Standby 不再凌晨杀进程，无人值守通宵跑任务也能续上。</div>
-        </td>
-        <td style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:22px;margin-bottom:6px;">📥</div>
-          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">系统托盘最小化</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">最小化按钮缩到右下角托盘，X 按钮才退出。右键托盘菜单显示窗口 / 退出，干净不占任务栏。</div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">勾选后 Windows 11 的 Modern Standby 不再凌晨把进程杀掉，无人值守通宵跑任务也能续上。</div>
         </td>
       </tr>
       <tr>
         <td style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:22px;margin-bottom:6px;">🧪</div>
-          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">Dry-Run 安全演练</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">勾上 Dry-Run，所有检测和倒计时都正常运行，但<b>不会真的按键</b>。第一次跑、或想确认不会误触发其它窗口时用。</div>
+          <div style="font-size:22px;margin-bottom:6px;">🔄</div>
+          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">一键检查更新 + 内置说明</div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">右上角 2×2 四个按钮：Advanced / Check updates / Help / Reset。Help 是内置的英文操作说明，凌晨三点卡住时不用去翻文档。</div>
         </td>
         <td style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:22px;margin-bottom:6px;">🚫</div>
-          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">每行可排除</div>
-          <div style="font-size:13px;color:#6b7280;line-height:1.6;">不想监控的窗口（比如纯 PowerShell、纯 SSH），点 Exclude 一键排除，设置永久记住下次启动不再监控。</div>
+          <div style="font-size:22px;margin-bottom:6px;">🧪</div>
+          <div style="font-weight:700;font-size:14px;color:#713f12;margin-bottom:4px;">Dry-Run 安全演练</div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.6;">勾上之后检测、倒计时全部照常，但<b>不会真的按键</b>。第一次跑、或想确认不会误触发别的窗口时用。</div>
         </td>
       </tr>
     </table>
@@ -189,112 +287,79 @@
       <thead>
         <tr>
           <th style="background:#fff7ed;color:#7c2d12;font-weight:600;padding:8px 12px;text-align:left;border:1px solid #fed7aa;">状态</th>
-          <th style="background:#fff7ed;color:#7c2d12;font-weight:600;padding:8px 12px;text-align:left;border:1px solid #fed7aa;">颜色</th>
           <th style="background:#fff7ed;color:#7c2d12;font-weight:600;padding:8px 12px;text-align:left;border:1px solid #fed7aa;">含义</th>
         </tr>
       </thead>
       <tbody>
         <tr>
           <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">Idle</td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">无</td>
           <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">窗口正常，没有触发任何条件</td>
         </tr>
         <tr style="background:#fffbeb;">
           <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">⏳ Waiting</td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;"><span style="display:inline-block;background:#fff3bf;border:1px solid #fde68a;padding:1px 8px;border-radius:3px;color:#713f12;font-size:12px;">浅黄</span></td>
           <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">已检测到 limit，正在倒计时等 reset 时刻</td>
         </tr>
         <tr>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">▶ Sending</td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;"><span style="display:inline-block;background:#ffd8a8;border:1px solid #fdba74;padding:1px 8px;border-radius:3px;color:#7c2d12;font-size:12px;">浅橙</span></td>
+          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">▶ Sending…</td>
           <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">正在把目标终端拉到前台并发送按键</td>
         </tr>
         <tr style="background:#fffbeb;">
           <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">✓ Sent</td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;"><span style="display:inline-block;background:#b2f2bb;border:1px solid #8ce99a;padding:1px 8px;border-radius:3px;color:#14532d;font-size:12px;">浅绿</span></td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">续命已发送（5 秒后转入冷却态）</td>
+          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">续命已发送</td>
         </tr>
         <tr>
           <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">Cooldown</td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;"><span style="display:inline-block;background:#dee2e6;border:1px solid #ced4da;padding:1px 8px;border-radius:3px;color:#374151;font-size:12px;">浅灰</span></td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">发送后 15 分钟冷却，防止残留 limit 消息重复触发</td>
+          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">发送后 15 分钟冷却，防止残留消息重复触发</td>
         </tr>
         <tr style="background:#fffbeb;">
           <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">⚠ Net retry</td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;"><span style="display:inline-block;background:#ffc9c9;border:1px solid #ffa8a8;padding:1px 8px;border-radius:3px;color:#7f1d1d;font-size:12px;">浅红</span></td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">检测到 attempt 10/10，正在每 30 秒发送 continue 直到网络恢复</td>
+          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">网络卡死，正在定期补 continue 直到恢复</td>
+        </tr>
+        <tr style="background:#fff7ed;">
+          <td style="padding:7px 12px;border:1px solid #fed7aa;color:#7c2d12;font-weight:700;">⇄ Fable-recover</td>
+          <td style="padding:7px 12px;border:1px solid #fed7aa;color:#7c2d12;font-weight:700;">正在执行模型恢复脚本</td>
         </tr>
         <tr>
+          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">⏎ Limit prompt</td>
+          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">屏幕上是等待选择的弹窗，需要按回车</td>
+        </tr>
+        <tr style="background:#fffbeb;">
           <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">Excluded</td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;"><span style="display:inline-block;background:#f8f9fa;border:1px solid #e9ecef;padding:1px 8px;border-radius:3px;color:#6b7280;font-size:12px;">极浅灰</span></td>
           <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">手动排除的窗口，不再监控</td>
         </tr>
       </tbody>
     </table>
 
     <div style="background:#fff7ed;border-left:4px solid #fb923c;border-radius:0 6px 6px 0;padding:12px 16px;margin:14px 0 20px;font-size:14px;color:#7c2d12;">
-      💡 Windows 切到深色模式时，上面这些底色会自动换成深色高对比版本（深琥珀、深绿、深红），字色也跟着翻转，黑底白字依然清晰。
+      💡 Windows 切到深色模式时，这些底色会自动换成深色高对比版本，字色也跟着翻转，切换瞬间生效、连历史日志行也会按新配色重画。
     </div>
-
-    <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
-
-    <!-- 对比 -->
-    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #c2410c;">有和没有，差别有多大？</div>
-
-    <table style="width:100%;border-collapse:separate;border-spacing:8px;margin-bottom:20px;">
-      <tr>
-        <td style="width:50%;background:#fff5f5;border:1px solid #fecaca;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:12px;font-weight:700;color:#dc2626;margin-bottom:8px;letter-spacing:0.04em;">❌ 没有工具</div>
-          <ul style="padding-left:18px;font-size:13px;margin:0;">
-            <li style="margin-bottom:4px;color:#7f1d1d;">睡前任务，醒来发现 6 小时空跑</li>
-            <li style="margin-bottom:4px;color:#7f1d1d;">出差路上没法手动续命</li>
-            <li style="margin-bottom:4px;color:#7f1d1d;">网络一抖就卡死，得手动 continue</li>
-            <li style="margin-bottom:4px;color:#7f1d1d;">多窗口得挨个去刷新看状态</li>
-            <li style="margin-bottom:4px;color:#7f1d1d;">5 小时窗口利用率不到 50%</li>
-          </ul>
-        </td>
-        <td style="width:50%;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:12px;font-weight:700;color:#16a34a;margin-bottom:8px;letter-spacing:0.04em;">✅ 有了这个工具</div>
-          <ul style="padding-left:18px;font-size:13px;margin:0;">
-            <li style="margin-bottom:4px;color:#14532d;">睡醒任务还在跑，已经过了两轮 reset</li>
-            <li style="margin-bottom:4px;color:#14532d;">出门也能跨 5h 窗口继续</li>
-            <li style="margin-bottom:4px;color:#14532d;">网络恢复自动重连</li>
-            <li style="margin-bottom:4px;color:#14532d;">一个 GUI 监控全部窗口</li>
-            <li style="margin-bottom:4px;color:#14532d;">5 小时窗口利用率接近 100%</li>
-          </ul>
-        </td>
-      </tr>
-    </table>
 
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
 
     <!-- 怎么用 -->
     <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #c2410c;">怎么用？三步搞定</div>
 
-    <!-- 步骤 1 -->
     <div style="display:flex;gap:14px;margin-bottom:14px;align-items:flex-start;">
       <span style="background:#c2410c;color:#fff;border-radius:50%;min-width:26px;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;margin-top:2px;text-align:center;line-height:26px;">1</span>
       <div style="font-size:15px;color:#333;line-height:1.7;">
-        <b style="color:#7c2d12;">下载 EXE</b>——文末提供 GitHub Releases 直接下载，单文件 55 MB，不需要解压，不需要安装任何运行时。
+        <b style="color:#7c2d12;">下载 EXE</b>——文末提供 GitHub Releases 和百度网盘两个渠道，单文件 25.5 MB，不需要解压，不需要装任何运行时。
       </div>
     </div>
-    <!-- 步骤 2 -->
     <div style="display:flex;gap:14px;margin-bottom:14px;align-items:flex-start;">
       <span style="background:#c2410c;color:#fff;border-radius:50%;min-width:26px;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;margin-top:2px;text-align:center;line-height:26px;">2</span>
       <div style="font-size:15px;color:#333;line-height:1.7;">
-        <b style="color:#7c2d12;">双击运行</b>——GUI 直接弹出（没有命令行窗口），第一次跑建议先勾上 <b>Dry-Run</b>，看看检测和倒计时是否符合预期。Windows SmartScreen 提示时点"更多信息→仍要运行"。
+        <b style="color:#7c2d12;">双击运行</b>——GUI 直接弹出（没有命令行窗口），第一次跑建议先勾上 <b>Dry-Run</b>，看看检测和倒计时是否符合预期。Windows SmartScreen 提示时点"更多信息 → 仍要运行"。
       </div>
     </div>
-    <!-- 步骤 3 -->
     <div style="display:flex;gap:14px;margin-bottom:20px;align-items:flex-start;">
       <span style="background:#c2410c;color:#fff;border-radius:50%;min-width:26px;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;margin-top:2px;text-align:center;line-height:26px;">3</span>
       <div style="font-size:15px;color:#333;line-height:1.7;">
-        <b style="color:#7c2d12;">点 Start</b>——所有 Windows Terminal 窗口出现在表格里。需要无人值守过夜时再勾上 <b>Keep Awake</b>，关闭显示器随便走，到点自动 continue。
+        <b style="color:#7c2d12;">点 Start</b>——所有 Windows Terminal 窗口出现在表格里。要用模型恢复的话，进 <b>Advanced → Fable recovery</b> 打开开关，再勾选允许它操作的窗口。无人值守过夜时记得勾上 <b>Keep Awake</b>。
       </div>
     </div>
 
     <div style="background:#fff7ed;border-left:4px solid #fb923c;border-radius:0 6px 6px 0;padding:12px 16px;margin:14px 0 20px;font-size:14px;color:#7c2d12;">
-      ⚙️ 默认参数：每 30 秒轮询一次、reset 时刻后再延迟 20 秒发送（避开 Anthropic 服务端时钟微小差）、发送后 15 分钟冷却防重发。这套默认值已经在我自己跑了一个月没出问题，不用改也行。
+      ⚙️ <b>默认参数</b>：每 60 秒轮询一次、reset 时刻后再等 60 秒才发送、卡死后每 600 秒补一次。最后这个数字是实测调出来的 —— 真实断网经常持续 40 到 90 分钟，按早期的 30 秒去捅会捅上百次，既没用又把日志淹了。
     </div>
 
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
@@ -302,14 +367,12 @@
     <!-- 适合谁 -->
     <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #c2410c;">适合哪些人用？</div>
 
-    <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:12px;">只要你符合下面任何一条，这个工具都能帮到你：</p>
-
     <ul style="padding-left:22px;margin-bottom:20px;font-size:15px;">
-      <li style="margin-bottom:8px;">🌙 <b>夜间跑长任务的人</b>——睡前布置任务，醒来要看到完成而不是 limit 卡死</li>
-      <li style="margin-bottom:8px;">✈️ <b>出差/通勤期间挂任务的人</b>——人不在电脑前，工具自动续命</li>
+      <li style="margin-bottom:8px;">🔐 <b>做安全 / 协议 / 底层相关开发的人</b>——正经任务被安全策略误判的概率最高，模型恢复就是为这个场景做的</li>
+      <li style="margin-bottom:8px;">🌙 <b>夜间跑长任务的人</b>——睡前布置任务，醒来要看到完成而不是卡在半路</li>
+      <li style="margin-bottom:8px;">✈️ <b>出差 / 通勤期间挂任务的人</b>——人不在电脑前，工具自动处理</li>
       <li style="margin-bottom:8px;">🖥️ <b>多窗口并行重构的人</b>——3 个分支 3 个会话同时跑，统一监控</li>
-      <li style="margin-bottom:8px;">🌐 <b>网络不稳的用户</b>——家宽抖动 / 公司代理偶发 502，attempt 10/10 自动恢复</li>
-      <li style="margin-bottom:8px;">💼 <b>Claude Max 订阅用户</b>——想把 5h 窗口利用率拉满，少浪费每一个 token</li>
+      <li style="margin-bottom:8px;">🌐 <b>网络不稳的用户</b>——家宽抖动、公司代理偶发断流，自动恢复</li>
     </ul>
 
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
@@ -325,43 +388,46 @@
         </tr>
       </thead>
       <tbody>
-        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">当前版本</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;"><b>v1.0.1</b>（2026-06 发布）</td></tr>
+        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">当前版本</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;"><b>v2.0.1</b></td></tr>
         <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">目标场景</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">Claude Code（CLI 版）跑在 Windows Terminal 上</td></tr>
         <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">操作系统</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">Windows 10 / 11（用了 Win32 UIA + SendInput）</td></tr>
         <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">前置要求</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">Windows Terminal（<code style="font-family:Consolas,monospace;background:#fff7ed;padding:1px 5px;border-radius:3px;color:#7c2d12;border:1px solid #fed7aa;">wt.exe</code>），不支持老的 ConHost 控制台</td></tr>
         <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">运行依赖</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">无（单文件 EXE，自带 Python 运行时）</td></tr>
-        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">EXE 大小</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">55 MB</td></tr>
-        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">轮询周期</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">默认 30 秒（5–600 秒可调）</td></tr>
-        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">Reset 缓冲</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">默认 20 秒（0–600 秒可调）</td></tr>
-        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">网络重试间隔</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">默认 30 秒（5–600 秒可调）</td></tr>
-        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">支持时区</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">任意 IANA 时区（pytz），常见缩写（EDT、PST 等）也识别</td></tr>
-        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">设置持久化</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">QSettings（Windows 注册表 <code style="font-family:Consolas,monospace;background:#fff7ed;padding:1px 5px;border-radius:3px;color:#7c2d12;border:1px solid #fed7aa;">HKCU\Software\auto_continue\gui</code>）</td></tr>
-        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">开源协议</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">MIT</td></tr>
-        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">费用</td><td style="padding:7px 12px;border:1px solid #e5e7eb;"><span style="display:inline-block;background:#fef9c3;color:#854d0e;border:1px solid #fde047;border-radius:4px;font-size:12px;font-weight:700;padding:1px 8px;">完全免费</span></td></tr>
+        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">EXE 大小</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">25.5 MB</td></tr>
+        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">轮询周期</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">默认 60 秒（5–600 秒可调）</td></tr>
+        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">Reset 缓冲</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">默认 60 秒（0–600 秒可调）</td></tr>
+        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">卡死补发间隔</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">默认 600 秒（5–3600 秒可调）</td></tr>
+        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">检测规则</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">9 类，全部可在 Advanced 中编辑并实时测试</td></tr>
+        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">模型恢复</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;"><b>默认关闭</b>，需手动开启并逐窗口勾选</td></tr>
+        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">支持时区</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">任意 IANA 时区，常见缩写（EDT、PST 等）也识别</td></tr>
+        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">设置持久化</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">Windows 注册表 <code style="font-family:Consolas,monospace;background:#fff7ed;padding:1px 5px;border-radius:3px;color:#7c2d12;border:1px solid #fed7aa;">HKCU\Software\auto_continue\gui</code></td></tr>
+        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">测试覆盖</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">6 个测试套件，376 项断言，每次发版由 CI 全量跑过</td></tr>
+        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">开源协议</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">MIT</td></tr>
+        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">费用</td><td style="padding:7px 12px;border:1px solid #e5e7eb;"><span style="display:inline-block;background:#fef9c3;color:#854d0e;border:1px solid #fde047;border-radius:4px;font-size:12px;font-weight:700;padding:1px 8px;">完全免费</span></td></tr>
       </tbody>
     </table>
 
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
 
-    <!-- v1.0.1 更新日志 -->
-    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #fb923c;">📝 v1.0.1 更新日志</div>
+    <!-- 更新日志 -->
+    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #fb923c;">📝 v2.0 更新日志</div>
 
     <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:16px 20px;margin-bottom:18px;">
-      <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">✨ v1.0.1 新增</div>
+      <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">✨ 核心新增</div>
       <ul style="padding-left:20px;font-size:13px;color:#78350f;margin:0 0 14px;line-height:1.8;">
-        <li><b>跟随 Windows 深浅主题</b>：状态格背景、状态文字、日志文字、运行指示点全部按 OS 主题自适应配色</li>
-        <li><b>主题切换实时生效</b>：用户切换 Windows 主题瞬间，GUI 立刻翻转，连历史日志也按新配色重画</li>
-        <li><b>日志环形缓冲</b>：保留最近 500 条，主题切换时整体重渲染</li>
+        <li><b>模型安全拦截自动恢复</b>：换到备用模型做完这一轮再切回，脚本可自定义，默认关闭</li>
+        <li><b>正在出词时不切模型</b>：切换会在这一轮内部生效，等于腰斩，所以必须等它跑完</li>
+        <li><b>手动切换即视为你的决定</b>：自动取消该窗口勾选，不再往回掰</li>
+        <li><b>检测关键词全部开放编辑</b>：9 类规则可改，带实时测试框，官方改措辞你自己就能修</li>
+        <li><b>右上角 2×2 按钮区</b>：Advanced / Check updates / Help / Reset，内置英文操作说明</li>
       </ul>
-      <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">📦 v1.0.0 已有功能（首发）</div>
+      <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">🔧 体验修复</div>
       <ul style="padding-left:20px;font-size:13px;color:#78350f;margin:0;line-height:1.8;">
-        <li>识别 4 种限制措辞 + 弯/直引号 + 多时区</li>
-        <li>网络重试耗尽（attempt 10/10）自动 resend continue</li>
-        <li>新 limit 消息可覆盖旧 pending（reset 时间变了不会错过）</li>
-        <li>每窗口可独立设置 /effort 等级</li>
-        <li>15 分钟冷却防重发 / Dry-Run / 排除 / 强制立刻发送</li>
-        <li>系统托盘最小化 / Keep Awake 防 Modern Standby</li>
-        <li>每窗口独立倒计时，托盘通知 fire 事件</li>
+        <li>默认参数按实测重新校准（轮询 60s / 缓冲 60s / 补发 600s）</li>
+        <li>已经恢复的会话不再被反复补 continue —— 只要它重新开始出词就立刻停手</li>
+        <li>恢复失败会如实报失败，不再只看"停在哪个模型"就报成功</li>
+        <li>Advanced 窗口过宽的问题修好了（两个标签漏了自动换行，导致设定的窗口尺寸从未生效）</li>
+        <li>设置在重启后完整保留；Reset 按钮可一键恢复出厂设置</li>
       </ul>
     </div>
 
@@ -371,13 +437,14 @@
     <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #c2410c;">关于安全性</div>
 
     <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:12px;">
-      工具<b>只读</b>所有 Windows Terminal 窗口的可见文本（通过 Win32 UIA），<b>不会</b>读 Claude 的网络流量、不会读凭据、不会上传任何数据。源码完全公开在 GitHub，可自行审计或自己编译：
+      工具<b>只读</b>所有 Windows Terminal 窗口的可见文本（通过 Win32 UIA），<b>不会</b>读网络流量、不会读凭据、不会上传任何数据。源码完全公开在 GitHub，可自行审计或自己编译：
     </p>
 
     <ul style="padding-left:22px;margin-bottom:20px;font-size:14px;color:#555;">
-      <li style="margin-bottom:6px;">检测到 limit 后<b>仅向触发的那个终端</b>发送按键，不会误打其它窗口</li>
-      <li style="margin-bottom:6px;">发送前后<b>保存并恢复</b>原前台窗口焦点，不抢你正在做的事</li>
-      <li style="margin-bottom:6px;">所有设置存在<b>本地注册表</b>，不联网、不上报、无遥测</li>
+      <li style="margin-bottom:6px;">只向<b>触发的那个终端</b>发送按键，不会误打其它窗口</li>
+      <li style="margin-bottom:6px;">发送前后<b>保存并恢复</b>原前台窗口焦点；抢不到焦点就<b>放弃发送</b>，绝不打进你正在用的程序</li>
+      <li style="margin-bottom:6px;">会自动换模型的功能<b>默认关闭</b>，且必须逐窗口授权</li>
+      <li style="margin-bottom:6px;">所有设置存在<b>本地注册表</b>，不联网、不上报、无遥测（仅检查更新时访问 GitHub）</li>
       <li style="margin-bottom:6px;">完整 Python 源码 + PyInstaller spec 公开，可自行从源码构建 EXE</li>
     </ul>
 
@@ -388,13 +455,12 @@
 
     <ul style="padding-left:22px;margin-bottom:20px;font-size:14px;color:#555;">
       <li style="margin-bottom:6px;">📊 reset 时间历史曲线（看自己的 5h 利用率）</li>
-      <li style="margin-bottom:6px;">🔔 自定义触发动作（不仅是 continue，可配置任意命令序列）</li>
-      <li style="margin-bottom:6px;">🌐 非英文 Claude 输出的限制消息识别（待社区提供样本）</li>
+      <li style="margin-bottom:6px;">🌐 非英文 Claude 输出的提示识别（待社区提供样本）</li>
       <li style="margin-bottom:6px;">🐧 Linux / macOS 版本（需要适配 Terminal 读取方式）</li>
     </ul>
 
     <div style="background:#fff7ed;border-left:4px solid #fb923c;border-radius:0 6px 6px 0;padding:12px 16px;margin:14px 0 20px;font-size:14px;color:#7c2d12;">
-      💬 有需求、bug 或者新的限制措辞？欢迎公众号留言或者 GitHub 提 Issue，附上截图我立刻看！
+      💬 有需求、bug 或者遇到没被识别的新措辞？欢迎公众号留言或者 GitHub 提 Issue，附上截图我立刻看！
     </div>
 
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
@@ -406,10 +472,8 @@
           <h3 style="color:#fff;font-size:18px;font-weight:700;margin:0 0 8px;">🎁 免费下载 · 立即体验</h3>
           <p style="color:#a8a29e;font-size:13px;margin:0 0 20px;">提供两种下载方式，任选其一</p>
 
-          <!-- 双列下载卡片 -->
           <table width="100%" cellpadding="0" cellspacing="0" border="0">
             <tr>
-              <!-- GitHub Releases -->
               <td width="50%" align="center" valign="top" style="padding:0 6px;">
                 <div style="background:#fff;border-radius:8px;padding:18px 12px;">
                   <div style="font-size:28px;margin-bottom:4px;">🌐</div>
@@ -421,7 +485,6 @@
                   <div style="font-size:10px;color:#9ca3af;line-height:1.5;">点击 Releases &rarr; 下载 EXE</div>
                 </div>
               </td>
-              <!-- 百度网盘 -->
               <td width="50%" align="center" valign="top" style="padding:0 6px;">
                 <div style="background:#fff;border-radius:8px;padding:18px 12px;">
                   <div style="font-size:28px;margin-bottom:4px;">☁️</div>
@@ -435,7 +498,7 @@
             </tr>
           </table>
 
-          <p style="color:#a8a29e;font-size:12px;margin:16px 0 0;">两个渠道内容一致：<code style="color:#fdba74;background:#292524;padding:1px 6px;border-radius:3px;font-family:Consolas,monospace;">Auto-Continue.exe</code>（55 MB，单文件无依赖）</p>
+          <p style="color:#a8a29e;font-size:12px;margin:16px 0 0;">两个渠道内容一致：<code style="color:#fdba74;background:#292524;padding:1px 6px;border-radius:3px;font-family:Consolas,monospace;">Auto-Continue.exe</code>（25.5 MB，单文件无依赖）</p>
         </td>
       </tr>
     </table>

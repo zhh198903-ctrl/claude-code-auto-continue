@@ -27,7 +27,12 @@ import auto_continue as ac
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STEP = 250                       # window stride; small enough not to skip a hit
 SKIP_DIRS = {".git", "dist", "build", "__pycache__", ".pytest_cache"}
-EXTS = (".py", ".md", ".yml", ".yaml", ".spec", ".txt", ".bat", ".ps1")
+EXTS = (".py", ".md", ".yml", ".yaml", ".spec", ".txt", ".bat", ".ps1",
+        # Marketing copy quotes the banners verbatim to show readers what a
+        # stuck session looks like, which makes it the likeliest file in the
+        # repo to contain a live trigger. The v2.0.1 article escaped only
+        # because the mock terminal block happened to elide the model name.
+        ".html")
 
 # (name, predicate, what the watchdog would DO if this fired for real)
 DETECTORS = [
