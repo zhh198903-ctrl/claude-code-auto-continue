@@ -1082,6 +1082,12 @@ check("AA1 the default switches away from the target, not just back to it",
       len(set(t.lower() for t in _targets)) >= 2)
 check("AA2 and still ends on the target",
       gui._last_model_step(_steps_now) == "fable")
+# If a legacy script ever equalled the new default the migration would match
+# forever, rewriting a value to itself and re-announcing itself every launch.
+check("AA2b every legacy script differs from the one it migrates to",
+      gui.DEFAULT_FABLE_STEPS not in (gui.LEGACY_FABLE_STEPS_V1016,
+                                      gui.LEGACY_FABLE_STEPS_V201)
+      and gui.LEGACY_FABLE_STEPS_V1016 != gui.LEGACY_FABLE_STEPS_V201)
 
 # A /model step against the model already showing is skipped: typed into a
 # running turn it queues, and the switch dialog surfaces minutes later with
@@ -1112,6 +1118,43 @@ check("AA5 /model IS sent when the bar reads a different model",
 _drive(NOTICE + "\n4. Type something.\n5. Chat about this", "/model fable")
 check("AA6 an unreadable bar does not suppress the switch",
       texts_sent() == [["/model fable"]])
+
+# Switching models mid-turn is destructive, not merely untidy. Claude Code
+# queues a /model issued during a turn and applies it via the "Switch model?"
+# dialog, so the switch lands INSIDE the turn and its next API call goes to the
+# new model. Live on 2026-08-09 the switch back to Fable landed 24s before a
+# 3m35s recovery turn finished; Fable refused the continuation and the recovery
+# destroyed the work it had just rescued. The tell is the dialog itself — an
+# idle /model just prints "Set model to ..." with nothing to confirm.
+_SPIN = "  ✽ Swirling… (2m 0s · " + chr(0x2193) + " 5.0k tokens)"
+
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_O + "\n" + _SPIN})
+w = new_watcher(steps="/model fable")
+for _ in range(4):
+    w._tick()
+    advance(1)
+check("AA9 /model holds while the session is streaming", texts_sent() == [])
+
+TEXTS[1] = NOTICE + "\n" + _BAR_O          # turn ended, spinner gone
+w._tick()
+check("AA10 and switches as soon as the turn ends",
+      texts_sent() == [["/model fable"]])
+
+# A turn that never ends must not pin the recovery forever — switching late
+# still beats never switching back.
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_O + "\n" + _SPIN})
+w = new_watcher(steps="/model fable")
+w._tick()
+advance(1)
+w._tick()
+check("AA11 still holding before the bound", texts_sent() == [])
+advance(gui.FABLE_IDLE_MAX_S + 1)
+w._tick()
+check("AA12 but gives up waiting and switches anyway",
+      texts_sent() == [["/model fable"]])
+check("AA13 the bound stays under the stale-run guard, which would "
+      "otherwise abandon the run first",
+      gui.FABLE_IDLE_MAX_S < gui.FABLE_STALE_RUN_S)
 
 check("AA7 prefix match tolerates the bar's version and variant",
       gui._model_matches("Opus 5 (1M context)", "opus") is True

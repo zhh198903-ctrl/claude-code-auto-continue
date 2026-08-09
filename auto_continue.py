@@ -508,6 +508,19 @@ RUNNING_RE = re.compile(
     r"\((?:\s*\d+\s*[hms])+\s*·" r"|esc" r"\s+to\s+interrupt", re.I)
 
 
+RUNNING_TAIL_CHARS = 2000
+
+
+def session_running(text: str) -> bool:
+    """True if Claude Code is streaming a turn RIGHT NOW.
+
+    The spinner is redrawn just above the input box, so only the very bottom
+    of the buffer says anything about the present; a spinner further up is
+    scrollback from a turn that has already finished.
+    """
+    return RUNNING_RE.search(str(text or "")[-RUNNING_TAIL_CHARS:]) is not None
+
+
 def session_running_after(text: str, pos: int) -> bool:
     """True if the session is streaming a turn *after* offset `pos`.
 

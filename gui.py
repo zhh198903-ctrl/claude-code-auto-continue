@@ -92,7 +92,7 @@ from auto_continue import (
     parse_limit_message,
     parse_limit_prompt, parse_oauth_expired, parse_retry_exhausted,
     parse_server_error_stuck, parse_switch_model_prompt, read_terminal_text,
-    send_continue, send_keys, send_text_lines,
+    send_continue, send_keys, send_text_lines, session_running,
 )
 import updater
 
@@ -273,6 +273,12 @@ FABLE_DRIFT_MAX = 3        # give up rather than fight the user forever
 # the target on that window and untick it, rather than switching it back
 # and turning the feature into something that fights its owner.
 FABLE_USER_SWITCH_QUIET_S = 120   # our keystrokes count as ours this long
+# A /model step holds until the session is idle, so the switch can't land
+# inside a running turn. Bounded: a turn that never ends must not pin the
+# recovery forever, and switching late still beats not switching at all.
+# Kept below FABLE_STALE_RUN_S so the switch still happens before the
+# stale-run guard abandons the run out from under it.
+FABLE_IDLE_MAX_S = 600
 
 
 def _model_step_target(arg):
@@ -989,6 +995,27 @@ class Watcher(QObject):
                                 # and the explicit switch is redundant.
                                 _msk = _model_step_target(arg)
                                 _bar = current_model(tail) if tail else None
+                                # Never switch models mid-turn. Claude Code
+                                # queues a /model issued while a turn runs and
+                                # applies it through the "Switch model?"
+                                # dialog — so the switch lands INSIDE the turn,
+                                # and its next API call goes to the new model.
+                                # Measured live: the switch back to Fable
+                                # landed 24s before a 3m35s recovery turn
+                                # finished, Fable refused the continuation, and
+                                # the recovery destroyed the very work it had
+                                # just rescued. Wait for the session to go idle,
+                                # bounded so a hung turn can't pin the run.
+                                _busy = bool(_msk and tail
+                                             and session_running(tail))
+                                _waited = (
+                                    st.fable_step_at is not None
+                                    and now - st.fable_step_at
+                                    >= timedelta(seconds=FABLE_IDLE_MAX_S))
+                                if _busy and not _waited:
+                                    st.status = ST_FABLE
+                                    self._retick_soon(15000)
+                                    continue
                                 if _msk and _model_matches(_bar, _msk):
                                     self.log.emit(
                                         "info",
@@ -2862,6 +2889,12 @@ class MainWindow(QMainWindow):
                 f"Fable-recover steps migrated from the "
                 f"{self._migrated_fable_steps} script ({_why}); the new one "
                 f"switches to the fallback model itself")
+            # Persist it, or the migration only ever lives in memory: the
+            # worker gets the new script but the stored one stays stale, so
+            # every launch migrates again and logs this warning again. The
+            # v1.0.16 migration had the same hole and nobody noticed, because
+            # the behaviour was right and only the log repeated.
+            self._save_settings()
         # Apply keep-awake state immediately if the user had it ON before.
         if self.keep_awake_check.isChecked():
             self._apply_keep_awake(True)
