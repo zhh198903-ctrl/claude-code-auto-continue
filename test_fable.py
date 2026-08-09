@@ -1394,6 +1394,57 @@ w._tick()
 check("AA16b an impatient attempt interrupts so the switch can land",
       keys_sent() == ["{Esc}"])
 
+# Giving up on the block is not giving up on the model. A window abandoned on
+# the fallback is still a failure — which model the work runs on is the whole
+# reason the feature exists.
+_GIVEUP = "<esc>\n/model fable\n<confirm>\ncontinue"
+reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_O + "\n" + _SPIN})
+w = new_watcher(steps=_GIVEUP, scope=["claude"])
+st = w._states.get(1)
+LOGS_AA = []
+w.log.connect(lambda k, m: LOGS_AA.append((k, m)))
+w._tick()
+# Out of attempts, with no run in flight — the give-up branch is only reached
+# from the detection block, which is skipped while a script is executing.
+w._states[1].fable_step = -1
+w._states[1].fable_runs = gui.FABLE_MAX_RUNS
+w._states[1].fable_handled = False
+TEXTS[1] = NOTICE + _ID_B + _BAR_O + "\n" + _SPIN  # a further block arrives
+advance(1)
+w._tick()
+check("AA17a it gives up on the message",
+      any("giving up" in m for k, m in LOGS_AA))
+check("AA17b but still schedules the trip home",
+      any("back to" in m and "once its current turn finishes" in m
+          for k, m in LOGS_AA))
+
+# ...and that trip waits for the fallback to finish, because the run count is
+# already past the impatient threshold.
+SENT.clear()
+for _ in range(3):
+    advance(1)
+    w._tick()
+check("AA17c which does not interrupt the running turn", texts_sent() == [])
+TEXTS[1] = NOTICE + _ID_B + _BAR_O                # turn ends
+advance(1)
+w._tick()
+check("AA17d and switches once it ends", texts_sent() == [["/model fable"]])
+
+# Already on the target: nothing to bring home, so no script is armed.
+reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_F})
+w = new_watcher(steps=_GIVEUP, scope=["claude"])
+LOGS_AA = []
+w.log.connect(lambda k, m: LOGS_AA.append((k, m)))
+w._tick()
+w._states[1].fable_step = -1
+w._states[1].fable_runs = gui.FABLE_MAX_RUNS
+w._states[1].fable_handled = False
+TEXTS[1] = NOTICE + _ID_B + _BAR_F
+advance(1)
+w._tick()
+check("AA17e a window already on the target is left alone",
+      not any("back to" in m for k, m in LOGS_AA))
+
 check("AA12f every legacy script is distinct and none equals the new default",
       len(set(_legacies.values())) == len(_legacies)
       and gui.DEFAULT_FABLE_STEPS not in _legacies.values())

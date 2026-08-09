@@ -1424,6 +1424,35 @@ class Watcher(QObject):
                                         f"{st.fable_runs} recoveries — giving up "
                                         f"on this message")
                                 st.fable_handled = True
+                                # Giving up on the BLOCK is not giving up on
+                                # the model. Which model the session runs on is
+                                # the whole point of the feature, so a window
+                                # abandoned on the fallback is still a failure.
+                                # Let the fallback's turn end first — fable_runs
+                                # is already past FABLE_IMPATIENT_RUNS here, so
+                                # the /model step is patient by construction —
+                                # then switch back. No 'continue': the block was
+                                # never cleared, so resuming would only be
+                                # refused again and start the whole thing over.
+                                _want = _last_model_step(steps)
+                                _bar = current_model(tail) if tail else None
+                                if (_want and st.fable_step < 0
+                                        and not _model_matches(_bar, _want)):
+                                    self.log.emit(
+                                        "info",
+                                        f"{dr}bringing {title!r} back to "
+                                        f"{_want!r} anyway, once its current "
+                                        f"turn finishes")
+                                    _fable_reset(st)
+                                    st.fable_restore = [
+                                        ("send", f"/model {_want}"),
+                                        ("confirm", None)]
+                                    st.fable_step = 0
+                                    st.fable_step_at = now
+                                    st.fable_acted_at = now
+                                    st.status = ST_FABLE
+                                    self._retick_soon()
+                                    continue
                             else:
                                 st.fable_runs += 1
                                 self.log.emit(
