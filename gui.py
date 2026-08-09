@@ -141,27 +141,22 @@ def title_key(title: str) -> str:
 # Fable recovery is an editable "step script" — one step per line:
 #   plain text (e.g. /model opus, continue) → type it + Enter
 #   <confirm> → wait for the "Switch model?" dialog, press Enter (= Yes)
-#   <esc>     → press ESC to surface a QUEUED switch dialog — but ONLY if one
-#               isn't already showing (ESC on an open dialog cancels it).
-#               DANGEROUS: if a turn is running, ESC interrupts it. Not in the
-#               default script for that reason; opt in per window.
+#   <esc>     → make the session idle so the NEXT step lands as a command.
+#               Claude Code queues anything typed during a turn, and a queued
+#               /model never takes effect. Fires ONLY while a turn is running
+#               (idle = nothing to interrupt, and it would clear whatever the
+#               user half-typed), never onto an open dialog (it would cancel
+#               it), and never on the patient attempt (whose strategy is to
+#               let the fallback finish).
 #   <enter>   → press a bare Enter
 #   <wait> / <wait:N> → wait N seconds (bare <wait> uses the configured Delay)
-# Default flow. Two shapes occur in the wild and this handles both:
-#   * Claude Code shows a picker whose first option is the fallback model —
-#     <confirm> accepts it with a single Enter.
-#   * Claude Code switches on its own ("Switched to <model>.") — there is no
-#     modal at all, <confirm> simply times out, and the run is really just the
-#     switch BACK afterwards.
 #
-# <esc> is deliberately NOT in the default. It exists to surface a /model
-# queued behind a running turn, but ESC interrupts that turn — and in practice
-# the turn is the user's real work. Observed twice: it ended a queued
-# instruction, and later killed a task 5m50s in. The damage is irreversible
-# while the benefit is only landing the switch-back sooner. Without it the
-# worst case is that /model applies late or not at all, and the completion
-# check now says so out loud. Add it back per-window in the Advanced dialog if
-# a session is genuinely wedged behind a hung turn.
+# <esc> was once removed from the default after interrupting the USER's work
+# twice. It is back because what it interrupts changed: the recovery now
+# deliberately cuts the FALLBACK's turn short — that output is the thing the
+# user enabled this feature to avoid — and without ESC the /model after it is
+# merely queued. The old safety concern lives inside the step now (see the
+# firing rules above) instead of in leaving it out.
 # The script must be able to switch off the blocked model BY ITSELF. Relying
 # on Claude Code to offer a picker was a single point of failure and it failed:
 # the current build just prints "try a different model with /model" and leaves
@@ -3658,13 +3653,16 @@ capture groups it produced, and whether the match sits too far up the
 scrollback to count. Invalid patterns are refused rather than silently
 ignored; <b>Reset all</b> restores the built-ins.</p>
 <p><b>Model recovery</b> (opt-in, off by default) — when a model's safeguards
-block a turn, Claude Code either offers a chooser or switches by itself;
-either way the session ends up off the model you wanted. This accepts the
-chooser if there is one, waits, then switches back. It also <b>keeps the
-window on the target model</b>: if the session is left on the fallback with no
-notice showing, it steers back — after a grace period, spaced out and capped
-so it never fights you. The target is simply the last <code>/model</code> step
-in your script.</p>
+block a turn, the session stalls on a model that refuses to work. This
+switches to a fallback model, redoes the blocked turn there, and after a
+configurable stretch of real work switches back and resumes. Retries
+escalate: each attempt gives the fallback more runway, the last one waits for
+its turn to finish instead of cutting it short, and after that it gives up on
+the message — loudly — and still brings the window home to the target model.
+It also <b>keeps the window on the target</b>: if the session is left on the
+fallback with no notice showing, it steers back — after a grace period,
+spaced out and capped so it never fights you. The target is simply the last
+<code>/model</code> step in your script.</p>
 <p>If <b>you</b> switch a window's model by hand, that is taken as your
 decision: the window is unticked and left alone from then on. Tick it again
 in Advanced to resume enforcement.</p>
@@ -3676,10 +3674,10 @@ showing; does nothing if there is none</li>
 <li><code>&lt;wait&gt;</code> / <code>&lt;wait:N&gt;</code> — pause. Counts
 only time the session is actually <i>running</i>, so a network outage costs
 the recovery nothing</li>
-<li><code>&lt;esc&gt;</code> — surfaces a <code>/model</code> queued behind a
-busy turn. <b>Not in the default script:</b> it interrupts that turn, and in
-practice the turn is your real work. Add it only for a session wedged behind a
-hung turn</li>
+<li><code>&lt;esc&gt;</code> — interrupts a running turn so the next
+<code>/model</code> lands as a command instead of being queued (Claude Code
+queues anything typed mid-turn, and a queued switch never takes effect). Fires
+only while a turn is actually running; on an idle session it does nothing</li>
 </ul>
 
 <h3>Starting over</h3>
@@ -3742,11 +3740,12 @@ class AdvancedDialog(QDialog):
         root = QVBoxLayout(fable_tab)
 
         intro = QLabel(
-            "When a model's safeguards block a turn, Claude Code either offers "
-            "a chooser or switches by itself — either way the session ends up "
-            "off the model you wanted. For each ticked window this runs the "
-            "step script below: accept the chooser if there is one, wait, then "
-            "switch back."
+            "When a model's safeguards block a turn, the session stalls on a "
+            "model that refuses to work. For each ticked window this runs the "
+            "step script below: switch to a fallback model, redo the blocked "
+            "turn there, then switch back and resume. Retries escalate, the "
+            "last one lets the fallback finish, and giving up still brings "
+            "the window home to the target model."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
@@ -3786,9 +3785,9 @@ class AdvancedDialog(QDialog):
             "Recovery steps (one per line):  plain line = type it + Enter · "
             "<confirm> = accept whichever chooser/dialog is showing (does "
             "nothing if none) · <enter> = a bare Enter · <wait> = wait Delay "
-            "seconds of RUNNING time (outages don't count) · <esc> = surface a "
-            "queued switch — WARNING: interrupts a running turn, which is why "
-            "it is not in the default script")
+            "seconds of RUNNING time (outages don't count) · <esc> = interrupt "
+            "a running turn so the next /model lands as a command instead of "
+            "being queued (does nothing when the session is idle)")
         steps_hint.setWordWrap(True)
         root.addWidget(steps_hint)
         _steps_src = cfg.get("steps")

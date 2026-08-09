@@ -100,7 +100,7 @@
 
     <!-- 恢复流程 -->
     <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:12px;">
-      默认的恢复脚本是这七步，<b>每一步都可以在 Advanced 里自己改</b>：
+      默认的恢复脚本如下，<b>每一步都可以在 Advanced 里自己改</b>：
     </p>
 
     <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:13px;">
@@ -110,20 +110,28 @@
           <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">如果弹了选择框就按确认；没有就跳过</td>
         </tr>
         <tr style="background:#fffbeb;">
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;esc&gt;</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">会话正在出词就先打断 —— 否则下面的切换命令只会<b>排队而不生效</b>；空闲时什么都不做</td>
+        </tr>
+        <tr>
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">/model opus</td>
           <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;"><b>自己切到备用模型</b>（已经在上面了就跳过，不重复切）</td>
         </tr>
-        <tr>
+        <tr style="background:#fffbeb;">
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;confirm&gt;</td>
           <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">确认切换对话框</td>
         </tr>
-        <tr style="background:#fffbeb;">
+        <tr>
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">continue</td>
           <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">在备用模型上把被拦的那一轮重做</td>
         </tr>
-        <tr>
+        <tr style="background:#fffbeb;">
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;wait&gt;</td>
-          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">等 180 秒 —— 注意是<b>实际运行时间</b>，断网的时间不算</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">等 180 秒 —— 注意是<b>实际运行时间</b>，断网的时间不算；重试时自动加量</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;esc&gt;</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">同上：备用模型还在出词就打断它 —— 它的产出本来就不是你要的</td>
         </tr>
         <tr style="background:#fffbeb;">
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">/model fable</td>
@@ -132,6 +140,10 @@
         <tr>
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;confirm&gt;</td>
           <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">确认</td>
+        </tr>
+        <tr style="background:#fffbeb;">
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">continue</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">回到原模型上把活接着干下去</td>
         </tr>
       </tbody>
     </table>
@@ -148,9 +160,9 @@
     <table style="width:100%;border-collapse:separate;border-spacing:8px;margin-bottom:12px;">
       <tr>
         <td style="width:50%;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;vertical-align:top;">
-          <div style="font-size:20px;margin-bottom:6px;">⏸</div>
-          <div style="font-weight:700;font-size:14px;color:#14532d;margin-bottom:4px;">正在出词时绝不切模型</div>
-          <div style="font-size:13px;color:#4b5563;line-height:1.6;">切模型会在<b>这一轮内部</b>生效，等于把干到一半的活拦腰截断。所以切换前必须等这一轮跑完。实测拦下过一次：多等了 100 秒，保住了 86 秒的工作量。</div>
+          <div style="font-size:20px;margin-bottom:6px;">🔁</div>
+          <div style="font-weight:700;font-size:14px;color:#14532d;margin-bottom:4px;">失败会升级，不会死磕</div>
+          <div style="font-size:13px;color:#4b5563;line-height:1.6;">同一条拦截连试四次：每次给备用模型多 60 秒跑道（180/240/300 秒），最后一次改成<b>等它这轮自然跑完</b>再切回。四次都不行就明说放弃——并且仍会把窗口带回你选的模型，不会丢在备用模型上。</div>
         </td>
         <td style="width:50%;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;vertical-align:top;">
           <div style="font-size:20px;margin-bottom:6px;">✋</div>
