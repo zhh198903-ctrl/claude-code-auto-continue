@@ -89,7 +89,6 @@ from auto_continue import (
     current_model, fable_refusal_distance, fable_refusal_id,
     parse_econnreset_stuck,
     parse_fable_picker,
-    parse_fable_refusal,
     parse_limit_message,
     parse_limit_prompt, parse_oauth_expired, parse_retry_exhausted,
     parse_server_error_stuck, parse_switch_model_prompt, read_terminal_text,

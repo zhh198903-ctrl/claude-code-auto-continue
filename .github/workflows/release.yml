@@ -61,8 +61,8 @@ jobs:
       - name: Unit tests
         run: |
           python test_parse.py
+          python test_gui_tick.py
           python test_updater.py
-          python test_tick.py
           python test_fable.py
           python test_singleinstance.py
           python test_selftrigger.py

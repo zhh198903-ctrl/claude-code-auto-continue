@@ -1,31 +1,24 @@
 """
-Auto-continue Claude Code after the 5-hour limit hits.
+Detection and keystroke primitives for the Auto-Continue watchdog.
 
-What it does:
-  * Polls every Windows Terminal window's scrollback via UI Automation.
-  * Detects the "You've hit your limit · resets <H>[:<MM>]<am|pm> (<TZ>)"
-    message (both Anthropic wordings of the /upgrade follow-up line).
-  * Parses the reset time, waits until that moment (plus a small buffer),
-    then types `continue` + Enter into that exact window.
+This module owns everything the GUI watcher (gui.py — the loop the shipped
+exe runs) needs to observe and act on Claude Code sessions:
 
-Safe-by-default:
-  * --dry-run prints what it would do without sending keystrokes.
-  * Per-window cooldown prevents double-sending after we already pressed
-    continue for the same limit hit.
-  * Restores foreground window after sending keys (minimizes focus theft).
+  * UI Automation readers for Windows Terminal windows and their scrollback.
+  * The detection patterns and parsers: the 5-hour limit banner, network-stuck
+    states, safeguard blocks, the live-turn spinner, the model status bar.
+  * Checked keystroke senders (foreground-verified; they refuse to type
+    rather than land keys in the wrong window).
 
-Usage examples:
-  python auto_continue.py                # watch all WT windows, live
-  python auto_continue.py --dry-run      # detect + log only
-  python auto_continue.py --interval 20  # poll every 20s (default 30)
-  python auto_continue.py --match peak   # only windows whose title contains "peak"
+There is deliberately NO watcher loop here. One used to exist — a CLI
+sibling of gui.py's tick — and every detection change then had to be made
+and verified twice; more than once only one copy was fixed. Run the GUI
+(Auto-Continue.pyw) instead; it does everything the CLI did and more.
 """
 
 from __future__ import annotations
 
-import argparse
 import ctypes
-import io
 import re
 import sys
 import time
@@ -49,23 +42,6 @@ import uiautomation as auto
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
 APP_VERSION = "2.0.4"
-
-
-def _force_utf8_console() -> None:
-    """Switch stdout/stderr to UTF-8 so WT titles with CJK don't blow up."""
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
-        sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
-    except Exception:
-        try:
-            sys.stdout = io.TextIOWrapper(
-                sys.stdout.buffer, encoding="utf-8", line_buffering=True
-            )
-            sys.stderr = io.TextIOWrapper(
-                sys.stderr.buffer, encoding="utf-8", line_buffering=True
-            )
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -214,50 +190,6 @@ OAUTH_EXPIRED_RE = re.compile(
 SCAN_TAIL_CHARS = 10000
 
 
-# ---------------------------------------------------------------------------
-# Per-window state
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class WindowState:
-    title: str
-    # Reset moment in UTC for the currently-detected limit hit. None = no
-    # limit currently detected.
-    pending_reset_utc: datetime | None = None
-    # The (hour_12, minute, ampm, tz) tuple that produced pending_reset_utc.
-    # We compare against this on each detect tick, not against the computed
-    # UTC moment: once the wall-clock target has passed, re-parsing the same
-    # lingering message would roll it forward to "tomorrow at the same
-    # time", which would push out a pending that's about to fire.
-    pending_reset_key: tuple | None = None
-    # Last time we sent "continue" to this window. Used to suppress
-    # re-detection: the limit message stays in scrollback after we continue,
-    # so we'd otherwise loop. We ignore detections for `cooldown_seconds`
-    # after sending.
-    last_sent_utc: datetime | None = None
-    # Key of the last limit message we already fired for (or that the user
-    # skipped). Prevents the same still-visible message from re-arming a
-    # bogus "tomorrow at the same time" pending once the cooldown expires.
-    # Cleared as soon as a tick sees no limit message (it scrolled away).
-    fired_key: tuple | None = None
-    # Logged-once flags so we don't spam the console.
-    logged_detection: bool = False
-
-    # Network-retry exhaustion (attempt N/N) state. Independent of the
-    # rate-limit fields above — both can be active at the same time.
-    retry_last_sent_utc: datetime | None = None
-    retry_logged: bool = False
-
-    # Interactive limit-picker ("What do you want to do?") bookkeeping.
-    prompt_last_sent_utc: datetime | None = None
-    prompt_logged: bool = False
-
-    # OAuth-expired warn-once flag ('continue' can't fix that state).
-    oauth_logged: bool = False
-
-    # Multi-tab warn-once flag (background tabs can't be watched).
-    tabs_warned: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1177,293 +1109,3 @@ def send_keys(window_ctrl, keyspec: str, dry_run: bool = False) -> bool:
         time.sleep(0.15)
         if saved_fg and saved_fg != target_hwnd:
             _set_foreground_hwnd(saved_fg)
-
-
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
-
-
-def fmt_dt_local(dt_utc: datetime) -> str:
-    return dt_utc.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-
-
-def run(args) -> None:
-    states: dict[int, WindowState] = {}
-    # Cooldown: after we send continue, don't re-detect for this long. The
-    # limit message lingers in the scrollback even after the user is unblocked.
-    cooldown = timedelta(minutes=15)
-    # Buffer added to the parsed reset time. Anthropic's reset is on the hour;
-    # giving them a few seconds of grace avoids hitting the gate at HH:00:00.
-    buffer = timedelta(seconds=args.buffer)
-
-    print(f"[boot] auto_continue running; interval={args.interval}s, "
-          f"buffer={args.buffer}s, retry_interval={args.retry_interval}s, "
-          f"dry_run={args.dry_run}, match={args.match!r}", flush=True)
-
-    retry_interval = timedelta(seconds=args.retry_interval)
-
-    while True:
-        try:
-            tick(states, args, cooldown, buffer, retry_interval)
-        except KeyboardInterrupt:
-            print("\n[exit] interrupted by user.", flush=True)
-            return
-        except Exception as e:
-            # Don't let a transient UIA hiccup take the watchdog down.
-            print(f"[warn] tick error: {type(e).__name__}: {e}", flush=True)
-        time.sleep(args.interval)
-
-
-def tick(states: dict[int, WindowState], args,
-         cooldown: timedelta, buffer: timedelta,
-         retry_interval: timedelta) -> None:
-    now_utc = datetime.now(pytz.UTC)
-    windows = find_terminal_windows()
-
-    seen_hwnds: set[int] = set()
-    for w in windows:
-        try:
-            hwnd = int(w.NativeWindowHandle or 0)
-        except Exception:
-            hwnd = 0
-        if not hwnd:
-            continue
-        seen_hwnds.add(hwnd)
-
-        try:
-            title = w.Name or f"<hwnd {hwnd}>"
-        except Exception:
-            # A UIA COMError reading the title must not abort the whole
-            # tick (it would blind the watchdog to every later window).
-            title = f"<hwnd {hwnd}>"
-        if args.match and args.match.lower() not in title.lower():
-            continue
-
-        st = states.setdefault(hwnd, WindowState(title=title))
-        st.title = title  # title can change as user switches tabs
-
-        # Multi-tab warning: WT exposes only the ACTIVE tab's content, so
-        # Claude sessions in background tabs are invisible to the watchdog.
-        tabs = list_tab_titles(w)
-        if len(tabs) > 1:
-            if not st.tabs_warned:
-                others = [t for t in tabs if t != title]
-                print(f"[tabs] {title!r}: this window has {len(tabs)} tabs — "
-                      f"only the ACTIVE tab can be watched; "
-                      f"currently invisible: {others!r}. "
-                      f"Open each Claude session in its own window "
-                      f"(drag the tab out of the tab bar).", flush=True)
-                st.tabs_warned = True
-        else:
-            st.tabs_warned = False
-
-        # Read the scrollback tail once; every detector shares this view.
-        text = read_terminal_text(w)
-        tail = text[-SCAN_TAIL_CHARS:] if text else ""
-
-        # -1. Dead-session states 'continue' can't fix: warn once.
-        if tail and parse_oauth_expired(tail):
-            if not st.oauth_logged:
-                print(f"[oauth] {title!r}: OAuth token expired — "
-                      f"auto-continue can't fix this; run /login there",
-                      flush=True)
-                st.oauth_logged = True
-        else:
-            st.oauth_logged = False
-
-        # 0. Interactive limit picker ("What do you want to do?"). Newer
-        # Claude Code builds show this modal INSTEAD of the limit banner;
-        # option 1 ("Stop and wait for limit to reset") is pre-selected, so
-        # a bare Enter confirms it and makes the regular banner (with the
-        # reset time) appear — which the normal flow below then picks up.
-        # Does NOT touch last_sent_utc: the banner that appears right after
-        # must be detected immediately, not swallowed by the cooldown.
-        if tail and parse_limit_prompt(tail):
-            if (st.prompt_last_sent_utc is None
-                    or now_utc - st.prompt_last_sent_utc >= retry_interval):
-                if not st.prompt_logged:
-                    print(f"[limit-prompt] {title!r}: limit picker open; "
-                          f"pressing Enter to confirm "
-                          f"'Stop and wait for limit to reset'", flush=True)
-                    st.prompt_logged = True
-                ok = send_text_lines(w, [""], dry_run=args.dry_run)
-                if ok:
-                    st.prompt_last_sent_utc = now_utc
-            # Modal open — nothing else can be current this tick.
-            continue
-        elif st.prompt_logged or st.prompt_last_sent_utc is not None:
-            st.prompt_logged = False
-            st.prompt_last_sent_utc = None
-
-        # 0.5. Network-retry exhaustion runs next and is independent of the
-        # rate-limit pending/cooldown state. If the API is unreachable in
-        # the middle of a 5h wait, we still want to keep re-sending
-        # 'continue' to unstick Claude once the connection comes back.
-        # Three flavors of "stuck / cut off" we treat identically:
-        #   a) retry banner at attempt N/N — retries exhausted
-        #   b) bare `API Error: ... (E...)` / `fetch failed` — no banner
-        #   c) a server-side truncation — the "Server-error"/"Response-
-        #      stalled" mid-stream wordings; 'continue' resumes the partial turn
-        stuck_reason = None
-        if tail:
-            if parse_retry_exhausted(tail):
-                stuck_reason = "retry-exhausted"
-            elif parse_econnreset_stuck(tail):
-                stuck_reason = "econnreset"
-            elif parse_server_error_stuck(tail):
-                stuck_reason = "server-error"
-        if stuck_reason:
-            if (st.retry_last_sent_utc is None
-                    or now_utc - st.retry_last_sent_utc >= retry_interval):
-                if not st.retry_logged:
-                    print(f"[{stuck_reason}] {title!r}: network stuck; "
-                          f"sending 'continue' (will resend every "
-                          f"{int(retry_interval.total_seconds())}s "
-                          f"until recovery)", flush=True)
-                    st.retry_logged = True
-                ok = send_continue(w, dry_run=args.dry_run)
-                if ok:
-                    st.retry_last_sent_utc = now_utc
-                    # If a rate-limit pending elapsed during the outage,
-                    # this 'continue' doubles as its fire — otherwise we'd
-                    # send a second, redundant continue right after
-                    # recovery.
-                    if (st.pending_reset_utc is not None
-                            and now_utc >= st.pending_reset_utc + buffer):
-                        st.fired_key = st.pending_reset_key
-                        st.pending_reset_utc = None
-                        st.pending_reset_key = None
-                        st.last_sent_utc = now_utc
-                        st.logged_detection = False
-            # Don't also run rate-limit logic this tick — network is dead.
-            continue
-        else:
-            if st.retry_last_sent_utc is not None or st.retry_logged:
-                print(f"[retry-recovered] {title!r}: network banner gone, "
-                      f"clearing retry state", flush=True)
-                st.retry_last_sent_utc = None
-                st.retry_logged = False
-
-        # 1. Detect latest limit message and update pending if it changed.
-        # Skipped during cooldown so the still-visible old message doesn't
-        # retrigger immediately after we just sent continue. Done *before*
-        # the fire check so a new limit (different reset time) appearing
-        # while we're already waiting on an older one correctly replaces
-        # the pending target — otherwise we'd fire at the stale time and
-        # miss the new one. `fired_key` blocks the OTHER stale case: a
-        # message we already fired for, still visible after the cooldown,
-        # must not re-arm a bogus "tomorrow at the same time" pending.
-        in_cooldown = (st.last_sent_utc is not None
-                       and now_utc - st.last_sent_utc < cooldown)
-        if tail and not in_cooldown:
-            parsed = parse_limit_message(tail)
-            if (parsed and parsed != st.pending_reset_key
-                    and parsed != st.fired_key):
-                # New limit message (different reset tuple). Replace pending.
-                hour_12, minute, ampm, tz_name = parsed
-                new_reset = None
-                try:
-                    new_reset = next_reset_datetime(
-                        hour_12, minute, ampm, tz_name
-                    )
-                except Exception as e:
-                    print(f"[warn] reset calc failed for {title!r}: "
-                          f"{type(e).__name__}: {e}", flush=True)
-                if new_reset is not None:
-                    old = st.pending_reset_utc
-                    st.pending_reset_utc = new_reset
-                    st.pending_reset_key = parsed
-                    if old is None:
-                        print(
-                            f"[detect] {title!r}\n"
-                            f"          limit hit; resets "
-                            f"{hour_12}:{minute:02d}{ampm} ({tz_name})\n"
-                            f"          will fire continue at "
-                            f"{fmt_dt_local(new_reset + buffer)}",
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            f"[update] {title!r}\n"
-                            f"          reset shifted: "
-                            f"{fmt_dt_local(old + buffer)} → "
-                            f"{fmt_dt_local(new_reset + buffer)}",
-                            flush=True,
-                        )
-                    st.logged_detection = True
-            elif parsed is None:
-                # No current limit message. Don't clear pending — the message
-                # may have just scrolled off — but reset the log flag so a
-                # fresh detection on the next tick re-logs, and forget the
-                # fired key (the handled message is gone; any future match
-                # is genuinely new).
-                st.logged_detection = False
-                st.fired_key = None
-
-        # 2. Fire pending if its time has come.
-        if st.pending_reset_utc is not None:
-            fire_at = st.pending_reset_utc + buffer
-            if now_utc >= fire_at:
-                # Re-verify the message is still current — if the user
-                # already continued manually, the session has moved on and
-                # injecting a redundant 'continue' would start an unwanted
-                # turn. Same staleness window as detection (6000 chars
-                # covers a wide-terminal footer; a genuinely blocked session
-                # prints nothing else below the banner).
-                if tail and parse_limit_message(tail) is None:
-                    print(f"[skip] {title!r}: limit message gone before "
-                          f"fire; assuming handled manually", flush=True)
-                    st.fired_key = st.pending_reset_key
-                    st.pending_reset_utc = None
-                    st.pending_reset_key = None
-                    st.logged_detection = False
-                    continue
-                print(f"[fire] {now_utc.astimezone():%H:%M:%S} → sending "
-                      f"'continue' to {title!r}", flush=True)
-                ok = send_continue(w, dry_run=args.dry_run)
-                if ok:
-                    st.last_sent_utc = now_utc
-                    st.fired_key = st.pending_reset_key
-                    st.pending_reset_utc = None
-                    st.pending_reset_key = None
-                    st.logged_detection = False
-                else:
-                    # Couldn't send (no TermControl / foreground denied).
-                    # Retry on the next tick (mirrors the GUI path).
-                    st.pending_reset_utc = now_utc
-
-    # Clean up state for windows that closed.
-    for hwnd in list(states):
-        if hwnd not in seen_hwnds:
-            del states[hwnd]
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
-def parse_args(argv=None):
-    p = argparse.ArgumentParser(
-        description="Auto-continue Claude Code after the 5h limit."
-    )
-    p.add_argument("--interval", type=int, default=30,
-                   help="Polling interval in seconds (default 30).")
-    p.add_argument("--buffer", type=int, default=20,
-                   help="Extra seconds to wait past reset time (default 20).")
-    p.add_argument("--retry-interval", type=int, default=30,
-                   help="When the network-retry banner shows attempt N/N "
-                        "(retries exhausted), resend 'continue' every N "
-                        "seconds until Claude responds (default 30).")
-    p.add_argument("--match", type=str, default="",
-                   help="Only watch WT windows whose title contains this "
-                        "substring (case-insensitive). Empty = all.")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Detect and log, but don't actually send keystrokes.")
-    return p.parse_args(argv)
-
-
-if __name__ == "__main__":
-    _force_utf8_console()
-    run(parse_args())

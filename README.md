@@ -45,13 +45,7 @@ python gui.py
 
 Or double-click **`Auto-Continue.pyw`** — the `.pyw` extension launches under `pythonw.exe`, so no extra console window appears alongside the GUI.
 
-There's also a CLI runner:
-
-```powershell
-python auto_continue.py --dry-run   # detect + log only
-python auto_continue.py             # live, all WT windows
-python auto_continue.py --interval 60 --buffer 60 --match peak
-```
+(There used to be a separate CLI runner in `auto_continue.py`. It was removed in v2.0.5: it was a second copy of the watcher loop that had to be fixed in lockstep with the GUI's — and more than once wasn't — while offering strictly fewer features. `auto_continue.py` is now the detection/keystroke library the GUI builds on. The GUI's **Dry-run** checkbox covers the old `--dry-run` use.)
 
 ## GUI features
 
