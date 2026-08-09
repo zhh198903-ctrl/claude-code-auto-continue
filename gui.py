@@ -167,6 +167,10 @@ def title_key(title: str) -> str:
 # the session sitting on the model that refused. `/model opus` is skipped
 # automatically when the bar already reads Opus, so the picker shape — where
 # <confirm> has already done the switch — does not switch twice.
+#
+# It closes with 'continue' on the target model. The switch back can land in
+# the middle of a fallback turn (deliberately — see FABLE_IMPATIENT_RUNS), so
+# without it the session would sit at the prompt holding half-finished work.
 DEFAULT_FABLE_STEPS = (
     "<confirm>\n"
     "/model opus\n"
@@ -174,7 +178,8 @@ DEFAULT_FABLE_STEPS = (
     "continue\n"
     "<wait>\n"
     "/model fable\n"
-    "<confirm>"
+    "<confirm>\n"
+    "continue"
 )
 
 # The v1.0.16 default, which typed /model into the already-open picker and
@@ -210,6 +215,21 @@ LEGACY_FABLE_STEPS_V201 = (
     "/model fable\n"
     "<confirm>\n"
     "continue"
+)
+
+# The first script that could switch away on its own, but ended on the switch
+# back with nothing after it. That was fine only while the switch waited for
+# the fallback's turn to finish; once switching mid-turn became the default,
+# it left the session parked at the prompt on the target model holding
+# half-done work. The closing 'continue' is what makes it pick that work up.
+LEGACY_FABLE_STEPS_V201_NOCONT = (
+    "<confirm>\n"
+    "/model opus\n"
+    "<confirm>\n"
+    "continue\n"
+    "<wait>\n"
+    "/model fable\n"
+    "<confirm>"
 )
 # Shipped defaults, in one place so first run and Reset agree.
 #   poll   60s — a UIA read of every window costs 100ms+, and nothing
@@ -267,17 +287,39 @@ FABLE_FRESH_MARGIN = 400
 # notice in sight, steer it back.
 FABLE_DRIFT_GRACE_S = 120  # leave a finished run alone this long first
 FABLE_DRIFT_RETRY_S = 300  # min gap between correction attempts
-FABLE_DRIFT_MAX = 3        # give up rather than fight the user forever
+FABLE_DRIFT_MAX = 6        # 3 impatient, then 3 that wait for idle
 # A model change observed while this tool sent nothing is the USER doing
 # it by hand. That is an instruction, not a fault to repair: stop enforcing
 # the target on that window and untick it, rather than switching it back
 # and turning the feature into something that fights its owner.
 FABLE_USER_SWITCH_QUIET_S = 120   # our keystrokes count as ours this long
-# A /model step holds until the session is idle, so the switch can't land
-# inside a running turn. Bounded: a turn that never ends must not pin the
-# recovery forever, and switching late still beats not switching at all.
-# Kept below FABLE_STALE_RUN_S so the switch still happens before the
-# stale-run guard abandons the run out from under it.
+# Whether a /model step may land inside a running turn.
+#
+# It normally MAY. Waiting for the turn to end protects the fallback model's
+# output — and that output is the thing the user does not want. They enabled
+# this feature to have the TARGET model do the work, so a turn the fallback is
+# part-way through is exactly what should be cut short. The closing 'continue'
+# then has the target pick the work back up.
+#
+# The exception is a session that will not stay switched. Claude Code can be
+# configured to switch models by itself when a message is flagged, so a switch
+# straight back into a flagged turn can bounce to the fallback again at once.
+# After this many corrections in a row that did not stick, stop fighting the
+# turn and wait for it to end first: a slow switch that holds beats a fast one
+# that bounces.
+FABLE_IMPATIENT_RUNS = 3
+# ...and "in a row" has to mean in a row. A correction hours after the last one
+# is a fresh problem, not the continuation of an old streak, so the count
+# decays: a gap longer than this starts over at one. Without it the counter
+# only ever climbed, and a window would drift into patient mode days later off
+# the back of three unrelated corrections. "Same cause" is approximated by
+# "inside the same short window" — a switch the user made by hand is already
+# excluded, because that unticks the window instead of counting as a bounce.
+FABLE_BOUNCE_WINDOW_S = 900
+# The wait in that patient mode is itself bounded — a turn that never ends must
+# not pin the recovery, and switching late still beats never switching. Kept
+# below FABLE_STALE_RUN_S so the switch happens before the stale-run guard
+# abandons the run out from under it.
 FABLE_IDLE_MAX_S = 600
 
 
@@ -996,24 +1038,30 @@ class Watcher(QObject):
                                 # and the explicit switch is redundant.
                                 _msk = _model_step_target(arg)
                                 _bar = current_model(tail) if tail else None
-                                # Never switch models mid-turn. Claude Code
-                                # queues a /model issued while a turn runs and
-                                # applies it through the "Switch model?"
-                                # dialog — so the switch lands INSIDE the turn,
-                                # and its next API call goes to the new model.
-                                # Measured live: the switch back to Fable
-                                # landed 24s before a 3m35s recovery turn
-                                # finished, Fable refused the continuation, and
-                                # the recovery destroyed the very work it had
-                                # just rescued. Wait for the session to go idle,
-                                # bounded so a hung turn can't pin the run.
+                                # Cutting a running turn short is the POINT:
+                                # the turn belongs to the fallback model, and
+                                # the whole reason this feature exists is that
+                                # the user wants the target model doing the
+                                # work instead. So switch mid-turn by default.
+                                #
+                                # Only a window that keeps bouncing back to the
+                                # fallback gets the patient treatment. Claude
+                                # Code can be set to switch models by itself on
+                                # a flagged message, and switching into a turn
+                                # that is about to be flagged again just hands
+                                # it straight back. After FABLE_IMPATIENT_RUNS
+                                # corrections that did not stick, wait for the
+                                # turn to end instead — bounded, so a turn that
+                                # never ends cannot pin the run.
                                 _busy = bool(_msk and tail
                                              and session_running(tail))
+                                _patient = (st.fable_drift_runs
+                                            >= FABLE_IMPATIENT_RUNS)
                                 _waited = (
                                     st.fable_step_at is not None
                                     and now - st.fable_step_at
                                     >= timedelta(seconds=FABLE_IDLE_MAX_S))
-                                if _busy and not _waited:
+                                if _busy and _patient and not _waited:
                                     # Say it once per step. A silent hold is
                                     # indistinguishable in the log from a step
                                     # that simply had not come due yet, which
@@ -1023,9 +1071,11 @@ class Watcher(QObject):
                                         st.fable_hold_logged = True
                                         self.log.emit(
                                             "info",
-                                            f"{dr}Fable-recover: {title!r} is "
-                                            f"mid-turn, holding {arg!r} until "
-                                            f"it finishes")
+                                            f"{dr}Fable-recover: {title!r} "
+                                            f"bounced back "
+                                            f"{st.fable_drift_runs}x, so "
+                                            f"holding {arg!r} until the "
+                                            f"current turn finishes")
                                     st.status = ST_FABLE
                                     self._retick_soon(15000)
                                     continue
@@ -1368,6 +1418,15 @@ class Watcher(QObject):
                                 st.fable_drift_at is None
                                 or now - st.fable_drift_at
                                 >= timedelta(seconds=FABLE_DRIFT_RETRY_S))
+                            # A streak that has gone quiet is over. Decay it
+                            # before deciding anything, so both the patient
+                            # mode and the give-up cap measure one episode
+                            # rather than a lifetime total.
+                            if (st.fable_drift_at is not None
+                                    and now - st.fable_drift_at
+                                    >= timedelta(
+                                        seconds=FABLE_BOUNCE_WINDOW_S)):
+                                st.fable_drift_runs = 0
                             if (settled and spaced
                                     and st.fable_drift_runs < FABLE_DRIFT_MAX):
                                 st.fable_drift_runs += 1
@@ -2844,16 +2903,18 @@ class MainWindow(QMainWindow):
                     # and then ESCs it away — even after upgrading. Migrate
                     # that exact string; anything edited is left untouched.
                     _old = self._fable_cfg.get("steps")
-                    if _old in (LEGACY_FABLE_STEPS_V1016,
-                                LEGACY_FABLE_STEPS_V201):
+                    _legacy = {
+                        LEGACY_FABLE_STEPS_V1016: "v1.0.16",
+                        LEGACY_FABLE_STEPS_V201: "v2.0.1",
+                        LEGACY_FABLE_STEPS_V201_NOCONT: "v2.0.1a",
+                    }
+                    if _old in _legacy:
                         self._fable_cfg["steps"] = DEFAULT_FABLE_STEPS
                         # Which one it was decides what the notice should say
-                        # — the two shipped scripts were broken for opposite
+                        # — the shipped scripts were broken for different
                         # reasons, and a migration notice that describes the
                         # wrong one is worse than none.
-                        self._migrated_fable_steps = (
-                            "v1.0.16" if _old == LEGACY_FABLE_STEPS_V1016
-                            else "v2.0.1")
+                        self._migrated_fable_steps = _legacy[_old]
             except Exception:
                 pass
             raw_t = self.settings.value("trigger_patterns", "", type=str) or ""
@@ -2891,18 +2952,27 @@ class MainWindow(QMainWindow):
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self.sig_set_trigger_patterns.emit(dict(self._trigger_patterns))
         if self._migrated_fable_steps:
+            # Both halves vary: each old script broke differently and each
+            # replacement fixes something different. A shared tail put the
+            # previous version's fix on this version's notice — the same
+            # class of wrongness this dict was introduced to stop.
             _why = {
                 "v1.0.16": ("it typed /model into the picker and then ESC'd "
-                            "it away, interrupting the running turn"),
+                            "it away, interrupting the running turn; the new "
+                            "one accepts the picker instead"),
                 "v2.0.1": ("it could only switch BACK to the target model, so "
                            "it did nothing at all once Claude Code stopped "
-                           "offering a model picker"),
-            }.get(self._migrated_fable_steps, "it no longer works")
+                           "offering a model picker; the new one switches to "
+                           "the fallback itself"),
+                "v2.0.1a": ("it ended on the switch back, leaving the session "
+                            "parked at the prompt holding half-finished work; "
+                            "the new one resumes it with 'continue'"),
+            }.get(self._migrated_fable_steps,
+                  "it no longer matches how Claude Code behaves")
             self._append_log(
                 "warn",
                 f"Fable-recover steps migrated from the "
-                f"{self._migrated_fable_steps} script ({_why}); the new one "
-                f"switches to the fallback model itself")
+                f"{self._migrated_fable_steps} script: {_why}")
             # Persist it, or the migration only ever lives in memory: the
             # worker gets the new script but the stored one stays stale, so
             # every launch migrates again and logs this warning again. The

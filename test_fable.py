@@ -1128,31 +1128,53 @@ check("AA6 an unreadable bar does not suppress the switch",
 # idle /model just prints "Set model to ..." with nothing to confirm.
 _SPIN = "  ✽ Swirling… (2m 0s · " + chr(0x2193) + " 5.0k tokens)"
 
-reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_O + "\n" + _SPIN})
-w = new_watcher(steps="/model fable")
+def _bouncing(steps, text, runs=None):
+    """A watcher whose window has already bounced back `runs` times."""
+    reset([(1, "claude")], {1: text})
+    wa = new_watcher(steps=steps)
+    wa._tick()                                    # latch — creates the state
+    wa._states[1].fable_drift_runs = (
+        gui.FABLE_IMPATIENT_RUNS if runs is None else runs)
+    return wa
+
+
+# Cutting the fallback's turn short is the POINT: that output is the thing the
+# user does not want, so the default is to switch on top of it.
+_drive(NOTICE + "\n" + _BAR_O + "\n" + _SPIN, "/model fable")
+check("AA9 /model switches even while the session is streaming",
+      texts_sent() == [["/model fable"]])
+
+# The exception is a window that will not stay switched. Claude Code can be
+# set to switch models by itself on a flagged message, so switching into a
+# turn that is about to be flagged again just hands it straight back.
+w = _bouncing("/model fable", NOTICE + "\n" + _BAR_O + "\n" + _SPIN)
 LOGS_AA = []
 w.log.connect(lambda k, m: LOGS_AA.append((k, m)))
-for _ in range(4):
-    w._tick()
+for _ in range(3):
     advance(1)
-check("AA9 /model holds while the session is streaming", texts_sent() == [])
+    w._tick()
+check("AA9b after repeated bounces it waits for the turn instead",
+      texts_sent() == [])
 # A silent hold is indistinguishable in the log from a step that simply was
-# not due yet, which makes the guard impossible to confirm from a real
-# recovery — the first live run it mattered on could not be told apart from
-# one where the turn just happened to finish first.
+# not due yet, which is what made this guard impossible to confirm from the
+# first live recovery it mattered on.
 _holds = [m for k, m in LOGS_AA if "holding" in m]
-check("AA9b and says so exactly once", len(_holds) == 1)
+check("AA9c and says so exactly once", len(_holds) == 1)
 
 TEXTS[1] = NOTICE + "\n" + _BAR_O          # turn ended, spinner gone
 w._tick()
 check("AA10 and switches as soon as the turn ends",
       texts_sent() == [["/model fable"]])
 
-# A turn that never ends must not pin the recovery forever — switching late
-# still beats never switching back.
-reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_O + "\n" + _SPIN})
-w = new_watcher(steps="/model fable")
-w._tick()
+# One bounce short of the threshold is still impatient.
+_bouncing("/model fable", NOTICE + "\n" + _BAR_O + "\n" + _SPIN,
+          runs=gui.FABLE_IMPATIENT_RUNS - 1)._tick()
+check("AA10b one bounce short of the threshold still switches on top",
+      texts_sent() == [["/model fable"]])
+
+# Even patient mode is bounded: a turn that never ends must not pin the
+# recovery, and switching late still beats never switching back.
+w = _bouncing("/model fable", NOTICE + "\n" + _BAR_O + "\n" + _SPIN)
 advance(1)
 w._tick()
 check("AA11 still holding before the bound", texts_sent() == [])
@@ -1160,6 +1182,47 @@ advance(gui.FABLE_IDLE_MAX_S + 1)
 w._tick()
 check("AA12 but gives up waiting and switches anyway",
       texts_sent() == [["/model fable"]])
+
+# The drift cap has to leave room for both modes, or the patient one is
+# unreachable: corrections stop at the cap, and the first three are impatient.
+check("AA12b the drift cap allows patient corrections to happen at all",
+      gui.FABLE_DRIFT_MAX > gui.FABLE_IMPATIENT_RUNS)
+
+# "Three in a row" has to mean in a row. The counter used to only climb, so
+# three corrections spread across a day would tip a window into patient mode
+# — and eventually past the give-up cap — off unrelated events.
+reset([(1, "claude")], {1: "working away\n" + _BAR_O})
+w = new_watcher(scope=["claude"])                 # target = fable, no notice
+def _one_correction():
+    advance(gui.FABLE_DRIFT_GRACE_S + gui.FABLE_DRIFT_RETRY_S + 5)
+    w._tick()                                     # arms the restore script
+    w._tick()                                     # sends it
+_one_correction()
+_one_correction()
+check("AA12d corrections close together accumulate",
+      w._states[1].fable_drift_runs == 2)
+advance(gui.FABLE_BOUNCE_WINDOW_S + 5)
+w._tick()
+w._tick()
+check("AA12e a correction after a long quiet gap starts a new streak",
+      w._states[1].fable_drift_runs == 1)
+
+# The script must resume the work after the switch back. Switching mid-turn
+# leaves the session at the prompt holding half-done work; without a closing
+# 'continue' it would just sit there.
+check("AA12c the default script ends by resuming on the target model",
+      gui._parse_recovery_steps(gui.DEFAULT_FABLE_STEPS)[-1]
+      == ("send", "continue"))
+
+# Every shipped script that gets migrated needs its own notice: they broke for
+# different reasons AND their replacements fix different things. A shared tail
+# once put the previous version's fix on the current version's message.
+_legacies = {"v1.0.16": gui.LEGACY_FABLE_STEPS_V1016,
+             "v2.0.1": gui.LEGACY_FABLE_STEPS_V201,
+             "v2.0.1a": gui.LEGACY_FABLE_STEPS_V201_NOCONT}
+check("AA12f every legacy script is distinct and none equals the new default",
+      len(set(_legacies.values())) == len(_legacies)
+      and gui.DEFAULT_FABLE_STEPS not in _legacies.values())
 check("AA13 the bound stays under the stale-run guard, which would "
       "otherwise abandon the run first",
       gui.FABLE_IDLE_MAX_S < gui.FABLE_STALE_RUN_S)
