@@ -1158,7 +1158,7 @@ check("AA9b after repeated bounces it waits for the turn instead",
 # A silent hold is indistinguishable in the log from a step that simply was
 # not due yet, which is what made this guard impossible to confirm from the
 # first live recovery it mattered on.
-_holds = [m for k, m in LOGS_AA if "holding" in m]
+_holds = [m for k, m in LOGS_AA if "letting the current turn finish" in m]
 check("AA9c and says so exactly once", len(_holds) == 1)
 
 TEXTS[1] = NOTICE + "\n" + _BAR_O          # turn ended, spinner gone
@@ -1220,6 +1220,142 @@ check("AA12c the default script ends by resuming on the target model",
 _legacies = {"v1.0.16": gui.LEGACY_FABLE_STEPS_V1016,
              "v2.0.1": gui.LEGACY_FABLE_STEPS_V201,
              "v2.0.1a": gui.LEGACY_FABLE_STEPS_V201_NOCONT}
+# Escalation. Cutting the fallback off mid-turn can leave the conversation
+# still sitting on whatever was flagged, so the target refuses the moment it
+# takes over — measured live, 6 seconds after the switch back. Each retry for
+# the same notice therefore gives the fallback more runway, and the attempt
+# after the last impatient one waits for it to finish instead.
+_D = 180
+_BAR_SPIN = "\n" + _BAR_O + "\n" + _SPIN
+
+
+def _wait_secs_for(run_no):
+    """Seconds the <wait> step demands on the Nth run for one notice."""
+    reset([(1, "claude")], {1: NOTICE + _BAR_SPIN})
+    wa = new_watcher(steps="<wait>\n/model fable", delay=_D)
+    wa._tick()
+    st = wa._states[1]
+    st.fable_runs = run_no
+    banked = []
+    for _ in range(400):                       # advance until the step moves
+        advance(30)
+        wa._tick()
+        if st.fable_step != 0:
+            break
+        banked.append(st.fable_wait_acc)
+    return int(banked[-1]) if banked else 0
+
+
+check("AA13a first attempt waits the configured delay",
+      abs(_wait_secs_for(1) - _D) <= 30)
+check("AA13b second attempt adds one escalation step",
+      abs(_wait_secs_for(2) - (_D + gui.FABLE_WAIT_ESCALATION_S)) <= 30)
+check("AA13c third attempt adds two",
+      abs(_wait_secs_for(3) - (_D + 2 * gui.FABLE_WAIT_ESCALATION_S)) <= 30)
+
+# The retry budget has to cover three escalating attempts plus the patient one,
+# or the strategy stops before its last and most likely step ever runs.
+check("AA13d the retry cap leaves room for the patient attempt",
+      gui.FABLE_MAX_RUNS > gui.FABLE_IMPATIENT_RUNS)
+
+# The second shape of "it won't stick": the target accepts the switch and then
+# refuses the work. The model bar ends up exactly where we wanted it, so the
+# drift counter never sees it — only the run count does.
+w = _bouncing("/model fable", NOTICE + _BAR_SPIN, runs=0)
+w._states[1].fable_runs = gui.FABLE_IMPATIENT_RUNS + 1
+advance(1)
+w._tick()
+check("AA13e repeated blocks after a clean switch also earn patience",
+      texts_sent() == [])
+
+# A retry strategy is worthless if the retry never fires. Live on 2026-08-09
+# the closing 'continue' was refused 2 seconds after the run reported success,
+# and nothing happened for the rest of the session: the freshness test was
+# purely positional, and Claude Code redraws at a fixed layout, so the new
+# block landed at exactly the same distance from the tail as the one it
+# replaced. Every block carries its own request id — use that.
+_ID_A = "\nRequest ID: req_AAAAAAAAAAAA\n"
+_ID_B = "\nRequest ID: req_BBBBBBBBBBBB\n"
+
+reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_F})
+w = new_watcher(steps="continue")
+for _ in range(4):
+    w._tick()
+    advance(1)
+check("AA14a the first block is handled once",
+      w._states[1].fable_runs == 1 and w._states[1].fable_handled)
+
+# Same text, same position, different id: a genuinely new block.
+TEXTS[1] = NOTICE + _ID_B + _BAR_F
+SENT.clear()
+LOGS_AA = []
+w.log.connect(lambda k, m: LOGS_AA.append((k, m)))
+w._tick()
+check("AA14b a new block at the SAME position is still recognised",
+      not w._states[1].fable_handled
+      and any("new Fable safeguard" in m for k, m in LOGS_AA))
+
+# The same block redrawn must not read as new, or every repaint restarts the
+# recovery.
+reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_F})
+w = new_watcher(steps="continue")
+for _ in range(4):
+    w._tick()
+    advance(1)
+TEXTS[1] = NOTICE + _ID_A + "\nsome later output\n" + _BAR_F
+w._tick()
+check("AA14c the same block redrawn is not mistaken for a new one",
+      w._states[1].fable_handled)
+
+# An id that has not printed yet is missing information, not a new block.
+reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_F})
+w = new_watcher(steps="continue")
+for _ in range(4):
+    w._tick()
+    advance(1)
+TEXTS[1] = NOTICE + _BAR_F                      # notice still up, id gone
+w._tick()
+check("AA14d a missing request id never counts as a new block",
+      w._states[1].fable_handled)
+
+# The retry counter must survive the gap BETWEEN two blocks. Live on
+# 2026-08-09 the notice dropped out of the tail window for one tick after the
+# closing 'continue' and before the next block printed; that read as "cleared",
+# reset the counter, and attempt 2 ran with attempt 1's delay — cancelling the
+# escalation, the retry cap and the patient attempt in one go.
+reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_F})
+w = new_watcher(steps="continue")
+for _ in range(4):
+    w._tick()
+    advance(1)
+_runs_before = w._states[1].fable_runs
+TEXTS[1] = "nothing on screen yet\n" + _BAR_F        # one blank tick
+w._tick()
+check("AA15a a single quiet tick does not end the episode",
+      w._states[1].fable_runs == _runs_before
+      and w._states[1].fable_handled is False)      # …but it DOES re-arm
+
+TEXTS[1] = NOTICE + _ID_B + _BAR_F                  # next block arrives
+for _ in range(3):
+    advance(1)
+    w._tick()
+check("AA15b so the next block counts as another attempt",
+      w._states[1].fable_runs == _runs_before + 1)
+
+# A genuinely cleared block still resets, just not instantly.
+reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_F})
+w = new_watcher(steps="continue")
+for _ in range(4):
+    w._tick()
+    advance(1)
+TEXTS[1] = "back to work\n" + _BAR_F
+w._tick()
+advance(gui.FABLE_CLEARED_S + 5)
+w._tick()
+check("AA15c a notice gone for good does end the episode",
+      w._states[1].fable_runs == 0
+      and w._states[1].fable_notice_id is None)
+
 check("AA12f every legacy script is distinct and none equals the new default",
       len(set(_legacies.values())) == len(_legacies)
       and gui.DEFAULT_FABLE_STEPS not in _legacies.values())

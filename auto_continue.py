@@ -533,6 +533,31 @@ def session_running_after(text: str, pos: int) -> bool:
     return RUNNING_RE.search(text, pos) is not None
 
 
+# Claude Code stamps every safeguard block with its own request id, a few
+# lines under the notice. It is the only exact way to tell one block from the
+# next: the TUI redraws at a fixed layout, so a fresh block lands at the same
+# distance from the tail as the one it replaced, and a purely positional test
+# cannot see it. Measured live — a block 2s after a recovery finished went
+# unnoticed for the rest of the session because both sat 1924 chars up.
+REQUEST_ID_RE = re.compile(r"Request\s+ID:\s*(\S+)", re.I)
+
+
+def fable_refusal_id(text: str, pattern=None):
+    """Request id belonging to the most recent safeguard notice, or None.
+
+    Only ids that appear AFTER the notice count; one further up belongs to an
+    older block. Returns None when the notice has no id in view yet, which is
+    normal for a few hundred milliseconds while the block is still printing —
+    callers must treat None as "no new information", never as "new block".
+    """
+    rx = pattern or FABLE_REFUSAL_RE
+    matches = list(rx.finditer(text))
+    if not matches:
+        return None
+    m = REQUEST_ID_RE.search(text, matches[-1].end())
+    return m.group(1) if m else None
+
+
 def parse_retry_exhausted(text: str, pattern=None) -> bool:
     """True if the most recent network-retry banner shows N == total (e.g.
     `attempt 10/10`) and the banner sits near the tail of the buffer.

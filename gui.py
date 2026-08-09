@@ -86,7 +86,8 @@ from auto_continue import (
     TRIGGER_DEFAULTS,
     TRIGGER_SPECS, compile_trigger_patterns, find_terminal_windows,
     init_uia_thread, list_tab_titles, next_reset_datetime,
-    current_model, fable_refusal_distance, parse_econnreset_stuck,
+    current_model, fable_refusal_distance, fable_refusal_id,
+    parse_econnreset_stuck,
     parse_fable_picker,
     parse_fable_refusal,
     parse_limit_message,
@@ -261,7 +262,23 @@ FABLE_SEND_RETRIES = 3     # re-attempts when a send can't reach foreground
 # during one sends /model into a session that is still stuck.
 FABLE_WAIT_MAX_MULT = 20   # wall-time ceiling = N× the requested wait
 FABLE_STALE_RUN_S = 900    # a run older than this is abandoned, not resumed
-FABLE_MAX_RUNS = 2         # consecutive recoveries before we stop retrying
+# Three escalating attempts, then one that waits for the fallback to finish.
+FABLE_MAX_RUNS = 4         # consecutive recoveries before we stop retrying
+# Each retry gives the fallback model this much longer before switching back.
+# Cutting it off mid-turn can leave the conversation still sitting on the
+# material that was flagged, so the target refuses the moment it takes over —
+# measured live: a switch back landed on a turn 3m31s in, and the closing
+# 'continue' was refused 6 seconds later. More runway each time is the cheapest
+# thing to try before giving up on switching mid-turn altogether.
+FABLE_WAIT_ESCALATION_S = 60
+# How long the notice must stay gone before the episode counts as over.
+# Re-arming has to be instant so a fresh block is picked up, but declaring
+# success must not be: between one block and the next the notice can drop out
+# of the tail window for a single tick, and treating that as "cleared" reset
+# the run counter — which silently cancelled the escalation, the retry cap and
+# the patient attempt all at once. Measured live: attempt 2 ran with attempt
+# 1's delay because of exactly this.
+FABLE_CLEARED_S = 120
 # A handled notice drifts further from the tail as the session prints, so a
 # match much CLOSER than the furthest we've seen is a genuinely new block.
 #
@@ -465,6 +482,8 @@ class _WState:
     fable_last_key_at: Optional[datetime] = None  # rate-limit repeated Enter
     fable_runs: int = 0                           # recoveries since idle
     fable_notice_dist: Optional[int] = None       # tail-distance when latched
+    fable_notice_id: Optional[str] = None         # request id of that notice
+    fable_clear_since: Optional[datetime] = None  # notice absent since when
     fable_picker_used: bool = False               # picker accepted this run
     fable_hold_logged: bool = False               # 'waiting for idle' said once
     fable_drift_at: Optional[datetime] = None     # last drift correction
@@ -952,7 +971,13 @@ class Watcher(QObject):
                         # (we don't duplicate that), and a network stall RESETS the
                         # countdown so the wait is N seconds of real run time.
                         if kind == "wait":
-                            secs = arg if arg is not None else self._fable_delay
+                            # Each retry for the SAME notice gives the fallback
+                            # more runway, because the previous attempt cut it
+                            # off before it got past whatever was flagged.
+                            secs = (arg if arg is not None
+                                    else self._fable_delay)
+                            secs += (max(0, st.fable_runs - 1)
+                                     * FABLE_WAIT_ESCALATION_S)
                             if st.fable_wait_from is None:
                                 st.fable_wait_from = st.fable_step_at or now
                             stuck = bool(tail and (
@@ -1055,8 +1080,17 @@ class Watcher(QObject):
                                 # never ends cannot pin the run.
                                 _busy = bool(_msk and tail
                                              and session_running(tail))
-                                _patient = (st.fable_drift_runs
-                                            >= FABLE_IMPATIENT_RUNS)
+                                # Two shapes of "it won't stick", and both
+                                # count. The model bouncing back to the
+                                # fallback is one; the target accepting the
+                                # switch and then refusing the work anyway is
+                                # the other — that one leaves the model bar
+                                # right where we wanted it, so the drift
+                                # counter never sees it.
+                                _patient = (
+                                    st.fable_runs > FABLE_IMPATIENT_RUNS
+                                    or st.fable_drift_runs
+                                    >= FABLE_IMPATIENT_RUNS)
                                 _waited = (
                                     st.fable_step_at is not None
                                     and now - st.fable_step_at
@@ -1069,13 +1103,17 @@ class Watcher(QObject):
                                     # from a real recovery.
                                     if not st.fable_hold_logged:
                                         st.fable_hold_logged = True
+                                        _why = (
+                                            f"attempt {st.fable_runs}"
+                                            if st.fable_runs
+                                            > FABLE_IMPATIENT_RUNS
+                                            else f"bounced back "
+                                                 f"{st.fable_drift_runs}x")
                                         self.log.emit(
                                             "info",
                                             f"{dr}Fable-recover: {title!r} "
-                                            f"bounced back "
-                                            f"{st.fable_drift_runs}x, so "
-                                            f"holding {arg!r} until the "
-                                            f"current turn finishes")
+                                            f"({_why}) — letting the current "
+                                            f"turn finish before {arg!r}")
                                     st.status = ST_FABLE
                                     self._retick_soon(15000)
                                     continue
@@ -1275,6 +1313,8 @@ class Watcher(QObject):
                             tail, self._patterns.get("fable"))
                             if tail else None)
                         fable_hit = dist is not None
+                        if fable_hit:
+                            st.fable_clear_since = None   # streak of quiet ends
                         if fable_hit and st.fable_handled:
                             # The handled notice stays in scrollback for a long
                             # time (measured: tens of minutes), so "a notice is
@@ -1289,7 +1329,26 @@ class Watcher(QObject):
                             # live hwnds, and shadowing it corrupts the
                             # closed-window pruning at the end of the tick.
                             furthest = st.fable_notice_dist
-                            if (furthest is not None
+                            # Exact first: every block carries its own request
+                            # id. The positional test below cannot see a block
+                            # that replaced its predecessor at the same screen
+                            # position, which is what a redrawn TUI produces —
+                            # live, a block 2s after a recovery went unnoticed
+                            # for the rest of the session. A missing id means
+                            # "no new information", never "new block".
+                            _nid = fable_refusal_id(
+                                tail, self._patterns.get("fable"))
+                            _known = st.fable_notice_id
+                            if _nid and _known and _nid != _known:
+                                self.log.emit(
+                                    "warn",
+                                    f"new Fable safeguard on {title!r} "
+                                    f"({_nid}) while the previous notice was "
+                                    f"still on screen")
+                                st.fable_handled = False
+                                st.fable_notice_id = _nid
+                                st.fable_notice_dist = dist
+                            elif (furthest is not None
                                     and dist + FABLE_FRESH_MARGIN < furthest):
                                 self.log.emit(
                                     "warn",
@@ -1301,10 +1360,18 @@ class Watcher(QObject):
                                     dist if furthest is None
                                     else max(furthest, dist))
                         if not fable_hit:
-                            # Notice gone → the recovery worked. Re-arm for next time.
+                            # Re-arm immediately so a fresh block is picked up
+                            # at once, but do NOT declare the episode over yet:
+                            # the notice routinely vanishes for a tick between
+                            # one block and the next.
                             st.fable_handled = False
-                            st.fable_runs = 0
-                            st.fable_notice_dist = None
+                            if st.fable_clear_since is None:
+                                st.fable_clear_since = now
+                            elif (now - st.fable_clear_since
+                                  >= timedelta(seconds=FABLE_CLEARED_S)):
+                                st.fable_runs = 0
+                                st.fable_notice_dist = None
+                                st.fable_notice_id = None
                         elif not st.fable_handled and steps:
                             if st.fable_runs >= FABLE_MAX_RUNS:
                                 # The script ends by returning to Fable and
@@ -1328,6 +1395,11 @@ class Watcher(QObject):
                                 st.fable_step = 0
                                 st.fable_step_at = now
                                 st.fable_notice_dist = dist
+                                # Latch which block this run is for, so the
+                                # next one is recognised even if it renders in
+                                # exactly the same place.
+                                st.fable_notice_id = fable_refusal_id(
+                                    tail, self._patterns.get("fable"))
                                 st.status = ST_FABLE
                                 self._retick_soon()
                                 continue
