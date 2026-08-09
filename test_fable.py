@@ -1544,12 +1544,27 @@ def _resume_watcher(resume_map):
     return w
 
 
+# Early attempts must keep retrying the ORIGINAL work: pivoting to the
+# configured prompt on the first failure would abandon the task after one
+# bad roll. The pivot belongs to the patient attempt — the one that let the
+# fallback FINISH the blocked work, after which a plain retry has been
+# proven hopeless and fresh work is the only useful thing left to type.
 reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
 w = _resume_watcher({"claude": "run the full regression suite"})
 for _ in range(3):
     w._tick()
     advance(1)
-check("AB1 a configured window gets its own command",
+check("AB1 an early attempt still types continue despite a configured pivot",
+      texts_sent() == [["continue"]])
+
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
+w = _resume_watcher({"claude": "run the full regression suite"})
+w._tick()                                       # latch (fable_runs -> 1)
+w._states[1].fable_runs = gui.FABLE_IMPATIENT_RUNS + 1
+for _ in range(3):
+    advance(1)
+    w._tick()
+check("AB1b the patient attempt types the pivot command",
       texts_sent() == [["run the full regression suite"]])
 
 reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})

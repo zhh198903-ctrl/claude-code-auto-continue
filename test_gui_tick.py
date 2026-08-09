@@ -230,6 +230,91 @@ w._tick()
 check("F2 state dropped once the window closes", 7 not in w._states)
 
 
+# =============================================================================
+print("---- G: after-finish types the follow-up when a run completes ----")
+# A watched session that finishes its run sits idle until a human notices.
+# The per-window after-finish prompt keeps it producing — but only a session
+# that actually RAN and then went quiet counts as finished; a fresh shell at
+# a prompt, a blocked session, or a fresh fire's cooldown must not qualify.
+NOTICE_G = ("API Error: Fable 5's safegu" "ards flagged this message. "
+            "Claude Code can't respond with Fable 5.")
+IDLE = "some finished output\n> "
+
+
+def af_watcher(cmd="next task: refactor the parser"):
+    set_now(T0)
+    reset([(9, "win")], {9: IDLE + "\n" + SPIN})
+    w = new_watcher()
+    w.set_after_finish({"win": cmd})
+    return w
+
+
+w = af_watcher()
+w._tick()                                       # running observed
+TEXTS[9] = IDLE                                 # turn ends
+advance(60)
+w._tick()                                       # idle #1 — starts the clock
+check("G1 no fire on the first idle sighting", not SENT)
+advance(gui.AFTER_FINISH_SETTLE_S)
+w._tick()
+check("G2 fires the configured prompt once settled",
+      SENT == [(9, ["next task: refactor the parser"])])
+SENT.clear()
+advance(120)
+w._tick()
+advance(120)
+w._tick()
+check("G3 does not repeat while still idle", not SENT)
+TEXTS[9] = IDLE + "\n" + SPIN                   # our prompt started a run
+w._tick()
+TEXTS[9] = IDLE                                 # ...which finishes
+advance(60)
+w._tick()
+advance(gui.AFTER_FINISH_SETTLE_S)
+w._tick()
+check("G4 re-arms after the session ran again",
+      SENT == [(9, ["next task: refactor the parser"])])
+SENT.clear()
+
+# Never ran while watched -> never fires.
+set_now(T0)
+reset([(9, "win")], {9: IDLE})
+w = new_watcher()
+w.set_after_finish({"win": "anything"})
+for _ in range(3):
+    w._tick()
+    advance(gui.AFTER_FINISH_SETTLE_S + 5)
+check("G5 a session never seen running is left alone", not SENT)
+
+# A standing safeguard notice is a BLOCK, not a finish.
+w = af_watcher()
+w._tick()
+TEXTS[9] = NOTICE_G + "\n" + IDLE
+advance(60)
+w._tick()
+advance(gui.AFTER_FINISH_SETTLE_S + 5)
+w._tick()
+check("G6 a blocked session is not poked", not SENT)
+
+# No configured command -> feature entirely off for the window.
+set_now(T0)
+reset([(9, "win")], {9: IDLE + "\n" + SPIN})
+w = new_watcher()
+w._tick()
+TEXTS[9] = IDLE
+advance(60)
+w._tick()
+advance(gui.AFTER_FINISH_SETTLE_S + 5)
+w._tick()
+check("G7 no command, no keystrokes", not SENT)
+
+# Sanitisation: garbage collapses instead of reaching the tick.
+w = new_watcher()
+w.set_after_finish({"win": "   ", "other": 42, "ok": " do things "})
+check("G8 blank entries are dropped, values coerced and trimmed",
+      w._after_finish == {"other": "42", "ok": "do things"})
+
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

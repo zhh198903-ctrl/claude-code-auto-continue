@@ -72,7 +72,8 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QAction, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-    QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
+    QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog,
+    QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
     QTextBrowser,
@@ -321,6 +322,14 @@ FABLE_VERDICT_DELAY_S = 30
 # a refusal ends it within seconds, real work keeps it running). Bounded — a
 # turn still going this long after the run means the block did not stop it.
 FABLE_VERDICT_MAX_S = 600
+
+# "After finish": how long a session must sit idle before its configured
+# follow-up prompt is typed. Long enough that a redraw gap or the user
+# pausing to read can't masquerade as "the run is over" (one full poll at
+# the default interval, plus margin), short enough that the window isn't
+# wasted for long. The prompt re-arms only after the session is seen
+# RUNNING again, so it fires once per completed run — not once per tick.
+AFTER_FINISH_SETTLE_S = 90
 # A handled notice drifts further from the tail as the session prints, so a
 # match much CLOSER than the furthest we've seen is a genuinely new block.
 #
@@ -534,6 +543,8 @@ class _WState:
     fable_clear_since: Optional[datetime] = None  # notice absent since when
     fable_verdict_at: Optional[datetime] = None   # run finished, verdict due
     fable_verdict_want: Optional[str] = None      # model that run aimed for
+    af_seen_running: bool = False                 # ran since the last fire
+    af_idle_since: Optional[datetime] = None      # idle streak start
     fable_picker_used: bool = False               # picker accepted this run
     fable_hold_logged: bool = False               # 'waiting for idle' said once
     fable_drift_at: Optional[datetime] = None     # last drift correction
@@ -590,6 +601,10 @@ class Watcher(QObject):
         # title_key -> command the <resume> step types after the switch back
         # (missing key => plain 'continue').
         self._fable_resume: dict[str, str] = {}
+        # title_key -> prompt typed when a watched session finishes a turn
+        # and sits idle (the main table's "After finish" column). Empty =
+        # feature off for that window.
+        self._after_finish: dict[str, str] = {}
 
         # User overrides for the detection regexes (Advanced → Triggers).
         # Only keys the user actually changed (and that validated) live here;
@@ -662,6 +677,13 @@ class Watcher(QObject):
     def set_model_overrides(self, overrides: dict) -> None:
         self._model_overrides = {
             str(k): str(v) for k, v in overrides.items() if v
+        }
+
+    @pyqtSlot(dict)
+    def set_after_finish(self, overrides: dict) -> None:
+        self._after_finish = {
+            str(k): str(v).strip() for k, v in overrides.items()
+            if str(v).strip()
         }
 
     @pyqtSlot(dict)
@@ -1078,14 +1100,26 @@ class Watcher(QObject):
                             continue
                         kind, arg = steps[st.fable_step]
                         if kind == "resume":
-                            # Per-window resume command, falling back to a
-                            # plain 'continue'. Resolved here and then run
-                            # through the ordinary send machinery, so a
-                            # resume configured as '/model …' still gets the
-                            # already-there skip and the busy hold.
+                            # <resume> is 'continue' while the original work
+                            # is still worth retrying, and the per-window
+                            # pivot command only once repeated blocks forced
+                            # the patient attempt — the one that let the
+                            # fallback FINISH the blocked work. Pivoting on
+                            # the first failure would abandon the task after
+                            # one bad roll; pivoting after the fallback
+                            # completed it hands the target fresh work
+                            # instead of a retry that will only be refused
+                            # again. Resolved here and then run through the
+                            # ordinary send machinery, so a pivot configured
+                            # as '/model …' still gets the already-there
+                            # skip and the busy hold.
                             kind = "send"
-                            arg = (self._fable_resume.get(title_key(title))
-                                   or "continue")
+                            _cmd = self._fable_resume.get(title_key(title))
+                            _pivot = (
+                                st.fable_runs > FABLE_IMPATIENT_RUNS
+                                or st.fable_drift_runs
+                                >= FABLE_IMPATIENT_RUNS)
+                            arg = _cmd if (_cmd and _pivot) else "continue"
 
                         # <wait> does NOT own the window: it lets the OUTER
                         # continue / limit logic keep the fallback model unstuck
@@ -1923,6 +1957,48 @@ class Watcher(QObject):
             elif st.status not in (ST_SENT, ST_FIRING):
                 st.status = ST_IDLE
 
+            # 4. "After finish": a watched session that RAN and has now sat
+            # idle long enough gets its configured follow-up prompt, so the
+            # window keeps producing instead of waiting for a human. This
+            # point is only reached when nothing else owns the window — every
+            # handler above (network, picker, oauth, pending limit, fire)
+            # bails out with `continue` — and the guards below keep it away
+            # from the states that merely LOOK idle:
+            #   * never ran while watched  -> af_seen_running is still False
+            #     (a fresh shell at a prompt is not a finished run)
+            #   * post-fire cooldown       -> the fire's own follow-up
+            #   * safeguard notice in view -> blocked, not finished; the
+            #     recovery (or the user) owns that
+            #   * recovery in flight       -> fable_step >= 0
+            af_cmd = self._after_finish.get(title_key(title))
+            if af_cmd and tail:
+                if session_running(tail):
+                    st.af_seen_running = True
+                    st.af_idle_since = None
+                elif (st.af_seen_running
+                        and not in_cooldown
+                        and st.fable_step < 0
+                        and fable_refusal_distance(
+                            tail, self._patterns.get("fable")) is None):
+                    if st.af_idle_since is None:
+                        st.af_idle_since = now
+                    elif (now - st.af_idle_since
+                            >= timedelta(seconds=AFTER_FINISH_SETTLE_S)):
+                        self.log.emit(
+                            "fire",
+                            f"{dr}after-finish → {title!r}: {af_cmd!r}")
+                        if send_text_lines(w, [af_cmd],
+                                           dry_run=self._dry_run):
+                            # Re-arm only after it is seen running again:
+                            # once per completed run, not once per tick.
+                            st.af_seen_running = False
+                            st.af_idle_since = None
+                        else:
+                            self.log.emit(
+                                "warn",
+                                f"after-finish send failed for {title!r}; "
+                                f"will retry next tick")
+
         # Drop closed windows, and queued row commands aimed at them (a
         # stale hwnd could be recycled by Windows for an unrelated window).
         for hwnd in list(self._states):
@@ -2235,6 +2311,7 @@ class MainWindow(QMainWindow):
     sig_clear_cooldown = pyqtSignal(int)
     sig_set_effort_overrides = pyqtSignal(dict)
     sig_set_model_overrides = pyqtSignal(dict)
+    sig_set_after_finish = pyqtSignal(dict)
     sig_set_fable_config = pyqtSignal(dict)
     sig_set_trigger_patterns = pyqtSignal(dict)
     # Into the updater (its own thread).
@@ -2256,6 +2333,7 @@ class MainWindow(QMainWindow):
         self._effort_overrides: dict = {}
         # Per-window model overrides, same keying.
         self._model_overrides: dict = {}
+        self._after_finish: dict = {}
         # Fable refusal-recovery config (Advanced dialog). Empty pattern =
         # use the built-in default.
         self._fable_cfg: dict = {
@@ -2698,6 +2776,7 @@ class MainWindow(QMainWindow):
         self.sig_clear_cooldown.connect(self.worker.cmd_clear_cooldown)
         self.sig_set_effort_overrides.connect(self.worker.set_effort_overrides)
         self.sig_set_model_overrides.connect(self.worker.set_model_overrides)
+        self.sig_set_after_finish.connect(self.worker.set_after_finish)
         self.sig_set_fable_config.connect(self.worker.set_fable_config)
         self.sig_set_trigger_patterns.connect(
             self.worker.set_trigger_patterns)
@@ -2893,6 +2972,7 @@ class MainWindow(QMainWindow):
                 f"  • poll {DEFAULT_INTERVAL_S}s · buffer {DEFAULT_BUFFER_S}s "
                 f"· retry {DEFAULT_RETRY_S}s\n"
                 "  • clears per-window model and effort overrides\n"
+                "  • clears per-window after-finish prompts\n"
                 "  • clears excluded windows\n"
                 "  • restores the built-in trigger patterns\n"
                 "  • turns model recovery OFF and clears its window list\n\n"
@@ -2917,6 +2997,7 @@ class MainWindow(QMainWindow):
 
         self._effort_overrides = {}
         self._model_overrides = {}
+        self._after_finish = {}
         self._excluded_titles = set()
         self._trigger_patterns = {}
         self._fable_cfg = {
@@ -2934,6 +3015,7 @@ class MainWindow(QMainWindow):
         self.sig_set_excluded.emit([])
         self.sig_set_effort_overrides.emit({})
         self.sig_set_model_overrides.emit({})
+        self.sig_set_after_finish.emit({})
         self.sig_set_trigger_patterns.emit({})
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self._save_settings()
@@ -3096,6 +3178,15 @@ class MainWindow(QMainWindow):
                     if isinstance(loaded_m, dict) else {})
             except Exception:
                 self._model_overrides = {}
+            raw_af = self.settings.value("after_finish", "", type=str) or ""
+            try:
+                loaded_af = json.loads(raw_af) if raw_af else {}
+                self._after_finish = (
+                    {str(k): str(v) for k, v in loaded_af.items()
+                     if str(v).strip()}
+                    if isinstance(loaded_af, dict) else {})
+            except Exception:
+                self._after_finish = {}
             raw_f = self.settings.value("fable_cfg", "", type=str) or ""
             try:
                 loaded_f = json.loads(raw_f) if raw_f else {}
@@ -3159,6 +3250,7 @@ class MainWindow(QMainWindow):
         self.sig_set_excluded.emit(list(self._excluded_titles))
         self.sig_set_effort_overrides.emit(dict(self._effort_overrides))
         self.sig_set_model_overrides.emit(dict(self._model_overrides))
+        self.sig_set_after_finish.emit(dict(self._after_finish))
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self.sig_set_trigger_patterns.emit(dict(self._trigger_patterns))
         if self._migrated_fable_steps:
@@ -3217,6 +3309,9 @@ class MainWindow(QMainWindow):
         )
         self.settings.setValue(
             "model_overrides", json.dumps(self._model_overrides)
+        )
+        self.settings.setValue(
+            "after_finish", json.dumps(self._after_finish)
         )
         self.settings.setValue("fable_cfg", json.dumps(self._fable_cfg))
         self.settings.setValue(
@@ -3472,6 +3567,24 @@ class MainWindow(QMainWindow):
                 )
                 hl.addWidget(ex_btn)
 
+                # After-finish prompt. A button + popup rather than an inline
+                # edit: prompts are sentences, and a column wide enough to
+                # show one would crowd out the table.
+                _af_key = title_key(row["title"])
+                _af_cur = self._after_finish.get(_af_key, "")
+                af_btn = QPushButton(
+                    "After finish ✓" if _af_cur else "After finish…")
+                af_btn.setToolTip(
+                    ("When this session finishes a run and sits idle, type "
+                     "this prompt so it keeps working:\n\n" + _af_cur)
+                    if _af_cur else
+                    "Set a prompt to type automatically when this session "
+                    "finishes its current run and sits idle. Empty = off.")
+                af_btn.clicked.connect(
+                    lambda _, t=row["title"]: self._on_after_finish_clicked(t)
+                )
+                hl.addWidget(af_btn)
+
                 # Only relevant during cooldown — clears the suppression so
                 # the next tick re-detects (useful for testing or when you
                 # want to immediately catch a new limit hit after a fire).
@@ -3540,6 +3653,32 @@ class MainWindow(QMainWindow):
             "info",
             f"model for {title!r} set to {name or '(none)'!r}"
         )
+
+    def _on_after_finish_clicked(self, title: str) -> None:
+        key = title_key(title)
+        cur = self._after_finish.get(key, "")
+        text, ok = QInputDialog.getMultiLineText(
+            self,
+            "After finish",
+            f"Prompt to type into {key!r} when it finishes a run and sits "
+            f"idle.\nIt re-arms after each completed run, so the session "
+            f"keeps working until you clear this.\nEmpty = off.",
+            cur,
+        )
+        if not ok:
+            return
+        text = text.strip()
+        if text:
+            self._after_finish[key] = text
+        else:
+            self._after_finish.pop(key, None)
+        self.sig_set_after_finish.emit(dict(self._after_finish))
+        self._save_settings()
+        self._append_log(
+            "info",
+            f"after-finish for {key!r} "
+            + (f"set to {text!r}" if text else "cleared"))
+        self._render_table()      # refresh the ✓ on the button
 
     def _do_unexclude(self, title: str) -> None:
         key = title_key(title)
@@ -3702,6 +3841,13 @@ the terminal text into the test box and it tells you what matched, which
 capture groups it produced, and whether the match sits too far up the
 scrollback to count. Invalid patterns are refused rather than silently
 ignored; <b>Reset all</b> restores the built-ins.</p>
+<p><b>After finish</b> — each row has an <i>After finish…</i> button. Set a
+prompt there and, when that session finishes a run and sits idle for a bit,
+the prompt is typed automatically so the window keeps producing. It re-arms
+after every completed run — the session keeps working until you clear the
+prompt. Blocked or cooling-down sessions are never poked, and a window that
+was never seen running does not qualify as "finished".</p>
+
 <p><b>Model recovery</b> (opt-in, off by default) — when a model's safeguards
 block a turn, the session stalls on a model that refuses to work. This
 switches to a fallback model, redoes the blocked turn there, and after a
