@@ -10,9 +10,10 @@
 <!-- ══ 操作提示（发布前删除此行） ══
   1. 在浏览器中打开此文件，Ctrl+A 全选，Ctrl+C 复制
   2. 粘贴到微信公众号编辑器
-  3. 五张图片需在编辑器中手动重新插入：
+  3. 六张图片需在编辑器中手动重新插入（按文中出现顺序）：
+       · screenshot_main.png           ← GUI 主界面（After finish 节）
+       · screenshot_after_finish.png   ← After finish 输入弹窗
        · screenshot_fable_recovery.png ← Advanced → Fable recovery 设置页
-       · screenshot_main.png           ← GUI 主界面
        · screenshot_triggers.png       ← Advanced → Triggers 设置页
        · baidu_qr.png                  ← 百度网盘下载二维码
        · wechat_qr.jpg                 ← 公众号二维码
@@ -85,6 +86,19 @@
     <div style="background:#fff7ed;border-left:4px solid #fb923c;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0 20px;font-size:14px;color:#7c2d12;line-height:1.8;">
       <b>现在：</b>主界面每一行有个 <b>After finish…</b> 按钮，点开填一条提示词。这个会话跑完当前任务、空闲满一个稳定期后，工具自动把提示词输进去 —— 干完一轮再发一轮，<b>直到你清掉提示词为止</b>。睡前给每个窗口排好下一个活，醒来收货。
     </div>
+
+<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px 18px;margin:16px 0 8px;">
+      <div style="font-weight:700;color:#1e40af;font-size:14px;margin-bottom:8px;">🛠 在 GUI 里怎么配</div>
+      <ol style="padding-left:20px;font-size:14px;color:#1e3a5f;margin:0;line-height:1.9;">
+        <li>主界面表格里找到目标窗口那一行，在右侧 Action 区点 <b>After finish…</b></li>
+        <li>弹窗里输入"跑完后要干的下一个活"，点 OK —— 按钮变成 <b>After finish ✓</b>，悬停可预览</li>
+        <li>要停下来：再点按钮，<b>清空文本</b>确定即可（勾选状态不影响这条指令的保存）</li>
+      </ol>
+    </div>
+    <img src="screenshot_main.png" alt="主界面:每行右侧的 After finish 按钮" style="width:100%;border:1px solid #e5e7eb;border-radius:8px;display:block;margin:12px 0 4px;">
+    <div style="font-size:12px;color:#9ca3af;text-align:center;margin:4px 0 20px;">▲ 主界面：第一行已配置（After finish ✓），日志里可见自动派活的记录</div>
+    <img src="screenshot_after_finish.png" alt="After finish 输入弹窗" style="width:100%;border:1px solid #e5e7eb;border-radius:8px;display:block;margin:12px 0 4px;">
+    <div style="font-size:12px;color:#9ca3af;text-align:center;margin:4px 0 20px;">▲ 点开按钮后的输入框：写上下一个任务，OK 即生效</div>
 
     <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:12px;">
       判定"跑完"是严格的，四种"看着空闲但不是跑完"的状态都不会触发：
@@ -177,6 +191,16 @@
       </tbody>
     </table>
 
+<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px 18px;margin:16px 0 8px;">
+      <div style="font-weight:700;color:#1e40af;font-size:14px;margin-bottom:8px;">🛠 在 GUI 里怎么配</div>
+      <ol style="padding-left:20px;font-size:14px;color:#1e3a5f;margin:0;line-height:1.9;">
+        <li>右上角 <b>Advanced…</b> → 切到 <b>Fable recovery</b> 页</li>
+        <li>勾选 <b>Enable Fable refusal-recovery</b>（默认是关的）</li>
+        <li>在下方窗口列表里<b>逐个勾选</b>允许它接管的窗口 —— 没勾的窗口它一个键都不会碰</li>
+        <li>（可选）同一行的 <b>After recovery</b> 列填一条指令：多次被拦、确认重试无望之后，切回原模型时输入它，而不是死磕 continue</li>
+        <li>（可选）<b>Wait for &lt;wait&gt; steps</b> = 备用模型每轮跑多久（默认 180 秒，重试自动递增）；恢复脚本每一行也都能改</li>
+      </ol>
+    </div>
     <!-- Fable recovery 设置页截图（发布时需在编辑器重新插入图片） -->
     <img src="screenshot_fable_recovery.png" alt="Advanced → Fable recovery 设置页" style="width:100%;border:1px solid #e5e7eb;border-radius:8px;display:block;margin:16px 0 6px;">
     <div style="font-size:12px;color:#9ca3af;text-align:center;margin-bottom:20px;">▲ Advanced → Fable recovery：脚本每一行都可以改，下方逐窗口勾选授权</div>
@@ -229,9 +253,6 @@
     <div style="background:#fff7ed;border-left:4px solid #fb923c;border-radius:0 6px 6px 0;padding:12px 16px;margin:14px 0 20px;font-size:14px;color:#7c2d12;">
       ✅ 完全免费开源 &ensp;·&ensp; ✅ 单文件 EXE，25.5 MB &ensp;·&ensp; ✅ 双击即用，无 Python 依赖
     </div>
-
-    <!-- 界面截图（发布时需在编辑器重新插入图片） -->
-    <img src="screenshot_main.png" alt="Auto-Continue 主界面截图" style="width:100%;border-radius:8px;display:block;margin:16px 0 20px;">
 
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
 
@@ -321,6 +342,15 @@
       </tr>
     </table>
 
+<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px 18px;margin:16px 0 8px;">
+      <div style="font-weight:700;color:#1e40af;font-size:14px;margin-bottom:8px;">🛠 在 GUI 里怎么配</div>
+      <ol style="padding-left:20px;font-size:14px;color:#1e3a5f;margin:0;line-height:1.9;">
+        <li>右上角 <b>Advanced…</b> → <b>Triggers</b> 页，左侧列表选中失效的那条规则（改过的会标 customised）</li>
+        <li>中间编辑正则 —— 输错会当场标红拒绝，不会悄悄失效</li>
+        <li>把终端里的<b>原文</b>粘进下方测试框，立刻看到匹配结果和捕获组</li>
+        <li>改坏了点 <b>Reset this</b> / <b>Reset all</b> 恢复内置默认</li>
+      </ol>
+    </div>
     <!-- Triggers 设置页截图（发布时需在编辑器重新插入图片） -->
     <img src="screenshot_triggers.png" alt="Advanced → Triggers 设置页" style="width:100%;border:1px solid #e5e7eb;border-radius:8px;display:block;margin:16px 0 6px;">
     <div style="font-size:12px;color:#9ca3af;text-align:center;margin-bottom:20px;">▲ Advanced → Triggers：9 类规则逐条可改，改完当场贴原文验证</div>
@@ -405,7 +435,7 @@
     <div style="display:flex;gap:14px;margin-bottom:20px;align-items:flex-start;">
       <span style="background:#c2410c;color:#fff;border-radius:50%;min-width:26px;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;margin-top:2px;text-align:center;line-height:26px;">3</span>
       <div style="font-size:15px;color:#333;line-height:1.7;">
-        <b style="color:#7c2d12;">点 Start</b>——所有 Windows Terminal 窗口出现在表格里。要用模型恢复的话，进 <b>Advanced → Fable recovery</b> 打开开关，再勾选允许它操作的窗口。无人值守过夜时记得勾上 <b>Keep Awake</b>。
+        <b style="color:#7c2d12;">点 Start</b>——所有 Windows Terminal 窗口出现在表格里。<b>5 小时限流、网络卡死、回答截断这三类是零配置的</b>，点了 Start 就在管；要用模型恢复的话，进 <b>Advanced → Fable recovery</b> 打开开关，再勾选允许它操作的窗口。无人值守过夜时记得勾上 <b>Keep Awake</b>。
       </div>
     </div>
 
