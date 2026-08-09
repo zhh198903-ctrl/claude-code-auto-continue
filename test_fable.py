@@ -264,14 +264,16 @@ check("D2 an idle session is left alone", keys_sent() == [])
 check("D2b and the step does not stall waiting for one",
       w._states[1].fable_step == 2)
 
+# A running turn IS interrupted — when a custom script explicitly asks.
+# (The script starts with <esc> here because a /model step now always waits
+# for the turn to end, so it would hold before ever reaching the <esc>.)
 reset([(1, "claude")], {1: NOTICE + "\n" + _SPIN_D})
-w = new_watcher(steps="/model opus\n<esc>\ncontinue")
-w._tick()
-w._tick()                                    # /model opus
+w = new_watcher(steps="<esc>\n/model opus\ncontinue")
+w._tick()                                    # arm
 advance(1)
 w._tick()
 check("D3 a running turn IS interrupted", keys_sent() == ["{Esc}"])
-check("D4 advances after ESC", w._states[1].fable_step == 2)
+check("D4 advances after ESC", w._states[1].fable_step == 1)
 
 
 # =============================================================================
@@ -442,9 +444,10 @@ check("I3 network stall still gets a continue",
 
 # =============================================================================
 print("---- J: repeated refusals are bounded ----")
-# The script ends by returning to Fable and retrying the SAME message Fable
-# refused, so a second refusal is expected; retrying without bound would loop
-# model switches all night.
+# Every recovery ends with <resume> onto a compacted context, so a block
+# right after one means the prompt itself trips the filter. The budget is
+# per-window ("Loops", default 1): that many counted recoveries, one parking
+# run, then hands off — retrying without bound would loop all night.
 reset([(1, "claude")], {1: NOTICE})
 w = new_watcher(steps="continue")
 for _ in range(12):
@@ -453,8 +456,8 @@ for _ in range(12):
     st = w._states[1]
     if st.fable_step < 0 and st.fable_handled:
         st.fable_handled = False             # simulate the notice re-appearing
-check("J1 recovery attempts are capped", w._states[1].fable_runs
-      <= gui.FABLE_MAX_RUNS)
+check("J1 recovery attempts are capped at Loops + the parking run",
+      w._states[1].fable_runs <= 2)
 
 
 # =============================================================================
@@ -626,14 +629,14 @@ w._tick()
 check("Q3 fresh notice re-arms the recovery", w._states[1].fable_step == 0)
 check("Q4 counted as a second run", w._states[1].fable_runs == 2)
 
-# ...but still bounded: a third consecutive block gives up rather than looping.
+# ...but still bounded: further consecutive blocks give up rather than loop.
 w._tick()                                    # runs step 0 of run 2
 for _ in range(4):
     advance(30)
     TEXTS[1] = TEXTS[1] + "\n" + NOTICE      # keep re-blocking
     w._tick()
 check("Q5 repeated fresh blocks stay capped",
-      w._states[1].fable_runs <= gui.FABLE_MAX_RUNS)
+      w._states[1].fable_runs <= 2)          # Loops (1) + the parking run
 
 # A notice that merely jitters slightly must NOT count as new.
 reset([(1, "claude")], {1: NOTICE})
@@ -687,6 +690,8 @@ check("R2 picker marked spent", w._states[1].fable_picker_used is True)
 advance(gui.FABLE_KEY_GAP_S + 1)
 TEXTS[1] = BUSY_AFTER_PICKER                 # picker text lingers, no real modal
 w._tick()                                    # advance off <confirm>
+w._tick()                                    # /model fable holds: turn running
+advance(gui.FABLE_IDLE_MAX_S + 1)            # ...until the bounded hold expires
 w._tick()                                    # send /model fable
 check("R3 sent /model fable", texts_sent()[-1] == ["/model fable"])
 
@@ -818,19 +823,21 @@ check("T8 completion is still reported", len(ends) == 1)
 
 
 # =============================================================================
-print("---- U: the default script interrupts, but only the fallback's turn ----")
-# <esc> was pulled from the default after it destroyed the user's work twice —
-# once ending a queued instruction, once killing a task 5m50s in. It is back,
-# because the thing it interrupts changed: the recovery now deliberately cuts
-# the FALLBACK's turn short, and without ESC the /model that follows is merely
-# queued and never takes effect. The safety property that made it dangerous is
-# now enforced in the step itself rather than by leaving it out: ESC fires only
-# when a turn is actually running (group D).
+print("---- U: the default script never interrupts a turn ----")
+# <esc> is out of the default for good this time. A context-based block can't
+# be cleared by switching back early — the flagged history rides along on
+# every retry until /compact — so cutting the fallback's turn short buys
+# nothing and destroys work. Idle waits and the busy-hold on /model steps
+# replace it: the switch simply lands after the turn has ended.
 _steps = gui._parse_recovery_steps(gui.DEFAULT_FABLE_STEPS)
-check("U1 every /model in the default is preceded by an <esc>",
-      all(_steps[i - 1][0] == "esc"
-          for i, (k, a) in enumerate(_steps)
-          if k == "send" and gui._model_step_target(a)))
+check("U1 no <esc> anywhere in the default script",
+      all(k != "esc" for k, a in _steps))
+check("U1b the default finishes and compacts before switching back",
+      _steps == [("confirm", None), ("send", "/model opus"),
+                 ("confirm", None), ("send", "continue"), ("idle", None),
+                 ("send", "/compact"), ("idle", None),
+                 ("send", "/model fable"), ("confirm", None),
+                 ("resume", None)])
 check("U2 <esc> is still available for people who opt in",
       gui._parse_recovery_steps("<esc>") == [("esc", None)])
 
@@ -1154,57 +1161,36 @@ check("AA6 an unreadable bar does not suppress the switch",
 # dialog, so the switch lands INSIDE the turn and its next API call goes to the
 # new model. Live on 2026-08-09 the switch back to Fable landed 24s before a
 # 3m35s recovery turn finished; Fable refused the continuation and the recovery
-# destroyed the work it had just rescued. The tell is the dialog itself — an
-# idle /model just prints "Set model to ..." with nothing to confirm.
+# destroyed the work it had just rescued. A /model step therefore never lands
+# inside a running turn — an early switch back is pointless before /compact
+# anyway, because the flagged history rides along on every retry.
 _SPIN = "  ✽ Swirling… (2m 0s · " + chr(0x2193) + " 5.0k tokens)"
 
-def _bouncing(steps, text, runs=None):
-    """A watcher whose window has already bounced back `runs` times."""
-    reset([(1, "claude")], {1: text})
-    wa = new_watcher(steps=steps)
-    wa._tick()                                    # latch — creates the state
-    wa._states[1].fable_drift_runs = (
-        gui.FABLE_IMPATIENT_RUNS if runs is None else runs)
-    return wa
-
-
-# Cutting the fallback's turn short is the POINT: that output is the thing the
-# user does not want, so the default is to switch on top of it.
-_drive(NOTICE + "\n" + _BAR_O + "\n" + _SPIN, "/model fable")
-check("AA9 /model switches even while the session is streaming",
-      texts_sent() == [["/model fable"]])
-
-# The exception is a window that will not stay switched. Claude Code can be
-# set to switch models by itself on a flagged message, so switching into a
-# turn that is about to be flagged again just hands it straight back.
-w = _bouncing("/model fable", NOTICE + "\n" + _BAR_O + "\n" + _SPIN)
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_O + "\n" + _SPIN})
+w = new_watcher(steps="/model fable")
 LOGS_AA = []
 w.log.connect(lambda k, m: LOGS_AA.append((k, m)))
+w._tick()                                    # latch
 for _ in range(3):
     advance(1)
     w._tick()
-check("AA9b after repeated bounces it waits for the turn instead",
-      texts_sent() == [])
+check("AA9 /model holds while the session is streaming", texts_sent() == [])
 # A silent hold is indistinguishable in the log from a step that simply was
 # not due yet, which is what made this guard impossible to confirm from the
 # first live recovery it mattered on.
 _holds = [m for k, m in LOGS_AA if "letting the current turn finish" in m]
-check("AA9c and says so exactly once", len(_holds) == 1)
+check("AA9b and says so exactly once", len(_holds) == 1)
 
 TEXTS[1] = NOTICE + "\n" + _BAR_O          # turn ended, spinner gone
 w._tick()
 check("AA10 and switches as soon as the turn ends",
       texts_sent() == [["/model fable"]])
 
-# One bounce short of the threshold is still impatient.
-_bouncing("/model fable", NOTICE + "\n" + _BAR_O + "\n" + _SPIN,
-          runs=gui.FABLE_IMPATIENT_RUNS - 1)._tick()
-check("AA10b one bounce short of the threshold still switches on top",
-      texts_sent() == [["/model fable"]])
-
-# Even patient mode is bounded: a turn that never ends must not pin the
-# recovery, and switching late still beats never switching back.
-w = _bouncing("/model fable", NOTICE + "\n" + _BAR_O + "\n" + _SPIN)
+# The hold is bounded: a turn that never ends must not pin the recovery,
+# and switching late still beats never switching back.
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_O + "\n" + _SPIN})
+w = new_watcher(steps="/model fable")
+w._tick()                                    # latch
 advance(1)
 w._tick()
 check("AA11 still holding before the bound", texts_sent() == [])
@@ -1212,11 +1198,6 @@ advance(gui.FABLE_IDLE_MAX_S + 1)
 w._tick()
 check("AA12 but gives up waiting and switches anyway",
       texts_sent() == [["/model fable"]])
-
-# The drift cap has to leave room for both modes, or the patient one is
-# unreachable: corrections stop at the cap, and the first three are impatient.
-check("AA12b the drift cap allows patient corrections to happen at all",
-      gui.FABLE_DRIFT_MAX > gui.FABLE_IMPATIENT_RUNS)
 
 # "Three in a row" has to mean in a row. The counter used to only climb, so
 # three corrections spread across a day would tip a window into patient mode
@@ -1252,12 +1233,11 @@ _legacies = {"v1.0.16": gui.LEGACY_FABLE_STEPS_V1016,
              "v2.0.1": gui.LEGACY_FABLE_STEPS_V201,
              "v2.0.1a": gui.LEGACY_FABLE_STEPS_V201_NOCONT,
              "v2.0.2": gui.LEGACY_FABLE_STEPS_V202,
-             "v2.0.4": gui.LEGACY_FABLE_STEPS_V204}
-# Escalation. Cutting the fallback off mid-turn can leave the conversation
-# still sitting on whatever was flagged, so the target refuses the moment it
-# takes over — measured live, 6 seconds after the switch back. Each retry for
-# the same notice therefore gives the fallback more runway, and the attempt
-# after the last impatient one waits for it to finish instead.
+             "v2.0.4": gui.LEGACY_FABLE_STEPS_V204,
+             "v2.0.5": gui.LEGACY_FABLE_STEPS_V205}
+# No escalation any more: <wait> waits the configured delay, full stop. The
+# old ladder gave the fallback "more runway" each retry before an early
+# switch back — pointless against a context-based block, and gone with it.
 _D = 180
 _BAR_SPIN = "\n" + _BAR_O + "\n" + _SPIN
 
@@ -1281,25 +1261,8 @@ def _wait_secs_for(run_no):
 
 check("AA13a first attempt waits the configured delay",
       abs(_wait_secs_for(1) - _D) <= 30)
-check("AA13b second attempt adds one escalation step",
-      abs(_wait_secs_for(2) - (_D + gui.FABLE_WAIT_ESCALATION_S)) <= 30)
-check("AA13c third attempt adds two",
-      abs(_wait_secs_for(3) - (_D + 2 * gui.FABLE_WAIT_ESCALATION_S)) <= 30)
-
-# The retry budget has to cover three escalating attempts plus the patient one,
-# or the strategy stops before its last and most likely step ever runs.
-check("AA13d the retry cap leaves room for the patient attempt",
-      gui.FABLE_MAX_RUNS > gui.FABLE_IMPATIENT_RUNS)
-
-# The second shape of "it won't stick": the target accepts the switch and then
-# refuses the work. The model bar ends up exactly where we wanted it, so the
-# drift counter never sees it — only the run count does.
-w = _bouncing("/model fable", NOTICE + _BAR_SPIN, runs=0)
-w._states[1].fable_runs = gui.FABLE_IMPATIENT_RUNS + 1
-advance(1)
-w._tick()
-check("AA13e repeated blocks after a clean switch also earn patience",
-      texts_sent() == [])
+check("AA13b a later attempt waits the SAME delay (no escalation)",
+      abs(_wait_secs_for(3) - _D) <= 30)
 
 # A retry strategy is worthless if the retry never fires. Live on 2026-08-09
 # the closing 'continue' was refused 2 seconds after the run reported success,
@@ -1351,11 +1314,11 @@ w._tick()
 check("AA14d a missing request id never counts as a new block",
       w._states[1].fable_handled)
 
-# The retry counter must survive the gap BETWEEN two blocks. Live on
+# The run counter must survive the gap BETWEEN two blocks. Live on
 # 2026-08-09 the notice dropped out of the tail window for one tick after the
-# closing 'continue' and before the next block printed; that read as "cleared",
-# reset the counter, and attempt 2 ran with attempt 1's delay — cancelling the
-# escalation, the retry cap and the patient attempt in one go.
+# closing 'continue' and before the next block printed; that read as
+# "cleared" and reset the counter — which would silently refill the
+# per-window resume budget mid-episode and defeat the parking cap.
 reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_F})
 w = new_watcher(steps="continue")
 for _ in range(4):
@@ -1389,72 +1352,52 @@ check("AA15c a notice gone for good does end the episode",
       w._states[1].fable_runs == 0
       and w._states[1].fable_notice_id is None)
 
-# The patient attempt exists to let the fallback FINISH. Interrupting it there
-# would defeat the only strategy left after three impatient ones failed.
-w = _bouncing("<esc>\n/model fable", NOTICE + _BAR_SPIN, runs=0)
-w._states[1].fable_runs = gui.FABLE_IMPATIENT_RUNS + 1
+# A custom script's <esc> is an explicit instruction: it fires whenever a
+# turn is running, no matter how many runs came before — the old "patient
+# attempt" that muted it is gone along with the ladder.
+reset([(1, "claude")], {1: NOTICE + _BAR_SPIN})
+w = new_watcher(steps="<esc>\n/model fable")
+w._tick()                                    # latch
+w._states[1].fable_runs = 5                  # would have been "patient" once
 advance(1)
 w._tick()
-check("AA16a the patient attempt does not interrupt the turn",
-      keys_sent() == [])
-
-# ...but the impatient ones do, or the /model that follows is only queued.
-w = _bouncing("<esc>\n/model fable", NOTICE + _BAR_SPIN, runs=0)
-advance(1)
-w._tick()
-check("AA16b an impatient attempt interrupts so the switch can land",
+check("AA16 a custom <esc> interrupts regardless of the run count",
       keys_sent() == ["{Esc}"])
 
-# Giving up on the block is not giving up on the model. A window abandoned on
-# the fallback is still a failure — which model the work runs on is the whole
-# reason the feature exists.
-_GIVEUP = "<esc>\n/model fable\n<confirm>\ncontinue"
-reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_O + "\n" + _SPIN})
-w = new_watcher(steps=_GIVEUP, scope=["claude"])
-st = w._states.get(1)
-LOGS_AA = []
-w.log.connect(lambda k, m: LOGS_AA.append((k, m)))
-w._tick()
-# Out of attempts, with no run in flight — the give-up branch is only reached
-# from the detection block, which is skipped while a script is executing.
-w._states[1].fable_step = -1
-w._states[1].fable_runs = gui.FABLE_MAX_RUNS
-w._states[1].fable_handled = False
-TEXTS[1] = NOTICE + _ID_B + _BAR_O + "\n" + _SPIN  # a further block arrives
-advance(1)
-w._tick()
-check("AA17a it gives up on the message",
-      any("giving up" in m for k, m in LOGS_AA))
-check("AA17b but still schedules the trip home",
-      any("back to" in m and "once its current turn finishes" in m
-          for k, m in LOGS_AA))
-
-# ...and that trip waits for the fallback to finish, because the run count is
-# already past the impatient threshold.
-SENT.clear()
-for _ in range(3):
-    advance(1)
-    w._tick()
-check("AA17c which does not interrupt the running turn", texts_sent() == [])
-TEXTS[1] = NOTICE + _ID_B + _BAR_O                # turn ends
-advance(1)
-w._tick()
-check("AA17d and switches once it ends", texts_sent() == [["/model fable"]])
-
-# Already on the target: nothing to bring home, so no script is armed.
+# Out of budget: the prompt itself keeps getting blocked. The final run
+# still finishes the work on the fallback and compacts, but PARKS the window
+# on the target with nothing typed — retyping a blocked prompt is the
+# infinite loop the cap exists to prevent.
 reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_F})
-w = new_watcher(steps=_GIVEUP, scope=["claude"])
+w = new_watcher(steps="<resume>")
 LOGS_AA = []
 w.log.connect(lambda k, m: LOGS_AA.append((k, m)))
+for _ in range(3):
+    w._tick()
+    advance(1)
+check("AA17a the counted run types the resume prompt",
+      texts_sent() == [["continue"]])
+SENT.clear()
+TEXTS[1] = NOTICE + _ID_B + _BAR_F           # blocked AGAIN: new request id
 w._tick()
-w._states[1].fable_step = -1
-w._states[1].fable_runs = gui.FABLE_MAX_RUNS
-w._states[1].fable_handled = False
-TEXTS[1] = NOTICE + _ID_B + _BAR_F
+st = w._states[1]
+check("AA17b one past the budget arms the parking run",
+      st.fable_park is True and st.fable_step == 0
+      and any("park" in m for k, m in LOGS_AA))
+advance(1)
+w._tick()                                    # the muted <resume> step
+check("AA17c the parking run types nothing", texts_sent() == [])
+check("AA17d and completes cleanly",
+      w._states[1].fable_step == -1 and w._states[1].fable_handled is True)
+
+# A further block after parking is left alone, loudly: nothing of ours
+# started that turn, so there is nothing left to do by machine.
+TEXTS[1] = NOTICE + "\nRequest ID: req_CCCCCCCCCCCC\n" + _BAR_F
 advance(1)
 w._tick()
-check("AA17e a window already on the target is left alone",
-      not any("back to" in m for k, m in LOGS_AA))
+check("AA17e after parking, a further block is left alone",
+      w._states[1].fable_step == -1
+      and any("needs a human edit" in m for k, m in LOGS_AA))
 
 # The lying-done scenario, replayed exactly: run ends, verdict comes due
 # AFTER the refusal has printed, and judges the refusal instead of the
@@ -1544,27 +1487,16 @@ def _resume_watcher(resume_map):
     return w
 
 
-# Early attempts must keep retrying the ORIGINAL work: pivoting to the
-# configured prompt on the first failure would abandon the task after one
-# bad roll. The pivot belongs to the patient attempt — the one that let the
-# fallback FINISH the blocked work, after which a plain retry has been
-# proven hopeless and fresh work is the only useful thing left to type.
+# By the time <resume> runs, /compact has wiped the flagged history — the
+# configured prompt is safe immediately, so the very first recovery types
+# it. (The old ladder held it back until a "patient attempt"; both the
+# ladder and the gate are gone.)
 reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
 w = _resume_watcher({"claude": "run the full regression suite"})
 for _ in range(3):
     w._tick()
     advance(1)
-check("AB1 an early attempt still types continue despite a configured pivot",
-      texts_sent() == [["continue"]])
-
-reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
-w = _resume_watcher({"claude": "run the full regression suite"})
-w._tick()                                       # latch (fable_runs -> 1)
-w._states[1].fable_runs = gui.FABLE_IMPATIENT_RUNS + 1
-for _ in range(3):
-    advance(1)
-    w._tick()
-check("AB1b the patient attempt types the pivot command",
+check("AB1 the first recovery already types the configured command",
       texts_sent() == [["run the full regression suite"]])
 
 reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
@@ -1609,6 +1541,10 @@ _dlg = gui.AdvancedDialog(
     {},
 )
 from PyQt6.QtCore import Qt as _Qt                        # noqa: E402
+# Commands and loops matter in all-windows mode too — the table must be
+# editable there, not greyed out behind the scope checkbox.
+check("AB6a the table is editable even in all-windows mode",
+      _dlg.all_windows_chk.isChecked() and _dlg.win_list.isEnabled())
 _dlg.all_windows_chk.setChecked(False)
 _rows = {_dlg.win_list.item(r, 0).data(_Qt.ItemDataRole.UserRole): r
          for r in range(_dlg.win_list.rowCount())}
@@ -1623,6 +1559,130 @@ check("AB8 a cleared cell deletes the command", "ghost" not in _cfg["resume"])
 check("AB9 an unticked window keeps its command",
       "beta" not in _cfg["windows"] and "beta" in _cfg["resume"])
 _dlg.deleteLater()
+
+# The Loops column round-trips: stored values are shown, edits come back,
+# garbage and the default of 1 are dropped rather than stored.
+_dlg2 = gui.AdvancedDialog(
+    None,
+    {"enabled": True, "windows": ["alpha"], "steps": "x",
+     "resume": {}, "resume_loops": {"alpha": 3}},
+    {"alpha": "✳ alpha", "beta": "⠂ beta"},
+    {},
+)
+_rows2 = {_dlg2.win_list.item(r, 0).data(_Qt.ItemDataRole.UserRole): r
+          for r in range(_dlg2.win_list.rowCount())}
+check("AB10 a stored loops value is shown",
+      _dlg2.win_list.item(_rows2["alpha"], 2).text() == "3")
+check("AB10b the default shows as 1",
+      _dlg2.win_list.item(_rows2["beta"], 2).text() == "1")
+_dlg2.win_list.item(_rows2["beta"], 2).setText("5")
+_dlg2.win_list.item(_rows2["alpha"], 2).setText("garbage")
+_cfg2 = _dlg2.result_config()
+check("AB11 loops round-trip and garbage collapses to the default",
+      _cfg2["resume_loops"] == {"beta": 5})
+_dlg2.deleteLater()
+
+
+# =============================================================================
+print("---- AC: the per-window Loops budget drives the tick ----")
+# Loops caps how many recoveries per block episode may type the prompt; one
+# past it is the parking run. Missing key = 1, and garbage in the store must
+# coerce, never raise (worker thread).
+
+
+def _loops_watcher(loops_map, resume_map=None):
+    wl = gui.Watcher()
+    wl._running = True
+    wl.set_fable_config({
+        "enabled": True, "all_windows": True, "delay": 1,
+        "steps": "<resume>", "windows": [],
+        "resume": resume_map or {}, "resume_loops": loops_map,
+    })
+    return wl
+
+
+reset([(1, "claude")], {1: NOTICE})
+w = _loops_watcher({"claude": 3})
+for rid in ("req_D1", "req_D2", "req_D3", "req_D4"):
+    TEXTS[1] = NOTICE + f"\nRequest ID: {rid}\n" + _BAR_F
+    for _ in range(3):
+        w._tick()
+        advance(1)
+check("AC1 with Loops=3 the first three runs all type the prompt",
+      texts_sent() == [["continue"]] * 3)
+check("AC2 the fourth run is the parking run",
+      w._states[1].fable_runs == 4 and w._states[1].fable_handled is True)
+
+_wb = gui.Watcher()
+_wb.set_fable_config({"enabled": True, "all_windows": True, "steps": "x",
+                      "resume_loops": {"a": "3", "b": "abc", "c": 0,
+                                       "d": 2.9}})
+check("AC3 loops values are coerced defensively",
+      _wb._fable_resume_loops == {"a": 3, "d": 2})
+_wb.set_fable_config({"enabled": True, "all_windows": True, "steps": "x",
+                      "resume_loops": "not-a-dict"})
+check("AC4 a corrupt loops store collapses to defaults",
+      _wb._fable_resume_loops == {})
+
+
+# =============================================================================
+print("---- AD: <idle> waits for the turn to actually end ----")
+# The fallback finishing the remaining work is the whole first half of the
+# recovery — <idle> has no target duration, it simply outlasts the turn.
+reset([(1, "claude")], {1: NOTICE + "\nworking\n" + _SPIN})
+w = new_watcher(steps="<idle>\n/model fable")
+w._tick()                                    # arm
+for _ in range(5):
+    advance(60)
+    w._tick()
+check("AD1 a running turn holds <idle> open", w._states[1].fable_step == 0)
+
+# A long legitimate turn must not be killed by the stale-run guard — <idle>
+# refreshes the step heartbeat the same way <wait> does.
+for _ in range(5):
+    advance(300)                             # 25 min total, past the guard
+    w._tick()
+check("AD2 a turn longer than the stale guard is still waited on",
+      w._states[1].fable_step == 0)
+
+# One quiet reading is a flicker (the spinner drops out between tool calls),
+# not a finish; sustained quiet is.
+TEXTS[1] = NOTICE + "\nall done here"
+w._tick()
+check("AD3 the first quiet reading does not advance",
+      w._states[1].fable_step == 0)
+advance(gui.FABLE_IDLE_SETTLE_S + 5)
+w._tick()
+check("AD4 sustained quiet advances", w._states[1].fable_step == 1)
+
+# A network stall is not a finish: the outer handlers nudge the session back
+# to life, and the /compact that follows would call the API mid-outage.
+reset([(1, "claude")], {1: NOTICE + "\n" + ECONN})
+w = new_watcher(steps="<idle>\n/model fable")
+w._tick()                                    # arm
+for _ in range(4):
+    advance(gui.FABLE_IDLE_SETTLE_S + 5)
+    w._tick()
+check("AD5 a network-stalled session does not count as finished",
+      w._states[1].fable_step == 0)
+check("AD6 the outer handler still pokes it during <idle>",
+      ["continue"] in texts_sent())
+
+# Bounded on wall time: a turn that never ends must not pin the window.
+reset([(1, "claude")], {1: NOTICE + "\nworking\n" + _SPIN})
+w = new_watcher(steps="<idle>\n/model fable")
+LOGS_AD = []
+w.log.connect(lambda k, m: LOGS_AD.append((k, m)))
+w._tick()                                    # arm
+_n_ticks = int(gui.FABLE_IDLE_WALL_S / 600) + 2
+for _ in range(_n_ticks):
+    advance(600)                             # each gap under the stale guard
+    w._tick()
+    if w._states[1].fable_step != 0:         # the walled advance happened
+        break
+check("AD7 a turn that never ends is walled through, with a warning",
+      w._states[1].fable_step == 1
+      and any("moving on anyway" in m for k, m in LOGS_AD))
 
 
 # =============================================================================

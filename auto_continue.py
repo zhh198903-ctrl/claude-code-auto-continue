@@ -385,7 +385,7 @@ PROMPT_POST_MATCH_TAIL = 1500
 # are NOT equally bad:
 #   too small → the dialog isn't seen, <esc> fires and cancels it, <confirm>
 #     times out, and the turn resumes on the old model. Wasteful, but it stays
-#     inside the recovery and FABLE_MAX_RUNS stops it repeating.
+#     inside the recovery and the per-window resume budget stops it repeating.
 #   too large → a dialog the USER dismissed a while ago still matches, so
 #     <confirm> presses Enter into their input box and submits whatever they
 #     had half-typed as a prompt. That has side effects in their session and
