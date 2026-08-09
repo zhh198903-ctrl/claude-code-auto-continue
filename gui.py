@@ -3817,7 +3817,9 @@ newer "What do you want to do?" chooser appears instead, it confirms
 <i>Stop and wait</i> so the banner shows up, then follows the normal flow.</li>
 <li><b>Network stalls.</b> Retry-exhausted banners and bare API connection
 errors get a <code>continue</code> every retry interval until the connection
-comes back.</li>
+comes back — but only while the session is actually stuck. Once it is
+streaming again the banner still on screen is just scrollback, and poking it
+would only queue prompts that all land at once.</li>
 <li><b>Truncated responses.</b> A reply cut off mid-stream is resumed.</li>
 <li><b>Dead sessions.</b> An expired login cannot be fixed by typing, so it is
 only reported — never poked at.</li>
@@ -3829,6 +3831,15 @@ only reported — never poked at.</li>
 becomes <code>/model …</code> → <code>/effort …</code> → <code>continue</code>.
 The model box is editable: type a name the list doesn't have yet and it is
 passed through verbatim, so a newly released model works right away.</li>
+<li><b>After finish…</b> — a prompt typed automatically when that session
+finishes a run and sits idle for a while, so the window keeps working instead
+of waiting for you. It re-arms after every completed run: the session keeps
+going until you clear the prompt. The button shows <b>After finish ✓</b> once
+one is set, and hovering previews it; clearing the text turns it off.
+<br>Four idle-looking states never count as "finished": a session never seen
+running (a fresh shell at a prompt is not a completed run), a standing
+safeguard notice (blocked, not finished), the post-send cooldown, and a
+recovery in flight.</li>
 <li><b>Now</b> fires immediately · <b>Skip</b> cancels a pending continue ·
 <b>Exclude</b> stops watching that window for good · <b>Clear cooldown</b>
 lifts the 15-minute post-send suppression.</li>
@@ -3841,20 +3852,19 @@ the terminal text into the test box and it tells you what matched, which
 capture groups it produced, and whether the match sits too far up the
 scrollback to count. Invalid patterns are refused rather than silently
 ignored; <b>Reset all</b> restores the built-ins.</p>
-<p><b>After finish</b> — each row has an <i>After finish…</i> button. Set a
-prompt there and, when that session finishes a run and sits idle for a bit,
-the prompt is typed automatically so the window keeps producing. It re-arms
-after every completed run — the session keeps working until you clear the
-prompt. Blocked or cooling-down sessions are never poked, and a window that
-was never seen running does not qualify as "finished".</p>
 
 <p><b>Model recovery</b> (opt-in, off by default) — when a model's safeguards
 block a turn, the session stalls on a model that refuses to work. This
 switches to a fallback model, redoes the blocked turn there, and after a
-configurable stretch of real work switches back and resumes. Retries
-escalate: each attempt gives the fallback more runway, the last one waits for
-its turn to finish instead of cutting it short, and after that it gives up on
-the message — loudly — and still brings the window home to the target model.
+configurable stretch of real work switches back and resumes.</p>
+<p>Retries escalate. Attempts 1–3 cut the fallback's turn short and switch
+back, each giving it 60s more runway than the last (180s, 240s, 300s at the
+default delay). A fourth waits for the fallback to <i>finish</i> instead —
+three failures mean cutting it short is not working. After that it gives up
+on the message, says so loudly, and still brings the window home to the
+target model rather than abandoning it on the fallback. Whether a run
+succeeded is judged a beat after it ends, once the screen shows whether the
+closing step was accepted or refused.
 It also <b>keeps the window on the target</b>: if the session is left on the
 fallback with no notice showing, it steers back — after a grace period,
 spaced out and capped so it never fights you. The target is simply the last
@@ -3878,7 +3888,8 @@ only while a turn is actually running; on an idle session it does nothing</li>
 original work is still worth retrying; once repeated blocks have forced the
 patient attempt (the fallback finished the blocked work), it types the
 window's <b>After recovery</b> command instead — at that point a retry would
-only be refused again, so fresh work is the only useful thing left</li>
+only be refused again, so fresh work is the only useful thing left. Set it
+per window in the second column of the window list on this tab</li>
 </ul>
 
 <h3>Starting over</h3>
