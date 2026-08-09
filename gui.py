@@ -297,6 +297,16 @@ FABLE_WAIT_ESCALATION_S = 60
 # the patient attempt all at once. Measured live: attempt 2 ran with attempt
 # 1's delay because of exactly this.
 FABLE_CLEARED_S = 120
+# The verdict on a finished run is judged this long AFTER the last step, not
+# at it. The closing 'continue' takes a few seconds to be accepted or refused,
+# and judging 2 seconds in reported "done" for runs whose refusal simply had
+# not printed yet — the retry still fired off the request id a tick later, but
+# the log had already lied.
+FABLE_VERDICT_DELAY_S = 30
+# While the session is streaming, the verdict waits (the turn IS the evidence:
+# a refusal ends it within seconds, real work keeps it running). Bounded — a
+# turn still going this long after the run means the block did not stop it.
+FABLE_VERDICT_MAX_S = 600
 # A handled notice drifts further from the tail as the session prints, so a
 # match much CLOSER than the furthest we've seen is a genuinely new block.
 #
@@ -410,6 +420,10 @@ def _fable_reset(st) -> None:
     st.fable_last_key_at = None
     st.fable_picker_used = False
     st.fable_restore = None
+    # Arming a new run goes through here, so a verdict still pending from the
+    # previous run is dropped — the new run's own logging tells that story.
+    st.fable_verdict_at = None
+    st.fable_verdict_want = None
 
 
 def _parse_recovery_steps(text: str) -> list:
@@ -502,6 +516,8 @@ class _WState:
     fable_notice_dist: Optional[int] = None       # tail-distance when latched
     fable_notice_id: Optional[str] = None         # request id of that notice
     fable_clear_since: Optional[datetime] = None  # notice absent since when
+    fable_verdict_at: Optional[datetime] = None   # run finished, verdict due
+    fable_verdict_want: Optional[str] = None      # model that run aimed for
     fable_picker_used: bool = False               # picker accepted this run
     fable_hold_logged: bool = False               # 'waiting for idle' said once
     fable_drift_at: Optional[datetime] = None     # last drift correction
@@ -961,6 +977,57 @@ class Watcher(QObject):
                 if st.fable_user_optout:
                     _fable_ok = False
                 if self._fable_enabled and _fable_ok:
+                    # A finished run whose verdict has come due. Judged here,
+                    # a tick or more after the last step, so the screen has
+                    # had time to show whether the closing 'continue' was
+                    # accepted or refused. While the session is streaming the
+                    # verdict keeps waiting — the turn itself is the evidence
+                    # (a refusal ends it within seconds, real work keeps it
+                    # running) — but bounded: a turn still going ten minutes
+                    # later was clearly not stopped by the block.
+                    if (st.fable_step < 0
+                            and st.fable_verdict_at is not None
+                            and now - st.fable_verdict_at
+                            >= timedelta(seconds=FABLE_VERDICT_DELAY_S)
+                            and tail):
+                        _vwant = st.fable_verdict_want
+                        _running = session_running(tail)
+                        _overdue = (now - st.fable_verdict_at
+                                    >= timedelta(seconds=FABLE_VERDICT_MAX_S))
+                        if not _running or _overdue:
+                            ended_on = current_model(tail)
+                            end_dist = fable_refusal_distance(
+                                tail, self._patterns.get("fable"))
+                            stalled = (
+                                end_dist is not None
+                                and st.fable_notice_dist is not None
+                                and end_dist <= (st.fable_notice_dist
+                                                 + FABLE_FRESH_MARGIN))
+                            if (_vwant and ended_on
+                                    and _vwant.lower()
+                                    not in ended_on.lower()):
+                                self.log.emit(
+                                    "warn",
+                                    f"Fable-recover finished on {ended_on!r} "
+                                    f"but the script asked for {_vwant!r} → "
+                                    f"{title!r}; the session was NOT "
+                                    f"switched back")
+                            elif stalled and not _running:
+                                self.log.emit(
+                                    "warn",
+                                    f"Fable-recover ran on {title!r} but the "
+                                    f"safeguard notice is still standing — "
+                                    f"the block was NOT cleared"
+                                    + (f" (on {ended_on})"
+                                       if ended_on else ""))
+                            else:
+                                self.log.emit(
+                                    "info",
+                                    f"Fable-recover done → {title!r}"
+                                    + (f" (on {ended_on})"
+                                       if ended_on else ""))
+                            st.fable_verdict_at = None
+                            st.fable_verdict_want = None
                     # A drift correction runs its own short script; the
                     # configured one is for recovering from a safeguard.
                     steps = st.fable_restore or self._fable_steps
@@ -1284,59 +1351,19 @@ class Watcher(QObject):
                                 st.fable_wait_from = None
                                 st.fable_last_key_at = None
                                 if st.fable_step >= len(steps):
+                                    # The verdict is NOT judged here. The
+                                    # closing 'continue' takes a few seconds
+                                    # to be accepted or refused, and judging
+                                    # 2 seconds in reported "done" for runs
+                                    # whose refusal had simply not printed
+                                    # yet. Latch what this run aimed for and
+                                    # judge on a later tick, once the screen
+                                    # has caught up with reality.
+                                    wanted = _last_model_step(steps)
                                     _fable_reset(st)
                                     st.fable_handled = True
-                                    # Say what it actually ended ON, and warn
-                                    # when that isn't the model the last
-                                    # /model step asked for. A run once
-                                    # reported "done" while the session was
-                                    # left on the fallback model — the failure
-                                    # went unnoticed for an hour because the
-                                    # log only ever said "done".
-                                    ended_on = current_model(tail)
-                                    wanted = _last_model_step(steps)
-                                    # Ending on the right model is not the same
-                                    # as having cleared the block. A run on
-                                    # 2026-08-09 ended on exactly the model the
-                                    # script asked for and reported success,
-                                    # while the safeguard notice was still the
-                                    # last thing on screen and the next turn was
-                                    # refused 7 seconds later. The notice drifts
-                                    # up the buffer as the session prints, so a
-                                    # notice no further from the tail than when
-                                    # the run latched onto it means nothing ran.
-                                    end_dist = (fable_refusal_distance(
-                                        tail, self._patterns.get("fable"))
-                                        if tail else None)
-                                    stalled = (
-                                        end_dist is not None
-                                        and st.fable_notice_dist is not None
-                                        and end_dist <= (st.fable_notice_dist
-                                                         + FABLE_FRESH_MARGIN))
-                                    if (wanted and ended_on
-                                            and wanted.lower()
-                                            not in ended_on.lower()):
-                                        self.log.emit(
-                                            "warn",
-                                            f"Fable-recover finished on "
-                                            f"{ended_on!r} but the script asked "
-                                            f"for {wanted!r} → {title!r}; the "
-                                            f"session was NOT switched back")
-                                    elif stalled:
-                                        self.log.emit(
-                                            "warn",
-                                            f"Fable-recover ran on {title!r} but "
-                                            f"the safeguard notice is still "
-                                            f"standing — the block was NOT "
-                                            f"cleared"
-                                            + (f" (on {ended_on})"
-                                               if ended_on else ""))
-                                    else:
-                                        self.log.emit(
-                                            "info",
-                                            f"Fable-recover done → {title!r}"
-                                            + (f" (on {ended_on})"
-                                               if ended_on else ""))
+                                    st.fable_verdict_at = now
+                                    st.fable_verdict_want = wanted
                             st.status = ST_FABLE
                             self._retick_soon()
                             continue

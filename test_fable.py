@@ -780,12 +780,18 @@ w._tick()
 warns = [m for k, m in LOGS if k == "warn" and "NOT switched back" in m]
 check("T5 correct end model logs no warning", not warns)
 
-# Ended on the WRONG model -> loud.
+# Ended on the WRONG model -> loud. The verdict is judged a beat AFTER the
+# last step, not at it: judging 2 seconds in reported "done" for runs whose
+# refusal simply had not printed yet.
 reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_O})
 w = new_watcher(steps="/model fable")
 LOGS = []
 w.log.connect(lambda k, m: LOGS.append((k, m)))
 w._tick()
+w._tick()
+check("T6a no verdict at the instant the run ends",
+      not any("NOT switched back" in m for k, m in LOGS))
+advance(gui.FABLE_VERDICT_DELAY_S + 1)
 w._tick()
 warns = [m for k, m in LOGS if k == "warn" and "NOT switched back" in m]
 check("T6 wrong end model is reported loudly", len(warns) == 1)
@@ -798,6 +804,8 @@ w = new_watcher(steps="/model fable")
 LOGS = []
 w.log.connect(lambda k, m: LOGS.append((k, m)))
 w._tick()
+w._tick()
+advance(gui.FABLE_VERDICT_DELAY_S + 1)
 w._tick()
 warns = [m for k, m in LOGS if k == "warn" and "NOT switched back" in m]
 check("T7 unreadable status bar produces no false warning", not warns)
@@ -1445,6 +1453,49 @@ w._tick()
 check("AA17e a window already on the target is left alone",
       not any("back to" in m for k, m in LOGS_AA))
 
+# The lying-done scenario, replayed exactly: run ends, verdict comes due
+# AFTER the refusal has printed, and judges the refusal instead of the
+# optimistic snapshot. Before the deferral this logged "done" at +2s and the
+# refusal at +7s made a liar of it.
+reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_F})
+w = new_watcher(steps="continue")
+LOGS_AA = []
+w.log.connect(lambda k, m: LOGS_AA.append((k, m)))
+w._tick()
+advance(1)
+w._tick()                                       # run completes here
+check("AA18a nothing is judged at completion",
+      not any("done" in m or "NOT cleared" in m for k, m in LOGS_AA))
+# The refusal prints seconds later, before the verdict comes due.
+TEXTS[1] = NOTICE + _ID_B + _BAR_F
+advance(gui.FABLE_VERDICT_DELAY_S + 1)
+w._tick()
+check("AA18b the verdict then reflects the refusal, not the snapshot",
+      not any("Fable-recover done" in m for k, m in LOGS_AA))
+
+# While the target is genuinely WORKING the verdict waits: the turn is the
+# evidence, and ending it early with a judgment would be the same guess in the
+# other direction. Once the turn ends the verdict lands as a real done.
+reset([(1, "claude")], {1: "all quiet\n" + _BAR_F})
+w = new_watcher(steps="continue")
+LOGS_AA = []
+w.log.connect(lambda k, m: LOGS_AA.append((k, m)))
+TEXTS[1] = NOTICE + _ID_A + _BAR_F
+w._tick()
+advance(1)
+w._tick()                                       # run completes
+TEXTS[1] = NOTICE + _ID_A + _BAR_F + "\n" + _SPIN   # target hard at work
+advance(gui.FABLE_VERDICT_DELAY_S + 1)
+w._tick()
+check("AA18c a streaming session postpones the verdict",
+      not any("done" in m or "NOT cleared" in m for k, m in LOGS_AA))
+TEXTS[1] = ("done working, lots of output pushed the notice away\n" * 40
+            + _BAR_F)
+advance(1)
+w._tick()
+check("AA18d and the verdict lands once the turn ends",
+      any("Fable-recover done" in m for k, m in LOGS_AA))
+
 check("AA12f every legacy script is distinct and none equals the new default",
       len(set(_legacies.values())) == len(_legacies)
       and gui.DEFAULT_FABLE_STEPS not in _legacies.values())
@@ -1465,6 +1516,8 @@ LOGS = []
 w.log.connect(lambda k, m: LOGS.append((k, m)))
 w._tick()
 advance(1)
+w._tick()
+advance(gui.FABLE_VERDICT_DELAY_S + 1)
 w._tick()
 check("AA8 a run that left the notice standing is not reported as success",
       any(k == "warn" and "NOT cleared" in m for k, m in LOGS)
