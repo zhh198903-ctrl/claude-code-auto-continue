@@ -424,6 +424,7 @@ class _WState:
     fable_runs: int = 0                           # recoveries since idle
     fable_notice_dist: Optional[int] = None       # tail-distance when latched
     fable_picker_used: bool = False               # picker accepted this run
+    fable_hold_logged: bool = False               # 'waiting for idle' said once
     fable_drift_at: Optional[datetime] = None     # last drift correction
     fable_drift_runs: int = 0                     # corrections since on-target
     fable_restore: Optional[list] = None          # one-off restore script
@@ -1013,6 +1014,18 @@ class Watcher(QObject):
                                     and now - st.fable_step_at
                                     >= timedelta(seconds=FABLE_IDLE_MAX_S))
                                 if _busy and not _waited:
+                                    # Say it once per step. A silent hold is
+                                    # indistinguishable in the log from a step
+                                    # that simply had not come due yet, which
+                                    # makes the guard impossible to confirm
+                                    # from a real recovery.
+                                    if not st.fable_hold_logged:
+                                        st.fable_hold_logged = True
+                                        self.log.emit(
+                                            "info",
+                                            f"{dr}Fable-recover: {title!r} is "
+                                            f"mid-turn, holding {arg!r} until "
+                                            f"it finishes")
                                     st.status = ST_FABLE
                                     self._retick_soon(15000)
                                     continue
@@ -1139,6 +1152,7 @@ class Watcher(QObject):
                                 st.fable_step += 1
                                 st.fable_step_at = now
                                 st.fable_dlg_seen = False
+                                st.fable_hold_logged = False
                                 st.fable_tries = 0
                                 st.fable_wait_from = None
                                 st.fable_last_key_at = None

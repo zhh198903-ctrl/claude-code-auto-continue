@@ -1130,10 +1130,18 @@ _SPIN = "  ✽ Swirling… (2m 0s · " + chr(0x2193) + " 5.0k tokens)"
 
 reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_O + "\n" + _SPIN})
 w = new_watcher(steps="/model fable")
+LOGS_AA = []
+w.log.connect(lambda k, m: LOGS_AA.append((k, m)))
 for _ in range(4):
     w._tick()
     advance(1)
 check("AA9 /model holds while the session is streaming", texts_sent() == [])
+# A silent hold is indistinguishable in the log from a step that simply was
+# not due yet, which makes the guard impossible to confirm from a real
+# recovery — the first live run it mattered on could not be told apart from
+# one where the turn just happened to finish first.
+_holds = [m for k, m in LOGS_AA if "holding" in m]
+check("AA9b and says so exactly once", len(_holds) == 1)
 
 TEXTS[1] = NOTICE + "\n" + _BAR_O          # turn ended, spinner gone
 w._tick()
