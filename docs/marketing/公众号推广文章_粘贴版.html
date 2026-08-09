@@ -76,14 +76,14 @@
     </p>
 
     <div style="background:#fff7ed;border-left:4px solid #fb923c;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0 20px;font-size:14px;color:#7c2d12;line-height:1.8;">
-      <b>现在：</b>主界面每一行有个 <b>After finish…</b> 按钮，点开填一条提示词。这个会话跑完当前任务、空闲满一个稳定期后，工具自动把提示词输进去 —— 干完一轮再发一轮，<b>直到你清掉提示词为止</b>。睡前给每个窗口排好下一个活，醒来收货。
+      <b>现在：</b>主界面每一行有个 <b>After finish…</b> 按钮，点开填一条提示词。这个会话跑完当前任务、空闲满一个稳定期后，工具自动把提示词输进去。弹窗里的 <b>Loops</b> 数字 = 这条提示词最多自动输几次（<b>默认 1</b>，防止同一句话无限循环）；设成 <b>unlimited</b> 就是老行为——干完一轮再发一轮，直到你清掉提示词为止。改提示词文本会重置计数。睡前给每个窗口排好下一个活，醒来收货。
     </div>
 
 <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px 18px;margin:16px 0 8px;">
       <div style="font-weight:700;color:#1e40af;font-size:14px;margin-bottom:8px;">🛠 在 GUI 里怎么配</div>
       <ol style="padding-left:20px;font-size:14px;color:#1e3a5f;margin:0;line-height:1.9;">
         <li>主界面表格里找到目标窗口那一行，在右侧 Action 区点 <b>After finish…</b></li>
-        <li>弹窗里输入"跑完后要干的下一个活"，点 OK —— 按钮变成 <b>After finish ✓</b>，悬停可预览</li>
+        <li>弹窗里输入"跑完后要干的下一个活"，<b>Loops</b> 选这条指令最多自动输几次（默认 1，unlimited = 无限接续），点 OK —— 按钮变成 <b>After finish ✓</b>，悬停可预览</li>
         <li>要停下来：再点按钮，<b>清空文本</b>确定即可（勾选状态不影响这条指令的保存）</li>
       </ol>
     </div>
@@ -494,6 +494,7 @@
         <li><b>恢复流程重写</b>：实测拦截基于整段对话历史，重试永远过不去 —— 现在是备用模型跑完 → /compact → 切回输新指令，一个周期解决</li>
         <li><b>新步骤 &lt;idle&gt;</b>：等这一轮真正跑完再动，全程不打断任何 turn</li>
         <li><b>每窗口 Loops 上限</b>（默认 1）：预设指令输满次数还被拦就停靠并提醒人工修改，杜绝无限循环</li>
+        <li><b>After finish 也有 Loops</b>（默认 1，可设 unlimited）：跑完自动派活不再默认无限循环，改提示词即重置计数</li>
       </ul>
       <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">🕘 v2.0.5</div>
       <ul style="padding-left:20px;font-size:13px;color:#78350f;margin:0 0 14px;line-height:1.8;">

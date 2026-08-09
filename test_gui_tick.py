@@ -241,12 +241,25 @@ NOTICE_G = ("API Error: Fable 5's safegu" "ards flagged this message. "
 IDLE = "some finished output\n> "
 
 
-def af_watcher(cmd="next task: refactor the parser"):
+def af_watcher(cmd="next task: refactor the parser", loops=None):
     set_now(T0)
     reset([(9, "win")], {9: IDLE + "\n" + SPIN})
     w = new_watcher()
     w.set_after_finish({"win": cmd})
+    if loops is not None:
+        w.set_after_finish_loops({"win": loops})
     return w
+
+
+def af_cycle(w, cmd_output=IDLE):
+    """Drive one completed run: running seen -> idle -> settle -> tick."""
+    TEXTS[9] = cmd_output + "\n" + SPIN
+    w._tick()
+    TEXTS[9] = cmd_output
+    advance(60)
+    w._tick()
+    advance(gui.AFTER_FINISH_SETTLE_S)
+    w._tick()
 
 
 w = af_watcher()
@@ -265,15 +278,50 @@ w._tick()
 advance(120)
 w._tick()
 check("G3 does not repeat while still idle", not SENT)
-TEXTS[9] = IDLE + "\n" + SPIN                   # our prompt started a run
-w._tick()
-TEXTS[9] = IDLE                                 # ...which finishes
+# The prompt started a run which finished again — but the default Loops
+# budget is 1: typing the same follow-up after every run is an infinite
+# loop unless the user asked for it.
+af_cycle(w)
+check("G4 the default Loops budget of 1 is spent — no second fire",
+      not SENT)
+
+# Loops = 0 ("unlimited") is the old behaviour: re-arm after every run.
+w = af_watcher(loops=0)
+w._tick()                                       # running observed
+TEXTS[9] = IDLE
 advance(60)
 w._tick()
 advance(gui.AFTER_FINISH_SETTLE_S)
-w._tick()
-check("G4 re-arms after the session ran again",
+w._tick()                                       # fire 1
+SENT.clear()
+af_cycle(w)                                     # fire 2
+check("G4b Loops=unlimited re-arms after every completed run",
       SENT == [(9, ["next task: refactor the parser"])])
+SENT.clear()
+
+# Loops = 2: two fires, then it stops and says so.
+w = af_watcher(loops=2)
+AF_LOGS = []
+w.log.connect(lambda k, m: AF_LOGS.append((k, m)))
+w._tick()
+TEXTS[9] = IDLE
+advance(60)
+w._tick()
+advance(gui.AFTER_FINISH_SETTLE_S)
+w._tick()                                       # fire 1
+af_cycle(w)                                     # fire 2
+check("G4c Loops=2 fires twice", len(SENT) == 2)
+SENT.clear()
+af_cycle(w)                                     # budget spent
+check("G4d the third completed run gets nothing", not SENT)
+check("G4e and the budget exhaustion is logged once",
+      len([m for k, m in AF_LOGS if "edit the prompt to re-arm" in m]) == 1)
+
+# Editing the prompt is a NEW task: the budget starts fresh.
+w.set_after_finish({"win": "a different follow-up"})
+af_cycle(w)
+check("G4f editing the prompt resets the budget",
+      SENT == [(9, ["a different follow-up"])])
 SENT.clear()
 
 # Never ran while watched -> never fires.
@@ -313,6 +361,12 @@ w = new_watcher()
 w.set_after_finish({"win": "   ", "other": 42, "ok": " do things "})
 check("G8 blank entries are dropped, values coerced and trimmed",
       w._after_finish == {"other": "42", "ok": "do things"})
+w.set_after_finish_loops({"a": "2", "b": -1, "c": "abc", "d": 0})
+check("G9 loops values are coerced; negatives and garbage dropped",
+      w._after_finish_loops == {"a": 2, "d": 0})
+w.set_after_finish_loops("not-a-dict")
+check("G10 a corrupt loops store collapses to defaults",
+      w._after_finish_loops == {})
 
 
 print()

@@ -569,6 +569,8 @@ class _WState:
     fable_verdict_want: Optional[str] = None      # model that run aimed for
     af_seen_running: bool = False                 # ran since the last fire
     af_idle_since: Optional[datetime] = None      # idle streak start
+    af_fired: int = 0                             # prompt typed this many x
+    af_spent_logged: bool = False                 # budget-spent said once
     fable_picker_used: bool = False               # picker accepted this run
     fable_hold_logged: bool = False               # 'waiting for idle' said once
     fable_drift_at: Optional[datetime] = None     # last drift correction
@@ -633,6 +635,10 @@ class Watcher(QObject):
         # and sits idle (the main table's "After finish" column). Empty =
         # feature off for that window.
         self._after_finish: dict[str, str] = {}
+        # title_key -> times the prompt may be typed before it stops
+        # re-arming (missing = 1, 0 = unlimited). Typing the same follow-up
+        # after every run is an infinite loop unless the user asked for it.
+        self._after_finish_loops: dict[str, int] = {}
 
         # User overrides for the detection regexes (Advanced → Triggers).
         # Only keys the user actually changed (and that validated) live here;
@@ -709,10 +715,43 @@ class Watcher(QObject):
 
     @pyqtSlot(dict)
     def set_after_finish(self, overrides: dict) -> None:
-        self._after_finish = {
+        new = {
             str(k): str(v).strip() for k, v in overrides.items()
             if str(v).strip()
         }
+        # A changed (or newly set) prompt is a NEW task: its Loops budget
+        # starts fresh. Without this the counter from the previous prompt
+        # would swallow the first firing of the next one.
+        changed = {k for k in new if new.get(k) != self._after_finish.get(k)}
+        self._after_finish = new
+        for st in self._states.values():
+            if title_key(st.title) in changed:
+                st.af_fired = 0
+                st.af_spent_logged = False
+
+    @pyqtSlot(dict)
+    def set_after_finish_loops(self, overrides: dict) -> None:
+        # title_key -> how many times the after-finish prompt may be typed
+        # (missing = 1, 0 = unlimited). Defensively coerced like every other
+        # persisted map — this runs on the worker thread.
+        loops: dict[str, int] = {}
+        if isinstance(overrides, dict):
+            for k, v in overrides.items():
+                try:
+                    n = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if n >= 0:
+                    loops[str(k)] = n
+        changed = {k for k in loops
+                   if loops.get(k) != self._after_finish_loops.get(k)}
+        changed |= {k for k in self._after_finish_loops if k not in loops}
+        self._after_finish_loops = loops
+        # A raised cap deserves a fresh "spent" announcement if it runs out
+        # again; only the log latch resets, the count itself stands.
+        for st in self._states.values():
+            if title_key(st.title) in changed:
+                st.af_spent_logged = False
 
     @pyqtSlot(dict)
     def set_fable_config(self, cfg: dict) -> None:
@@ -2033,7 +2072,21 @@ class Watcher(QObject):
             #   * recovery in flight       -> fable_step >= 0
             af_cmd = self._after_finish.get(title_key(title))
             if af_cmd and tail:
-                if session_running(tail):
+                _af_cap = self._after_finish_loops.get(title_key(title), 1)
+                if _af_cap and st.af_fired >= _af_cap:
+                    # Budget spent: the prompt was typed its allotted number
+                    # of times ("Loops", default 1). Re-typing the same
+                    # follow-up after every run is an infinite loop unless
+                    # the user explicitly asked for it (Loops = unlimited).
+                    # Editing the prompt resets the count.
+                    if not st.af_spent_logged:
+                        st.af_spent_logged = True
+                        self.log.emit(
+                            "info",
+                            f"after-finish on {title!r}: prompt typed "
+                            f"{st.af_fired}x (Loops {_af_cap}) — not "
+                            f"repeating; edit the prompt to re-arm")
+                elif session_running(tail):
                     st.af_seen_running = True
                     st.af_idle_since = None
                 elif (st.af_seen_running
@@ -2051,7 +2104,9 @@ class Watcher(QObject):
                         if send_text_lines(w, [af_cmd],
                                            dry_run=self._dry_run):
                             # Re-arm only after it is seen running again:
-                            # once per completed run, not once per tick.
+                            # once per completed run, not once per tick —
+                            # and count it against the Loops budget.
+                            st.af_fired += 1
                             st.af_seen_running = False
                             st.af_idle_since = None
                         else:
@@ -2373,6 +2428,7 @@ class MainWindow(QMainWindow):
     sig_set_effort_overrides = pyqtSignal(dict)
     sig_set_model_overrides = pyqtSignal(dict)
     sig_set_after_finish = pyqtSignal(dict)
+    sig_set_after_finish_loops = pyqtSignal(dict)
     sig_set_fable_config = pyqtSignal(dict)
     sig_set_trigger_patterns = pyqtSignal(dict)
     # Into the updater (its own thread).
@@ -2395,6 +2451,7 @@ class MainWindow(QMainWindow):
         # Per-window model overrides, same keying.
         self._model_overrides: dict = {}
         self._after_finish: dict = {}
+        self._after_finish_loops: dict = {}
         # Fable refusal-recovery config (Advanced dialog). Empty pattern =
         # use the built-in default.
         self._fable_cfg: dict = {
@@ -2838,6 +2895,8 @@ class MainWindow(QMainWindow):
         self.sig_set_effort_overrides.connect(self.worker.set_effort_overrides)
         self.sig_set_model_overrides.connect(self.worker.set_model_overrides)
         self.sig_set_after_finish.connect(self.worker.set_after_finish)
+        self.sig_set_after_finish_loops.connect(
+            self.worker.set_after_finish_loops)
         self.sig_set_fable_config.connect(self.worker.set_fable_config)
         self.sig_set_trigger_patterns.connect(
             self.worker.set_trigger_patterns)
@@ -3059,6 +3118,7 @@ class MainWindow(QMainWindow):
         self._effort_overrides = {}
         self._model_overrides = {}
         self._after_finish = {}
+        self._after_finish_loops = {}
         self._excluded_titles = set()
         self._trigger_patterns = {}
         self._fable_cfg = {
@@ -3077,6 +3137,7 @@ class MainWindow(QMainWindow):
         self.sig_set_effort_overrides.emit({})
         self.sig_set_model_overrides.emit({})
         self.sig_set_after_finish.emit({})
+        self.sig_set_after_finish_loops.emit({})
         self.sig_set_trigger_patterns.emit({})
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self._save_settings()
@@ -3248,6 +3309,21 @@ class MainWindow(QMainWindow):
                     if isinstance(loaded_af, dict) else {})
             except Exception:
                 self._after_finish = {}
+            raw_al = self.settings.value(
+                "after_finish_loops", "", type=str) or ""
+            try:
+                loaded_al = json.loads(raw_al) if raw_al else {}
+                self._after_finish_loops = {}
+                if isinstance(loaded_al, dict):
+                    for _k, _v in loaded_al.items():
+                        try:
+                            _n = int(_v)
+                        except (TypeError, ValueError):
+                            continue
+                        if _n >= 0:
+                            self._after_finish_loops[str(_k)] = _n
+            except Exception:
+                self._after_finish_loops = {}
             raw_f = self.settings.value("fable_cfg", "", type=str) or ""
             try:
                 loaded_f = json.loads(raw_f) if raw_f else {}
@@ -3316,6 +3392,7 @@ class MainWindow(QMainWindow):
         self.sig_set_effort_overrides.emit(dict(self._effort_overrides))
         self.sig_set_model_overrides.emit(dict(self._model_overrides))
         self.sig_set_after_finish.emit(dict(self._after_finish))
+        self.sig_set_after_finish_loops.emit(dict(self._after_finish_loops))
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self.sig_set_trigger_patterns.emit(dict(self._trigger_patterns))
         if self._migrated_fable_steps:
@@ -3382,6 +3459,9 @@ class MainWindow(QMainWindow):
         )
         self.settings.setValue(
             "after_finish", json.dumps(self._after_finish)
+        )
+        self.settings.setValue(
+            "after_finish_loops", json.dumps(self._after_finish_loops)
         )
         self.settings.setValue("fable_cfg", json.dumps(self._fable_cfg))
         self.settings.setValue(
@@ -3727,27 +3807,64 @@ class MainWindow(QMainWindow):
     def _on_after_finish_clicked(self, title: str) -> None:
         key = title_key(title)
         cur = self._after_finish.get(key, "")
-        text, ok = QInputDialog.getMultiLineText(
-            self,
-            "After finish",
+        try:
+            cur_loops = max(0, int(self._after_finish_loops.get(key, 1)))
+        except (TypeError, ValueError):
+            cur_loops = 1
+        dlg = QDialog(self)
+        dlg.setWindowTitle("After finish")
+        lay = QVBoxLayout(dlg)
+        hint = QLabel(
             f"Prompt to type into {key!r} when it finishes a run and sits "
-            f"idle.\nIt re-arms after each completed run, so the session "
-            f"keeps working until you clear this.\nEmpty = off.",
-            cur,
-        )
-        if not ok:
+            f"idle. Empty = off.")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        edit = QPlainTextEdit(cur)
+        lay.addWidget(edit, 1)
+        form = QFormLayout()
+        spin = QSpinBox()
+        spin.setRange(0, 999)
+        # 0 shows as "unlimited": the pre-Loops behaviour, re-arming after
+        # every completed run until the prompt is cleared.
+        spin.setSpecialValueText("unlimited")
+        spin.setValue(cur_loops)
+        spin.setToolTip(
+            "How many times the prompt may be typed before it stops "
+            "re-arming (default 1). \"unlimited\" repeats after every "
+            "completed run until you clear the prompt. Editing the prompt "
+            "text resets the count.")
+        form.addRow("Loops", spin)
+        lay.addLayout(form)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+        dlg.resize(480, 280)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        text = text.strip()
+        text = edit.toPlainText().strip()
+        loops = spin.value()
         if text:
             self._after_finish[key] = text
+            # Only non-defaults are stored, same policy as resume Loops.
+            if loops != 1:
+                self._after_finish_loops[key] = loops
+            else:
+                self._after_finish_loops.pop(key, None)
         else:
             self._after_finish.pop(key, None)
+            self._after_finish_loops.pop(key, None)
         self.sig_set_after_finish.emit(dict(self._after_finish))
+        self.sig_set_after_finish_loops.emit(dict(self._after_finish_loops))
         self._save_settings()
         self._append_log(
             "info",
             f"after-finish for {key!r} "
-            + (f"set to {text!r}" if text else "cleared"))
+            + (f"set to {text!r} (loops "
+               + ("unlimited" if loops == 0 else str(loops)) + ")"
+               if text else "cleared"))
         self._render_table()      # refresh the ✓ on the button
 
     def _do_unexclude(self, title: str) -> None:
@@ -3903,9 +4020,14 @@ The model box is editable: type a name the list doesn't have yet and it is
 passed through verbatim, so a newly released model works right away.</li>
 <li><b>After finish…</b> — a prompt typed automatically when that session
 finishes a run and sits idle for a while, so the window keeps working instead
-of waiting for you. It re-arms after every completed run: the session keeps
-going until you clear the prompt. The button shows <b>After finish ✓</b> once
-one is set, and hovering previews it; clearing the text turns it off.
+of waiting for you. The dialog's <b>Loops</b> field caps how many times the
+prompt is typed (default 1) — typing the same follow-up after every run is an
+infinite loop unless you asked for it. Set it to <b>unlimited</b> (0) for the
+old always-re-arm behaviour: the session keeps going until you clear the
+prompt. Editing the prompt text resets the count (a new prompt is a new
+task); the count also starts fresh when the app restarts. The button shows
+<b>After finish ✓</b> once a prompt is set, and hovering previews it;
+clearing the text turns it off.
 <br>Four idle-looking states never count as "finished": a session never seen
 running (a fresh shell at a prompt is not a completed run), a standing
 safeguard notice (blocked, not finished), the post-send cooldown, and a
