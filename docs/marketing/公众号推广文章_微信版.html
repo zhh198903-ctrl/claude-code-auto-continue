@@ -25,13 +25,14 @@
   <table width="100%" bgcolor="#1c1917" cellpadding="0" cellspacing="0" border="0">
     <tr>
       <td align="center" style="padding:52px 32px 44px;">
-        <div style="display:inline-block;border:1px solid #fb923c;color:#fdba74;font-size:12px;padding:3px 12px;border-radius:12px;margin-bottom:16px;letter-spacing:0.08em;">🎉 v2.0.1 发布 · 免费开源</div>
+        <div style="display:inline-block;border:1px solid #fb923c;color:#fdba74;font-size:12px;padding:3px 12px;border-radius:12px;margin-bottom:16px;letter-spacing:0.08em;">🎉 v2.0.5 发布 · 免费开源</div>
         <h1 style="font-size:26px;font-weight:800;color:#fff;line-height:1.4;margin:0 0 12px;">
           任务被安全拦截卡住了？<br>
           <span style="color:#fb923c;">它替你换个模型接着跑</span>
         </h1>
-        <div style="font-size:14px;color:#a8a29e;margin-bottom:20px;">Auto-Continue — Claude Code 的 Windows 守护工具，v2.0.1 带来模型恢复</div>
+        <div style="font-size:14px;color:#a8a29e;margin-bottom:20px;">Auto-Continue — Claude Code 的 Windows 守护工具，让每个窗口一直有活干</div>
         <div>
+          <span style="border:1px solid #fb923c;color:#fdba74;font-size:12px;padding:3px 10px;border-radius:4px;margin:3px;">⏭ 跑完自动派下一个活</span>
           <span style="border:1px solid #fb923c;color:#fdba74;font-size:12px;padding:3px 10px;border-radius:4px;margin:3px;">⇄ 安全拦截自动恢复</span>
           <span style="border:1px solid #57534e;color:#d6d3d1;font-size:12px;padding:3px 10px;border-radius:4px;margin:3px;">5h 限制自动续</span>
           <span style="border:1px solid #57534e;color:#d6d3d1;font-size:12px;padding:3px 10px;border-radius:4px;margin:3px;">网络卡死恢复</span>
@@ -44,11 +45,11 @@
 
   <div style="padding:28px 28px 0;">
 
-    <!-- v2.0.1 发布说明 -->
+    <!-- v2.0.5 发布说明 -->
     <div style="background:linear-gradient(135deg,#fff7ed 0%,#fef3c7 100%);border:1px solid #fed7aa;border-radius:10px;padding:18px 22px;margin:24px 0 20px;">
-      <div style="font-weight:700;color:#7c2d12;font-size:15px;margin-bottom:8px;">📢 v2.0.1 上线</div>
+      <div style="font-weight:700;color:#7c2d12;font-size:15px;margin-bottom:8px;">📢 v2.0.5 上线</div>
       <p style="font-size:14px;color:#92400e;line-height:1.8;margin:0;">
-        这个工具最早只做一件事：<b>检测到 5 小时限制 → 等到 reset 时刻 → 自动输入 continue</b>。v2.0.0 起加入了一个新能力 —— <b>会话被模型安全策略拦住时，自动换到备用模型把这一轮做完，再切回来</b>。v2.0.1 把这套流程在真实会话里跑通了。已经在用旧版本的朋友，直接跳到 <b>"⇄ 模型恢复"</b> 一节。
+        这个工具最早只做一件事：<b>检测到 5 小时限制 → 等到 reset 时刻 → 自动输入 continue</b>。v2.0 起它多了两个身份：<b>被安全策略拦住时自动换模型顶上</b>（模型恢复），以及 v2.0.5 新增的 <b>After finish —— 会话跑完当前任务后，自动输入你预设的下一条指令，让窗口一直有活干</b>。已经在用旧版本的朋友，直接看 <b>"⏭ After finish"</b> 和 <b>"⇄ 模型恢复"</b> 两节。
       </p>
     </div>
 
@@ -70,6 +71,34 @@
 
     <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:18px;">
       <b>这是一个免费开源的小工具</b>，把这些"人肉盯着、手动敲一下"的机械动作自动化，双击 EXE 就能用，不需要装 Python，不需要配环境。
+    </p>
+
+    <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
+
+    <!-- ══════════ 新功能：After finish ══════════ -->
+    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #fb923c;">⏭ v2.0.5 新功能：After finish —— 跑完自动派下一个活</div>
+
+    <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:16px;">
+      最常见的浪费其实不是被限流，而是<b>任务跑完了，人不在</b>。会话安安静静停在提示符上，几个小时的算力窗口就这么闲过去了。
+    </p>
+
+    <div style="background:#fff7ed;border-left:4px solid #fb923c;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0 20px;font-size:14px;color:#7c2d12;line-height:1.8;">
+      <b>现在：</b>主界面每一行有个 <b>After finish…</b> 按钮，点开填一条提示词。这个会话跑完当前任务、空闲满一个稳定期后，工具自动把提示词输进去 —— 干完一轮再发一轮，<b>直到你清掉提示词为止</b>。睡前给每个窗口排好下一个活，醒来收货。
+    </div>
+
+    <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:12px;">
+      判定"跑完"是严格的，四种"看着空闲但不是跑完"的状态都不会触发：
+    </p>
+
+    <ul style="padding-left:22px;margin-bottom:20px;font-size:14px;color:#555;">
+      <li style="margin-bottom:6px;">从没见它跑过的窗口（新开的 shell 停在提示符上）—— 不算跑完</li>
+      <li style="margin-bottom:6px;">屏幕上还挂着安全拦截提示 —— 那是被拦住，不是干完了</li>
+      <li style="margin-bottom:6px;">刚被续过命、还在冷却期 —— 不重复注入</li>
+      <li style="margin-bottom:6px;">模型恢复流程正在进行中 —— 不插队</li>
+    </ul>
+
+    <p style="font-size:14px;color:#6b7280;line-height:1.8;margin-bottom:20px;">
+      这个功能发布前在真实会话上完整跑通过一遍：检测到空闲 → 工具自动输入提示词 → Claude Code 收到并开始执行新任务。
     </p>
 
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
@@ -143,7 +172,7 @@
         </tr>
         <tr style="background:#fffbeb;">
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;resume&gt;</td>
-          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">输入<b>你给这个窗口预设的指令</b>（在窗口列表的 After recovery 一栏里填）；没填就输入 continue。恢复结束时模型正空闲在提示符上——给它派真正的活，别让算力闲着</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">前几次尝试仍输 continue（原任务还有救）；<b>只有多次被拦、走到"等备用模型跑完"那一次之后</b>，才输入你预设的 After recovery 指令 —— 这时再重试只会再被拒，换新活才有意义。没预设就一直是 continue</td>
         </tr>
       </tbody>
     </table>
@@ -410,7 +439,7 @@
         </tr>
       </thead>
       <tbody>
-        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">当前版本</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;"><b>v2.0.1</b></td></tr>
+        <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">当前版本</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;"><b>v2.0.5</b></td></tr>
         <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">目标场景</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">Claude Code（CLI 版）跑在 Windows Terminal 上</td></tr>
         <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">操作系统</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">Windows 10 / 11（用了 Win32 UIA + SendInput）</td></tr>
         <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">前置要求</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">Windows Terminal（<code style="font-family:Consolas,monospace;background:#fff7ed;padding:1px 5px;border-radius:3px;color:#7c2d12;border:1px solid #fed7aa;">wt.exe</code>），不支持老的 ConHost 控制台</td></tr>
@@ -423,7 +452,7 @@
         <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">模型恢复</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;"><b>默认关闭</b>，需手动开启并逐窗口勾选</td></tr>
         <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">支持时区</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">任意 IANA 时区，常见缩写（EDT、PST 等）也识别</td></tr>
         <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">设置持久化</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">Windows 注册表 <code style="font-family:Consolas,monospace;background:#fff7ed;padding:1px 5px;border-radius:3px;color:#7c2d12;border:1px solid #fed7aa;">HKCU\Software\auto_continue\gui</code></td></tr>
-        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">测试覆盖</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">6 个测试套件，376 项断言，每次发版由 CI 全量跑过</td></tr>
+        <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">测试覆盖</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">6 个测试套件，413 项断言，每次发版由 CI 全量跑过</td></tr>
         <tr><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">开源协议</td><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#374151;">MIT</td></tr>
         <tr style="background:#fffbeb;"><td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280;">费用</td><td style="padding:7px 12px;border:1px solid #e5e7eb;"><span style="display:inline-block;background:#fef9c3;color:#854d0e;border:1px solid #fde047;border-radius:4px;font-size:12px;font-weight:700;padding:1px 8px;">完全免费</span></td></tr>
       </tbody>
@@ -432,9 +461,16 @@
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
 
     <!-- 更新日志 -->
-    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #fb923c;">📝 v2.0 更新日志</div>
+    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #fb923c;">📝 更新日志</div>
 
     <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:16px 20px;margin-bottom:18px;">
+      <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">🆕 v2.0.5</div>
+      <ul style="padding-left:20px;font-size:13px;color:#78350f;margin:0 0 14px;line-height:1.8;">
+        <li><b>After finish</b>：每个窗口可预设"跑完后的下一条指令"，自动接续，直到清除为止</li>
+        <li><b>恢复脚本可 pivot</b>：多次被拦后，切回原模型时输入预设新指令而不是死磕重试</li>
+        <li><b>恢复结果如实判定</b>：等屏幕反映真实结果再下结论，不再抢跑报"done"</li>
+        <li>失败重试自动加量（180/240/300 秒递进），最后一次改为等备用模型跑完再切</li>
+      </ul>
       <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">✨ 核心新增</div>
       <ul style="padding-left:20px;font-size:13px;color:#78350f;margin:0 0 14px;line-height:1.8;">
         <li><b>模型安全拦截自动恢复</b>：换到备用模型做完这一轮再切回，脚本可自定义，默认关闭</li>
