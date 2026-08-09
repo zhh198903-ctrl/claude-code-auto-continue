@@ -40,9 +40,9 @@
 
     <!-- v2.0.5 发布说明 -->
     <div style="background:linear-gradient(135deg,#fff7ed 0%,#fef3c7 100%);border:1px solid #fed7aa;border-radius:10px;padding:18px 22px;margin:24px 0 20px;">
-      <div style="font-weight:700;color:#7c2d12;font-size:15px;margin-bottom:8px;">📢 v2.0.5 上线</div>
+      <div style="font-weight:700;color:#7c2d12;font-size:15px;margin-bottom:8px;">📢 v2.0.6 上线</div>
       <p style="font-size:14px;color:#92400e;line-height:1.8;margin:0;">
-        这个工具最早只做一件事：<b>检测到 5 小时限制 → 等到 reset 时刻 → 自动输入 continue</b>。v2.0 起它多了两个身份：<b>被安全策略拦住时自动换模型顶上</b>（模型恢复），以及 v2.0.5 新增的 <b>After finish —— 会话跑完当前任务后，自动输入你预设的下一条指令，让窗口一直有活干</b>。已经在用旧版本的朋友，直接看 <b>"⏭ After finish"</b> 和 <b>"⇄ 模型恢复"</b> 两节。
+        这个工具最早只做一件事：<b>检测到 5 小时限制 → 等到 reset 时刻 → 自动输入 continue</b>。v2.0 起它多了两个身份：<b>被安全策略拦住时自动换模型顶上</b>（模型恢复），以及 <b>After finish —— 会话跑完当前任务后，自动输入你预设的下一条指令，让窗口一直有活干</b>。v2.0.6 把模型恢复整个重写：实测确认拦截是基于<b>整段对话历史</b>判定的，光重试永远过不去，只有 /compact 压缩上文才能解 —— 所以现在是"备用模型跑完 → /compact → 切回输新指令"一个周期。已经在用旧版本的朋友，直接看 <b>"⏭ After finish"</b> 和 <b>"⇄ 模型恢复"</b> 两节。
       </p>
     </div>
 
@@ -132,7 +132,7 @@
     </p>
 
     <div style="background:#fff7ed;border-left:4px solid #fb923c;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0 20px;font-size:14px;color:#7c2d12;line-height:1.8;">
-      <b>这个功能做的事：</b>发现会话被拦住 → 按你配置的脚本换到备用模型 → 让它把这一轮做完 → 干满设定时长后切回原模型。全程不需要你在场。
+      <b>这个功能做的事：</b>发现会话被拦住 → 换到备用模型把剩余任务<b>跑完</b> → /compact 压缩上文（触发拦截的历史被丢弃）→ 切回原模型，输入你预设的新指令。全程不需要你在场。
     </div>
 
     <!-- 恢复流程 -->
@@ -147,28 +147,28 @@
           <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">如果弹了选择框就按确认；没有就跳过</td>
         </tr>
         <tr style="background:#fffbeb;">
-          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;esc&gt;</td>
-          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">会话正在出词就先打断 —— 否则下面的切换命令只会<b>排队而不生效</b>；空闲时什么都不做</td>
-        </tr>
-        <tr>
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">/model opus</td>
           <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;"><b>自己切到备用模型</b>（已经在上面了就跳过，不重复切）</td>
         </tr>
-        <tr style="background:#fffbeb;">
+        <tr>
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;confirm&gt;</td>
           <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">确认切换对话框</td>
         </tr>
-        <tr>
+        <tr style="background:#fffbeb;">
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">continue</td>
-          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">在备用模型上把被拦的那一轮重做</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">让备用模型把被拦的那一轮<b>接着做完</b></td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;idle&gt;</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">等这一轮<b>真正跑完</b>并安静下来 —— 跑多久等多久，不再掐时间；断网不算跑完</td>
         </tr>
         <tr style="background:#fffbeb;">
-          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;wait&gt;</td>
-          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">等 180 秒 —— 注意是<b>实际运行时间</b>，断网的时间不算；重试时自动加量</td>
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">/compact</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">压缩上文 —— <b>关键一步</b>：拦截判定基于整段历史，只有压缩掉才有资格切回去</td>
         </tr>
         <tr>
-          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;esc&gt;</td>
-          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">同上：备用模型还在出词就打断它 —— 它的产出本来就不是你要的</td>
+          <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;idle&gt;</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">等压缩完成</td>
         </tr>
         <tr style="background:#fffbeb;">
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">/model fable</td>
@@ -180,7 +180,7 @@
         </tr>
         <tr style="background:#fffbeb;">
           <td style="padding:8px 10px;border:1px solid #e5e7eb;background:#fff7ed;color:#7c2d12;font-family:Consolas,monospace;white-space:nowrap;">&lt;resume&gt;</td>
-          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">前几次尝试仍输 continue（原任务还有救）；<b>只有多次被拦、走到"等备用模型跑完"那一次之后</b>，才输入你预设的 After recovery 指令 —— 这时再重试只会再被拒，换新活才有意义。没预设就一直是 continue</td>
+          <td style="padding:8px 12px;border:1px solid #e5e7eb;color:#374151;">输入该窗口预设的 After recovery 指令 —— 此时上文已压缩，直接开新活；没预设就输 continue，接住压缩后的摘要继续</td>
         </tr>
       </tbody>
     </table>
@@ -191,8 +191,9 @@
         <li>右上角 <b>Advanced…</b> → 切到 <b>Fable recovery</b> 页</li>
         <li>勾选 <b>Enable Fable refusal-recovery</b>（默认是关的）</li>
         <li>在下方窗口列表里<b>逐个勾选</b>允许它接管的窗口 —— 没勾的窗口它一个键都不会碰</li>
-        <li>（可选）同一行的 <b>After recovery</b> 列填一条指令：多次被拦、确认重试无望之后，切回原模型时输入它，而不是死磕 continue</li>
-        <li>（可选）<b>Wait for &lt;wait&gt; steps</b> = 备用模型每轮跑多久（默认 180 秒，重试自动递增）；恢复脚本每一行也都能改</li>
+        <li>（可选）同一行的 <b>After recovery</b> 列填一条指令：/compact 之后切回原模型时输入它 —— 上文已压缩，直接开新活，不再死磕 continue</li>
+        <li>（可选）同一行的 <b>Loops</b> 列 = 同一轮拦截里这条指令最多输几次（默认 1）。用完还被拦，说明<b>指令本身</b>会触发拦截：最后一轮照样让备用模型收尾并 /compact，然后停在原模型上，等你人工改指令</li>
+        <li>（可选）<b>Wait for &lt;wait&gt; steps</b> 只影响自定义脚本里的 &lt;wait&gt; 步骤；默认脚本已改用 &lt;idle&gt;（等跑完），用不到它；恢复脚本每一行也都能改</li>
       </ol>
     </div>
     <!-- Fable recovery 设置页截图（发布时需在编辑器重新插入图片） -->
@@ -208,8 +209,8 @@
       <tr>
         <td style="width:50%;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;vertical-align:top;">
           <div style="font-size:20px;margin-bottom:6px;">🔁</div>
-          <div style="font-weight:700;font-size:14px;color:#14532d;margin-bottom:4px;">失败会升级，不会死磕</div>
-          <div style="font-size:13px;color:#4b5563;line-height:1.6;">同一条拦截连试四次：每次给备用模型多 60 秒跑道（180/240/300 秒），最后一次改成<b>等它这轮自然跑完</b>再切回。四次都不行就明说放弃——并且仍会把窗口带回你选的模型，不会丢在备用模型上。</div>
+          <div style="font-weight:700;font-size:14px;color:#14532d;margin-bottom:4px;">只做一轮，不再死磕</div>
+          <div style="font-size:13px;color:#4b5563;line-height:1.6;">拦截判定基于<b>整段对话历史</b>——每次请求都会重发全部历史，光重试永远过不去。所以恢复只做一个周期：备用模型跑完 → /compact → 切回。预设指令最多输 Loops 次（默认 1），之后停靠在原模型上并明说：该人工改指令了。</div>
         </td>
         <td style="width:50%;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;vertical-align:top;">
           <div style="font-size:20px;margin-bottom:6px;">✋</div>
@@ -488,7 +489,13 @@
     <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #fb923c;">📝 更新日志</div>
 
     <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:16px 20px;margin-bottom:18px;">
-      <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">🆕 v2.0.5</div>
+      <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">🆕 v2.0.6</div>
+      <ul style="padding-left:20px;font-size:13px;color:#78350f;margin:0 0 14px;line-height:1.8;">
+        <li><b>恢复流程重写</b>：实测拦截基于整段对话历史，重试永远过不去 —— 现在是备用模型跑完 → /compact → 切回输新指令，一个周期解决</li>
+        <li><b>新步骤 &lt;idle&gt;</b>：等这一轮真正跑完再动，全程不打断任何 turn</li>
+        <li><b>每窗口 Loops 上限</b>（默认 1）：预设指令输满次数还被拦就停靠并提醒人工修改，杜绝无限循环</li>
+      </ul>
+      <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">🕘 v2.0.5</div>
       <ul style="padding-left:20px;font-size:13px;color:#78350f;margin:0 0 14px;line-height:1.8;">
         <li><b>After finish</b>：每个窗口可预设"跑完后的下一条指令"，自动接续，直到清除为止</li>
         <li><b>恢复脚本可 pivot</b>：多次被拦后，切回原模型时输入预设新指令而不是死磕重试</li>
