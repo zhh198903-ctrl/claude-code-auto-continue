@@ -161,12 +161,20 @@ def title_key(title: str) -> str:
 # worst case is that /model applies late or not at all, and the completion
 # check now says so out loud. Add it back per-window in the Advanced dialog if
 # a session is genuinely wedged behind a hung turn.
+# The script must be able to switch off the blocked model BY ITSELF. Relying
+# on Claude Code to offer a picker was a single point of failure and it failed:
+# the current build just prints "try a different model with /model" and leaves
+# the session sitting on the model that refused. `/model opus` is skipped
+# automatically when the bar already reads Opus, so the picker shape — where
+# <confirm> has already done the switch — does not switch twice.
 DEFAULT_FABLE_STEPS = (
     "<confirm>\n"
+    "/model opus\n"
+    "<confirm>\n"
+    "continue\n"
     "<wait>\n"
     "/model fable\n"
-    "<confirm>\n"
-    "continue"
+    "<confirm>"
 )
 
 # The v1.0.16 default, which typed /model into the already-open picker and
@@ -183,6 +191,23 @@ LEGACY_FABLE_STEPS_V1016 = (
     "<wait>\n"
     "/model fable\n"
     "<esc>\n"
+    "<confirm>\n"
+    "continue"
+)
+
+# The v2.0.1 default, which never switched AWAY from the target model. It
+# leaned on Claude Code offering a picker whose first option is the fallback,
+# so <confirm> did the switching. Claude Code stopped offering it: the
+# safeguard message is now plain text ("try a different model with /model"),
+# with nothing to confirm. Measured live on 2026-08-09: <confirm> timed out,
+# `/model fable` ran against a session already on Fable, and the closing
+# `continue` re-sent the blocked message to the model that had just refused
+# it — which was blocked again 7 seconds later. The run still reported
+# success, because the completion check only compared the end model.
+LEGACY_FABLE_STEPS_V201 = (
+    "<confirm>\n"
+    "<wait>\n"
+    "/model fable\n"
     "<confirm>\n"
     "continue"
 )
@@ -248,6 +273,29 @@ FABLE_DRIFT_MAX = 3        # give up rather than fight the user forever
 # the target on that window and untick it, rather than switching it back
 # and turning the feature into something that fights its owner.
 FABLE_USER_SWITCH_QUIET_S = 120   # our keystrokes count as ours this long
+
+
+def _model_step_target(arg):
+    """The model name a `/model X` step asks for, or None for other steps."""
+    s = str(arg or "").strip()
+    if not s.lower().startswith("/model"):
+        return None
+    parts = s.split()
+    return parts[1] if len(parts) > 1 else None
+
+
+def _model_matches(bar_model, want) -> bool:
+    """True if the status bar already reads the model a step asks for.
+
+    The bar carries a version and sometimes a variant ("Opus 5 (1M context)")
+    while the script says "opus", so this is a prefix test on the first word —
+    not equality. Nothing matches an unreadable bar: acting is the safe answer
+    when we cannot tell where the session is.
+    """
+    if not bar_model or not want:
+        return False
+    return str(bar_model).strip().lower().startswith(
+        str(want).strip().lower())
 
 
 def _last_model_step(steps):
@@ -930,12 +978,32 @@ class Watcher(QObject):
                             advance = False
                             failed = False
                             if kind == "send":
-                                self.log.emit(
-                                    "fire", f"{dr}Fable-recover → {title!r}: {arg!r}")
-                                if send_text_lines(w, [arg], dry_run=self._dry_run):
+                                # A `/model X` step when the bar already reads X
+                                # is at best a no-op and at worst harmful: typed
+                                # into a running turn it queues, and the switch
+                                # dialog then surfaces minutes later with nobody
+                                # left to confirm it. Skipping also makes the
+                                # script work on both shapes of the safeguard
+                                # message — when Claude Code offers a picker,
+                                # <confirm> has already moved us off the target
+                                # and the explicit switch is redundant.
+                                _msk = _model_step_target(arg)
+                                _bar = current_model(tail) if tail else None
+                                if _msk and _model_matches(_bar, _msk):
+                                    self.log.emit(
+                                        "info",
+                                        f"{dr}Fable-recover: already on "
+                                        f"{_bar!r}, skipping {arg!r} → {title!r}")
                                     advance = True
                                 else:
-                                    failed = True
+                                    self.log.emit(
+                                        "fire",
+                                        f"{dr}Fable-recover → {title!r}: {arg!r}")
+                                    if send_text_lines(w, [arg],
+                                                       dry_run=self._dry_run):
+                                        advance = True
+                                    else:
+                                        failed = True
                             elif kind == "enter":
                                 if send_text_lines(w, [""], dry_run=self._dry_run):
                                     advance = True
@@ -1059,6 +1127,24 @@ class Watcher(QObject):
                                     # log only ever said "done".
                                     ended_on = current_model(tail)
                                     wanted = _last_model_step(steps)
+                                    # Ending on the right model is not the same
+                                    # as having cleared the block. A run on
+                                    # 2026-08-09 ended on exactly the model the
+                                    # script asked for and reported success,
+                                    # while the safeguard notice was still the
+                                    # last thing on screen and the next turn was
+                                    # refused 7 seconds later. The notice drifts
+                                    # up the buffer as the session prints, so a
+                                    # notice no further from the tail than when
+                                    # the run latched onto it means nothing ran.
+                                    end_dist = (fable_refusal_distance(
+                                        tail, self._patterns.get("fable"))
+                                        if tail else None)
+                                    stalled = (
+                                        end_dist is not None
+                                        and st.fable_notice_dist is not None
+                                        and end_dist <= (st.fable_notice_dist
+                                                         + FABLE_FRESH_MARGIN))
                                     if (wanted and ended_on
                                             and wanted.lower()
                                             not in ended_on.lower()):
@@ -1068,6 +1154,15 @@ class Watcher(QObject):
                                             f"{ended_on!r} but the script asked "
                                             f"for {wanted!r} → {title!r}; the "
                                             f"session was NOT switched back")
+                                    elif stalled:
+                                        self.log.emit(
+                                            "warn",
+                                            f"Fable-recover ran on {title!r} but "
+                                            f"the safeguard notice is still "
+                                            f"standing — the block was NOT "
+                                            f"cleared"
+                                            + (f" (on {ended_on})"
+                                               if ended_on else ""))
                                     else:
                                         self.log.emit(
                                             "info",
@@ -1871,7 +1966,8 @@ class MainWindow(QMainWindow):
         # Opt-outs recorded while an Advanced dialog is open, so its OK
         # cannot resurrect a window the user just took over.
         self._pending_optouts: set = set()
-        # Set when _load_settings rewrote a stale v1.0.16 step script.
+        # Version string of the stale step script _load_settings rewrote
+        # ("v1.0.16" / "v2.0.1"), or False when nothing was migrated.
         self._migrated_fable_steps = False
         # The release dict from the latest "update available" result, if any.
         self._pending_release: Optional[dict] = None
@@ -2706,10 +2802,17 @@ class MainWindow(QMainWindow):
                     # v1.0.16 one — which types /model into the open picker
                     # and then ESCs it away — even after upgrading. Migrate
                     # that exact string; anything edited is left untouched.
-                    if (self._fable_cfg.get("steps")
-                            == LEGACY_FABLE_STEPS_V1016):
+                    _old = self._fable_cfg.get("steps")
+                    if _old in (LEGACY_FABLE_STEPS_V1016,
+                                LEGACY_FABLE_STEPS_V201):
                         self._fable_cfg["steps"] = DEFAULT_FABLE_STEPS
-                        self._migrated_fable_steps = True
+                        # Which one it was decides what the notice should say
+                        # — the two shipped scripts were broken for opposite
+                        # reasons, and a migration notice that describes the
+                        # wrong one is worse than none.
+                        self._migrated_fable_steps = (
+                            "v1.0.16" if _old == LEGACY_FABLE_STEPS_V1016
+                            else "v2.0.1")
             except Exception:
                 pass
             raw_t = self.settings.value("trigger_patterns", "", type=str) or ""
@@ -2747,11 +2850,18 @@ class MainWindow(QMainWindow):
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self.sig_set_trigger_patterns.emit(dict(self._trigger_patterns))
         if self._migrated_fable_steps:
+            _why = {
+                "v1.0.16": ("it typed /model into the picker and then ESC'd "
+                            "it away, interrupting the running turn"),
+                "v2.0.1": ("it could only switch BACK to the target model, so "
+                           "it did nothing at all once Claude Code stopped "
+                           "offering a model picker"),
+            }.get(self._migrated_fable_steps, "it no longer works")
             self._append_log(
                 "warn",
-                "Fable-recover steps migrated from the v1.0.16 script "
-                "(it typed /model into the picker and then ESC'd it "
-                "away); the new one confirms the picker instead")
+                f"Fable-recover steps migrated from the "
+                f"{self._migrated_fable_steps} script ({_why}); the new one "
+                f"switches to the fallback model itself")
         # Apply keep-awake state immediately if the user had it ON before.
         if self.keep_awake_check.isChecked():
             self._apply_keep_awake(True)

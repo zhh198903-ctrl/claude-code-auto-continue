@@ -784,9 +784,13 @@ w.log.connect(lambda k, m: LOGS.append((k, m)))
 w._tick()
 w._tick()
 warns = [m for k, m in LOGS if k == "warn" and "NOT switched back" in m]
-dones = [m for k, m in LOGS if "Fable-recover done" in m]
 check("T7 unreadable status bar produces no false warning", not warns)
-check("T8 completion is still reported", len(dones) == 1)
+# Silence is the one unacceptable ending. With the notice still standing that
+# report is the "not cleared" warning rather than a plain done — but it must
+# still never be the misleading "NOT switched back" one checked above.
+ends = [m for k, m in LOGS
+        if "Fable-recover done" in m or "NOT cleared" in m]
+check("T8 completion is still reported", len(ends) == 1)
 
 
 # =============================================================================
@@ -1060,6 +1064,72 @@ for _name, _fn in (
     check(f"W2 help does not trip the {_name} detector", _fn(_help) is False)
 check("W3 help does not trip the limit banner",
       ac.parse_limit_message(_help) is None)
+
+
+# =============================================================================
+print("---- AA: the script must be able to leave the blocked model itself ----")
+# Measured live 2026-08-09. The v2.0.1 default leaned on Claude Code offering a
+# picker whose first option is the fallback; <confirm> pressed Enter on it and
+# Claude Code did the switching. The current build offers no picker — the
+# safeguard message is plain text — so the run confirmed nothing, ran
+# `/model fable` against a session already on Fable, and closed by resending
+# the blocked message to the model that had just refused it. Blocked again 7
+# seconds later, and the run still logged success.
+_steps_now = gui._parse_recovery_steps(gui.DEFAULT_FABLE_STEPS)
+_targets = [gui._model_step_target(a) for k, a in _steps_now if k == "send"]
+_targets = [t for t in _targets if t]
+check("AA1 the default switches away from the target, not just back to it",
+      len(set(t.lower() for t in _targets)) >= 2)
+check("AA2 and still ends on the target",
+      gui._last_model_step(_steps_now) == "fable")
+
+# A /model step against the model already showing is skipped: typed into a
+# running turn it queues, and the switch dialog surfaces minutes later with
+# nobody left to confirm it.
+def _drive(text, steps, ticks=4):
+    """Latch the notice and run the script out. The first tick only latches;
+    sends start on the next one."""
+    reset([(1, "claude")], {1: text})
+    wa = new_watcher(steps=steps)
+    for _ in range(ticks):
+        wa._tick()
+        advance(1)
+    return wa
+
+
+_drive(NOTICE + "\n" + _BAR_F, "/model fable\ncontinue")
+check("AA3 /model skipped when the bar already reads that model",
+      ["/model fable"] not in texts_sent())
+check("AA4 the run still advances past the skipped step",
+      texts_sent() == [["continue"]])
+
+_drive(NOTICE + "\n" + _BAR_O, "/model fable")
+check("AA5 /model IS sent when the bar reads a different model",
+      texts_sent() == [["/model fable"]])
+
+# An unreadable bar must not read as "already there" — acting is the safe
+# answer when we cannot tell where the session is.
+_drive(NOTICE + "\n4. Type something.\n5. Chat about this", "/model fable")
+check("AA6 an unreadable bar does not suppress the switch",
+      texts_sent() == [["/model fable"]])
+
+check("AA7 prefix match tolerates the bar's version and variant",
+      gui._model_matches("Opus 5 (1M context)", "opus") is True
+      and gui._model_matches("Fable 5", "fable") is True
+      and gui._model_matches("Opus 5", "fable") is False
+      and gui._model_matches(None, "opus") is False)
+
+# Ending on the right model is not the same as having cleared the block.
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
+w = new_watcher(steps="continue")
+LOGS = []
+w.log.connect(lambda k, m: LOGS.append((k, m)))
+w._tick()
+advance(1)
+w._tick()
+check("AA8 a run that left the notice standing is not reported as success",
+      any(k == "warn" and "NOT cleared" in m for k, m in LOGS)
+      and not any("Fable-recover done" in m for k, m in LOGS))
 
 
 # =============================================================================
