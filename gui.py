@@ -3874,10 +3874,11 @@ the recovery nothing</li>
 <code>/model</code> lands as a command instead of being queued (Claude Code
 queues anything typed mid-turn, and a queued switch never takes effect). Fires
 only while a turn is actually running; on an idle session it does nothing</li>
-<li><code>&lt;resume&gt;</code> — types the window's <b>After recovery</b>
-command (set per window in the list on this tab), or a plain
-<code>continue</code> when none is configured. A recovery ends with the target
-model idle at a prompt; give it real work so that capacity isn't wasted</li>
+<li><code>&lt;resume&gt;</code> — a plain <code>continue</code> while the
+original work is still worth retrying; once repeated blocks have forced the
+patient attempt (the fallback finished the blocked work), it types the
+window's <b>After recovery</b> command instead — at that point a retry would
+only be refused again, so fresh work is the only useful thing left</li>
 </ul>
 
 <h3>Starting over</h3>
@@ -3990,8 +3991,9 @@ class AdvancedDialog(QDialog):
             "seconds of RUNNING time (outages don't count) · <esc> = interrupt "
             "a running turn so the next /model lands as a command instead of "
             "being queued (does nothing when the session is idle) · <resume> "
-            "= type the window's \"After recovery\" command from the list "
-            "below, or 'continue' when none is set")
+            "= 'continue' while the original work is still worth retrying; "
+            "only the attempt after repeated failures types the window's "
+            "\"After recovery\" command from the list below")
         steps_hint.setWordWrap(True)
         root.addWidget(steps_hint)
         _steps_src = cfg.get("steps")
@@ -4011,10 +4013,11 @@ class AdvancedDialog(QDialog):
         root.addWidget(self.all_windows_chk)
 
         after_hint = QLabel(
-            "…or only these windows. The <resume> step types the window's "
-            "\"after recovery\" command once it is back on the target model — "
-            "leave it empty for a plain 'continue'. Put real work there so "
-            "the recovered session doesn't sit idle.")
+            "…or only these windows. The \"After recovery\" command is typed "
+            "by <resume> — but only once repeated blocks have forced the "
+            "patient attempt, after the fallback finished the blocked work. "
+            "Earlier attempts keep retrying with a plain 'continue'. Put "
+            "real follow-up work here so the session doesn't sit idle.")
         after_hint.setWordWrap(True)
         root.addWidget(after_hint)
         self.win_list = QTableWidget()
