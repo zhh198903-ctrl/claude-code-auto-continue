@@ -166,7 +166,27 @@ def title_key(title: str) -> str:
 # It closes with 'continue' on the target model. The switch back can land in
 # the middle of a fallback turn (deliberately — see FABLE_IMPATIENT_RUNS), so
 # without it the session would sit at the prompt holding half-finished work.
+# The closing step is <resume>, not a literal 'continue': it types the
+# per-window resume command configured in Advanced (falling back to
+# 'continue' when none is set). A recovery ends with the target model idle
+# at a prompt — what it should do next is per-session knowledge only the
+# user has, and a bare 'continue' leaves that capacity generic.
 DEFAULT_FABLE_STEPS = (
+    "<confirm>\n"
+    "<esc>\n"
+    "/model opus\n"
+    "<confirm>\n"
+    "continue\n"
+    "<wait>\n"
+    "<esc>\n"
+    "/model fable\n"
+    "<confirm>\n"
+    "<resume>"
+)
+
+# The v2.0.4 default, which closed with a literal 'continue' — right action,
+# not configurable per window.
+LEGACY_FABLE_STEPS_V204 = (
     "<confirm>\n"
     "<esc>\n"
     "/model opus\n"
@@ -434,6 +454,8 @@ def _parse_recovery_steps(text: str) -> list:
             steps.append(("esc", None))
         elif low == "<enter>":
             steps.append(("enter", None))
+        elif low == "<resume>":
+            steps.append(("resume", None))
         elif low == "<wait>":
             steps.append(("wait", None))
         elif low.startswith("<wait:") and low.endswith(">"):
@@ -565,6 +587,9 @@ class Watcher(QObject):
         # too, where there is no tick to remove.
         self._fable_optout: set[str] = set()
         self._fable_all_windows = True   # eligible on every watched window
+        # title_key -> command the <resume> step types after the switch back
+        # (missing key => plain 'continue').
+        self._fable_resume: dict[str, str] = {}
 
         # User overrides for the detection regexes (Advanced → Triggers).
         # Only keys the user actually changed (and that validated) live here;
@@ -667,6 +692,14 @@ class Watcher(QObject):
         if not isinstance(outs, (list, tuple, set)):
             outs = []
         new_out = {title_key(str(t)) for t in outs if title_key(str(t))}
+        # Per-window resume commands for the <resume> step. Keyed by
+        # title_key like every other per-window setting; anything that isn't
+        # a str->str dict collapses to empty (=> plain 'continue').
+        res = cfg.get("resume")
+        self._fable_resume = (
+            {title_key(str(k)): str(v).strip()
+             for k, v in res.items() if title_key(str(k)) and str(v).strip()}
+            if isinstance(res, dict) else {})
         # Widening the scope is the user asking for enforcement again. That
         # includes ticking a window AND flipping on "all windows" — the old
         # set-difference missed the latter, leaving a window permanently
@@ -1044,6 +1077,15 @@ class Watcher(QObject):
                             st.status = ST_FABLE
                             continue
                         kind, arg = steps[st.fable_step]
+                        if kind == "resume":
+                            # Per-window resume command, falling back to a
+                            # plain 'continue'. Resolved here and then run
+                            # through the ordinary send machinery, so a
+                            # resume configured as '/model …' still gets the
+                            # already-there skip and the busy hold.
+                            kind = "send"
+                            arg = (self._fable_resume.get(title_key(title))
+                                   or "continue")
 
                         # <wait> does NOT own the window: it lets the OUTER
                         # continue / limit logic keep the fallback model unstuck
@@ -2219,6 +2261,7 @@ class MainWindow(QMainWindow):
         self._fable_cfg: dict = {
             "enabled": False, "all_windows": True, "delay": 180,
             "steps": DEFAULT_FABLE_STEPS, "windows": [], "optout": [],
+            "resume": {},
         }
         # User regex overrides, keyed by TRIGGER_SPECS key. Only patterns the
         # user actually changed are stored, so a future build's improved
@@ -2879,7 +2922,7 @@ class MainWindow(QMainWindow):
         self._fable_cfg = {
             "enabled": False, "all_windows": True,
             "delay": 180, "steps": DEFAULT_FABLE_STEPS,
-            "windows": [], "optout": [],
+            "windows": [], "optout": [], "resume": {},
         }
         self._pending_optouts.clear()
 
@@ -3058,6 +3101,10 @@ class MainWindow(QMainWindow):
                 loaded_f = json.loads(raw_f) if raw_f else {}
                 if isinstance(loaded_f, dict):
                     self._fable_cfg.update(loaded_f)
+                    # A hand-edited store can hold anything; a non-dict here
+                    # must collapse rather than reach the worker or dialog.
+                    if not isinstance(self._fable_cfg.get("resume"), dict):
+                        self._fable_cfg["resume"] = {}
                     # Saved settings win over the built-in default, so a user
                     # who never customised the script would stay on the
                     # v1.0.16 one — which types /model into the open picker
@@ -3069,6 +3116,7 @@ class MainWindow(QMainWindow):
                         LEGACY_FABLE_STEPS_V201: "v2.0.1",
                         LEGACY_FABLE_STEPS_V201_NOCONT: "v2.0.1a",
                         LEGACY_FABLE_STEPS_V202: "v2.0.2",
+                        LEGACY_FABLE_STEPS_V204: "v2.0.4",
                     }
                     if _old in _legacy:
                         self._fable_cfg["steps"] = DEFAULT_FABLE_STEPS
@@ -3132,6 +3180,9 @@ class MainWindow(QMainWindow):
                 "v2.0.2": ("it typed /model into a busy session, where Claude "
                            "Code queues it and the switch never takes effect; "
                            "the new one presses ESC first"),
+                "v2.0.4": ("its closing 'continue' is now <resume>, which "
+                           "types the per-window command configured in "
+                           "Advanced — or plain 'continue' when none is set"),
             }.get(self._migrated_fable_steps,
                   "it no longer matches how Claude Code behaves")
             self._append_log(
@@ -3677,6 +3728,10 @@ the recovery nothing</li>
 <code>/model</code> lands as a command instead of being queued (Claude Code
 queues anything typed mid-turn, and a queued switch never takes effect). Fires
 only while a turn is actually running; on an idle session it does nothing</li>
+<li><code>&lt;resume&gt;</code> — types the window's <b>After recovery</b>
+command (set per window in the list on this tab), or a plain
+<code>continue</code> when none is configured. A recovery ends with the target
+model idle at a prompt; give it real work so that capacity isn't wasted</li>
 </ul>
 
 <h3>Starting over</h3>
@@ -3726,6 +3781,8 @@ class AdvancedDialog(QDialog):
         self.setWindowTitle("Advanced")
         self.resize(660, 640)
         self._orig_windows = list(cfg.get("windows", []))
+        _res = cfg.get("resume")
+        self._orig_resume = dict(_res) if isinstance(_res, dict) else {}
         outer = QVBoxLayout(self)
         tabs = QTabWidget()
         outer.addWidget(tabs, 1)
@@ -3786,7 +3843,9 @@ class AdvancedDialog(QDialog):
             "nothing if none) · <enter> = a bare Enter · <wait> = wait Delay "
             "seconds of RUNNING time (outages don't count) · <esc> = interrupt "
             "a running turn so the next /model lands as a command instead of "
-            "being queued (does nothing when the session is idle)")
+            "being queued (does nothing when the session is idle) · <resume> "
+            "= type the window's \"After recovery\" command from the list "
+            "below, or 'continue' when none is set")
         steps_hint.setWordWrap(True)
         root.addWidget(steps_hint)
         _steps_src = cfg.get("steps")
@@ -3805,25 +3864,58 @@ class AdvancedDialog(QDialog):
             "Off: restrict to the specific windows ticked below.")
         root.addWidget(self.all_windows_chk)
 
-        root.addWidget(QLabel("…or only these windows:"))
-        self.win_list = QListWidget()
+        after_hint = QLabel(
+            "…or only these windows. The <resume> step types the window's "
+            "\"after recovery\" command once it is back on the target model — "
+            "leave it empty for a plain 'continue'. Put real work there so "
+            "the recovered session doesn't sit idle.")
+        after_hint.setWordWrap(True)
+        root.addWidget(after_hint)
+        self.win_list = QTableWidget()
+        self.win_list.setColumnCount(2)
+        self.win_list.setHorizontalHeaderLabels(["Window", "After recovery"])
+        self.win_list.horizontalHeader().setStretchLastSection(True)
+        self.win_list.verticalHeader().setVisible(False)
+        self.win_list.setSelectionMode(
+            QTableWidget.SelectionMode.NoSelection)
         opted = {title_key(str(t)) for t in cfg.get("windows", [])
                  if title_key(str(t))}
+        resume_cfg = cfg.get("resume")
+        if not isinstance(resume_cfg, dict):
+            resume_cfg = {}
         rows = dict(windows)                       # title_key -> display title
         for k in opted:
             rows.setdefault(k, k + "   (not currently open)")
+        # A stored command keeps its row visible even if the window is
+        # neither open nor ticked, so it can still be edited or cleared.
+        for k in resume_cfg:
+            kk = title_key(str(k))
+            if kk:
+                rows.setdefault(kk, kk + "   (not currently open)")
         self._has_rows = bool(rows)
         if not rows:
-            self.win_list.addItem(QListWidgetItem(
-                "(no Claude windows detected yet)"))
+            self.win_list.setRowCount(1)
+            ph = QTableWidgetItem("(no Claude windows detected yet)")
+            ph.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.win_list.setItem(0, 0, ph)
         else:
-            for k, disp in sorted(rows.items(), key=lambda kv: kv[1].lower()):
-                it = QListWidgetItem(disp)
-                it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            ordered = sorted(rows.items(), key=lambda kv: kv[1].lower())
+            self.win_list.setRowCount(len(ordered))
+            for r, (k, disp) in enumerate(ordered):
+                it = QTableWidgetItem(disp)
+                it.setFlags(Qt.ItemFlag.ItemIsEnabled
+                            | Qt.ItemFlag.ItemIsUserCheckable)
                 it.setCheckState(Qt.CheckState.Checked if k in opted
                                  else Qt.CheckState.Unchecked)
                 it.setData(Qt.ItemDataRole.UserRole, k)
-                self.win_list.addItem(it)
+                self.win_list.setItem(r, 0, it)
+                cmd = QTableWidgetItem(
+                    str(resume_cfg.get(k, "") or ""))
+                cmd.setToolTip(
+                    "Typed by the <resume> step after the switch back. "
+                    "Empty = 'continue'.")
+                self.win_list.setItem(r, 1, cmd)
+            self.win_list.resizeColumnToContents(0)
         root.addWidget(self.win_list, 1)
 
         def _sync_list(_=None):
@@ -4097,21 +4189,33 @@ class AdvancedDialog(QDialog):
     def result_config(self) -> dict:
         if not self.win_list.isEnabled():
             wins = list(self._orig_windows)        # nothing to edit; preserve
+            resume = dict(self._orig_resume)
         else:
             wins = []
-            for i in range(self.win_list.count()):
-                it = self.win_list.item(i)
+            resume = {}
+            for i in range(self.win_list.rowCount()):
+                it = self.win_list.item(i, 0)
+                if it is None:
+                    continue
+                k = it.data(Qt.ItemDataRole.UserRole)
+                if not k:
+                    continue
                 if (it.flags() & Qt.ItemFlag.ItemIsUserCheckable
                         and it.checkState() == Qt.CheckState.Checked):
-                    k = it.data(Qt.ItemDataRole.UserRole)
-                    if k:
-                        wins.append(k)
+                    wins.append(k)
+                # The command survives an untick — clearing the TEXT is how
+                # you delete it, so tick/untick doesn't silently eat it.
+                cmd_it = self.win_list.item(i, 1)
+                cmd = (cmd_it.text().strip() if cmd_it is not None else "")
+                if cmd:
+                    resume[k] = cmd
         return {
             "enabled": self.enable_chk.isChecked(),
             "all_windows": self.all_windows_chk.isChecked(),
             "delay": self.delay_spin.value(),
             "steps": self.steps_edit.toPlainText(),
             "windows": wins,
+            "resume": resume,
         }
 
 

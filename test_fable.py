@@ -1239,17 +1239,20 @@ check("AA12e a correction after a long quiet gap starts a new streak",
 
 # The script must resume the work after the switch back. Switching mid-turn
 # leaves the session at the prompt holding half-done work; without a closing
-# 'continue' it would just sit there.
+# resume it would just sit there. <resume> rather than a literal 'continue',
+# so each window can be given its own follow-up command.
 check("AA12c the default script ends by resuming on the target model",
       gui._parse_recovery_steps(gui.DEFAULT_FABLE_STEPS)[-1]
-      == ("send", "continue"))
+      == ("resume", None))
 
 # Every shipped script that gets migrated needs its own notice: they broke for
 # different reasons AND their replacements fix different things. A shared tail
 # once put the previous version's fix on the current version's message.
 _legacies = {"v1.0.16": gui.LEGACY_FABLE_STEPS_V1016,
              "v2.0.1": gui.LEGACY_FABLE_STEPS_V201,
-             "v2.0.1a": gui.LEGACY_FABLE_STEPS_V201_NOCONT}
+             "v2.0.1a": gui.LEGACY_FABLE_STEPS_V201_NOCONT,
+             "v2.0.2": gui.LEGACY_FABLE_STEPS_V202,
+             "v2.0.4": gui.LEGACY_FABLE_STEPS_V204}
 # Escalation. Cutting the fallback off mid-turn can leave the conversation
 # still sitting on whatever was flagged, so the target refuses the moment it
 # takes over — measured live, 6 seconds after the switch back. Each retry for
@@ -1522,6 +1525,89 @@ w._tick()
 check("AA8 a run that left the notice standing is not reported as success",
       any(k == "warn" and "NOT cleared" in m for k, m in LOGS)
       and not any("Fable-recover done" in m for k, m in LOGS))
+
+
+# =============================================================================
+print("---- AB: <resume> types the per-window command, or continue ----")
+# A recovery ends with the target model idle at a prompt. What it should do
+# next is per-session knowledge only the user has — a hard-coded 'continue'
+# wasted that capacity on sessions with a configured follow-up.
+
+
+def _resume_watcher(resume_map):
+    w = gui.Watcher()
+    w._running = True
+    w.set_fable_config({
+        "enabled": True, "all_windows": False, "delay": 1,
+        "steps": "<resume>", "windows": ["claude"], "resume": resume_map,
+    })
+    return w
+
+
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
+w = _resume_watcher({"claude": "run the full regression suite"})
+for _ in range(3):
+    w._tick()
+    advance(1)
+check("AB1 a configured window gets its own command",
+      texts_sent() == [["run the full regression suite"]])
+
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
+w = _resume_watcher({})
+for _ in range(3):
+    w._tick()
+    advance(1)
+check("AB2 an unconfigured window falls back to continue",
+      texts_sent() == [["continue"]])
+
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
+w = _resume_watcher({"other-window": "irrelevant"})
+for _ in range(3):
+    w._tick()
+    advance(1)
+check("AB3 another window's command does not leak over",
+      texts_sent() == [["continue"]])
+
+# Garbage in the store must collapse to the default, never raise — this runs
+# on the worker thread, where an exception kills the whole watch loop.
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
+w = _resume_watcher("not-a-dict")
+for _ in range(3):
+    w._tick()
+    advance(1)
+check("AB4 a corrupt resume store degrades to continue",
+      texts_sent() == [["continue"]])
+
+# The stored v2.0.4 script migrates to the <resume> default; the semantics
+# for an unconfigured window are identical, so nobody's behaviour changes
+# out from under them.
+check("AB5 the v2.0.4 script is in the legacy set",
+      gui.LEGACY_FABLE_STEPS_V204 in _legacies.values())
+
+# The dialog round-trips the commands: what was typed comes back in the
+# config, an emptied cell deletes, and commands survive an untick.
+_dlg = gui.AdvancedDialog(
+    None,
+    {"enabled": True, "windows": ["alpha"], "steps": "x",
+     "resume": {"alpha": "keep going", "ghost": "old command"}},
+    {"alpha": "✳ alpha", "beta": "⠂ beta"},
+    {},
+)
+from PyQt6.QtCore import Qt as _Qt                        # noqa: E402
+_dlg.all_windows_chk.setChecked(False)
+_rows = {_dlg.win_list.item(r, 0).data(_Qt.ItemDataRole.UserRole): r
+         for r in range(_dlg.win_list.rowCount())}
+check("AB6 a command-only window still gets a row", "ghost" in _rows)
+_dlg.win_list.item(_rows["beta"], 1).setText("verify the nightly build")
+_dlg.win_list.item(_rows["ghost"], 1).setText("")          # cleared = deleted
+_cfg = _dlg.result_config()
+check("AB7 typed commands round-trip",
+      _cfg["resume"].get("beta") == "verify the nightly build"
+      and _cfg["resume"].get("alpha") == "keep going")
+check("AB8 a cleared cell deletes the command", "ghost" not in _cfg["resume"])
+check("AB9 an unticked window keeps its command",
+      "beta" not in _cfg["windows"] and "beta" in _cfg["resume"])
+_dlg.deleteLater()
 
 
 # =============================================================================
