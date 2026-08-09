@@ -48,7 +48,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.0.4"
 
 
 def _force_utf8_console() -> None:
