@@ -3981,139 +3981,257 @@ HELP_HTML = """
 <h2>Auto-Continue v{version}</h2>
 <p>A watchdog for Claude Code running in Windows Terminal. It reads each
 window's scrollback, notices when a session has stopped for a reason you can
-fix by typing something, waits for the right moment, and types it for you.</p>
+fix by typing something, waits for the right moment, and types it for you —
+so a session that stalls at 2am is still working when you come back.</p>
+<p>It never invents work. Every keystroke it sends is either something you
+configured or the single word <code>continue</code>, and it only sends it
+when the screen says the session is stuck.</p>
 
 <h3>Getting started</h3>
 <ol>
 <li>Leave your Claude Code sessions running in Windows Terminal. Each
-<b>window</b> is watched separately (background tabs are invisible to Windows
-Terminal's accessibility layer, so run parallel sessions in separate windows).</li>
+<b>window</b> is watched separately. Background <i>tabs</i> are invisible to
+Windows Terminal's accessibility layer, so a window with several tabs is
+marked <b>&#9888; N tabs</b> and only its active tab is watched — drag tabs
+out into their own windows for full coverage.</li>
 <li>Press <b>Start</b>. The dot turns green and the table fills with every
 terminal window found.</li>
 <li>That's it. Leave it running. Nothing is typed until a session actually
 needs it.</li>
 </ol>
 <p>Not sure yet? Tick <b>Dry-run</b> first: everything is detected, scheduled
-and logged, but no keystroke is ever sent.</p>
+and logged, but no keystroke is ever sent. The log then shows exactly what
+would have happened, prefixed <code>[dry-run]</code>.</p>
 
 <h3>What it reacts to</h3>
 <ul>
-<li><b>The 5-hour usage limit.</b> Reads the reset time from the banner, waits
-until it passes (plus the buffer), then types <code>continue</code>. If the
-newer "What do you want to do?" chooser appears instead, it confirms
-<i>Stop and wait</i> so the banner shows up, then follows the normal flow.</li>
-<li><b>Network stalls.</b> Retry-exhausted banners and bare API connection
-errors get a <code>continue</code> every retry interval until the connection
-comes back — but only while the session is actually stuck. Once it is
-streaming again the banner still on screen is just scrollback, and poking it
-would only queue prompts that all land at once.</li>
-<li><b>Truncated responses.</b> A reply cut off mid-stream is resumed.</li>
-<li><b>Dead sessions.</b> An expired login cannot be fixed by typing, so it is
-only reported — never poked at.</li>
+<li><b>The 5-hour usage limit.</b> Reads the reset time from the banner,
+waits until it passes (plus the <b>Buffer</b>, 60s by default, because the
+limit often clears a little after the stated minute), then types
+<code>continue</code>. If the newer <i>"What do you want to do?"</i> chooser
+appears instead of the banner, it confirms <i>Stop and wait for limit to
+reset</i> with a bare Enter, which makes the banner appear, and the normal
+flow takes over from there.</li>
+<li><b>Network stalls.</b> Retry-exhausted banners (<i>attempt N/N</i>) and
+bare API connection errors get one <code>continue</code> every <b>Retry
+interval</b> (10 minutes by default) until the connection comes back.
+Crucially, only while the session is <i>actually</i> stuck: once it is
+streaming again, the error still on screen is just scrollback, and poking it
+would queue prompts that all fire at once when the turn ends. HTTP 500/529
+errors are left alone — Claude Code retries those itself.</li>
+<li><b>Truncated responses.</b> A reply cut off mid-stream is resumed with
+<code>continue</code>.</li>
+<li><b>Dead sessions.</b> An expired login cannot be fixed by typing, so it
+is reported once in the log and never poked at.</li>
+<li><b>Safeguard blocks</b> — see <b>Model recovery</b> below. Off by
+default.</li>
 </ul>
+<p>Everything above is matched with regexes you can edit
+(<b>Advanced &#8594; Triggers</b>), because Anthropic re-words these banners
+without notice.</p>
 
 <h3>The table</h3>
+<p>One row per terminal window. The <b>Status</b> column is the quickest way
+to see what the tool thinks is going on:</p>
+<ul>
+<li><b>Idle</b> — watched, nothing wrong.</li>
+<li><b>Waiting</b> — a limit was detected; the countdown shows how long
+until it fires.</li>
+<li><b>Sending</b> / <b>Sent</b> — typing right now / just typed.</li>
+<li><b>Cooldown</b> — sent recently; detection is suppressed for 15 minutes
+so the message still in scrollback can't trigger a second fire.</li>
+<li><b>Fable-recover</b> — a model-recovery script is running on that
+window.</li>
+<li><b>Limit prompt</b> — confirming the limit chooser.</li>
+<li><b>Excluded</b> — you told it to ignore this window.</li>
+</ul>
+<p>Per-row controls:</p>
 <ul>
 <li><b>Model</b> and <b>Effort</b> — optional. When set, the fire sequence
-becomes <code>/model …</code> → <code>/effort …</code> → <code>continue</code>.
-The model box is editable: type a name the list doesn't have yet and it is
-passed through verbatim, so a newly released model works right away.</li>
-<li><b>After finish…</b> — a prompt typed automatically when that session
-finishes a run and sits idle for a while, so the window keeps working instead
-of waiting for you. The dialog's <b>Loops</b> field caps how many times the
-prompt is typed (default 1) — typing the same follow-up after every run is an
-infinite loop unless you asked for it. Set it to <b>unlimited</b> (0) for the
-old always-re-arm behaviour: the session keeps going until you clear the
-prompt. Editing the prompt text resets the count (a new prompt is a new
-task); the count also starts fresh when the app restarts. The button shows
-<b>After finish ✓</b> once a prompt is set, and hovering previews it;
-clearing the text turns it off.
-<br>Four idle-looking states never count as "finished": a session never seen
-running (a fresh shell at a prompt is not a completed run), a standing
-safeguard notice (blocked, not finished), the post-send cooldown, and a
-recovery in flight.</li>
-<li><b>Now</b> fires immediately · <b>Skip</b> cancels a pending continue ·
-<b>Exclude</b> stops watching that window for good · <b>Clear cooldown</b>
-lifts the 15-minute post-send suppression.</li>
+becomes <code>/model &#8230;</code> &#8594; <code>/effort &#8230;</code>
+&#8594; <code>continue</code> instead of a bare <code>continue</code>, so a
+session resumes on the model and effort you want rather than whatever it was
+left on. The model box is <i>editable</i>: type a name the list doesn't have
+yet and it is passed through verbatim, so a newly released model works
+without waiting for a new build. <code>(none)</code> means "leave the session
+on whatever it is using".</li>
+<li><b>After finish&#8230;</b> — a prompt typed automatically when that
+session finishes a run and sits idle, so the window keeps producing instead
+of waiting for you. Details below.</li>
+<li><b>Now</b> fires immediately (bypasses the countdown, still respects the
+row's model/effort) &#183; <b>Skip</b> cancels a pending continue &#183;
+<b>Exclude</b> stops watching that window for good &#183; <b>Clear
+cooldown</b> lifts the 15-minute suppression so the next tick can
+re-detect.</li>
 </ul>
 
-<h3>Advanced…</h3>
-<p><b>Triggers</b> — every detection pattern, editable. Anthropic re-words
-these banners without warning, and a rename silently stops detection. Paste
-the terminal text into the test box and it tells you what matched, which
-capture groups it produced, and whether the match sits too far up the
-scrollback to count. Invalid patterns are refused rather than silently
-ignored; <b>Reset all</b> restores the built-ins.</p>
-
-<p><b>Model recovery</b> (opt-in, off by default) — when a model's safeguards
-block a turn, the session stalls on a model that refuses to work. The block
-judges the <i>whole conversation</i>, not the last message: every request
-re-sends the full history, so when the history is what trips the filter,
-retrying the same message can never pass. The one thing that clears such a
-block is <code>/compact</code> — it replaces the history with a summary, and
-the flagged content is gone.</p>
-<p>So a recovery is a single cycle, not a ladder of retries: switch to a
-fallback model and <code>continue</code>, let it <i>finish</i> the remaining
-work (nothing interrupts its turn), <code>/compact</code>, and only then
-switch back to the target and type that window's <b>After recovery</b>
-prompt — fresh work on a clean context. Whether a run succeeded is judged a
-beat after it ends, once the screen shows whether the closing step was
-accepted or refused.</p>
-<p><b>Loops</b> (third column of the window list, default 1) caps how many
-recoveries per block episode may type the prompt. A block right after a
-recovery means the prompt <i>itself</i> trips the filter, and retyping it
-would loop forever — so one past the cap, a final run still lets the
-fallback finish and compacts, but <b>parks</b> the window idle on the
-target with nothing typed and asks you to edit the prompt by hand.</p>
-<p>It also <b>keeps the window on the target</b>: if the session is left on the
-fallback with no notice showing, it steers back — after a grace period,
-spaced out and capped so it never fights you. The target is simply the last
-<code>/model</code> step in your script.</p>
-<p>If <b>you</b> switch a window's model by hand, that is taken as your
-decision: the window is unticked and left alone from then on. Tick it again
-in Advanced to resume enforcement.</p>
-<p>Step script, one per line:</p>
+<h4>After finish — give a window its next task</h4>
+<p>Click <b>After finish&#8230;</b> on a row and type what that session
+should do when it runs out of work. When the session finishes a run and stays
+idle for 90 seconds, the prompt is typed for you.</p>
+<p><b>Loops</b> (in the same dialog, default <b>1</b>) is how many times the
+prompt may be typed. It counts <i>completed runs</i>, not keystrokes: after
+each firing the window must be seen running again, and then finish again,
+before anything else is typed — the prompt is never repeated into an idle
+session. Set it to <b>unlimited</b> to keep re-arming after every completed
+run until you clear the prompt. Editing the prompt text resets the count (a
+new prompt is a new task), and the count starts fresh when the app
+restarts.</p>
+<p>The button shows <b>After finish &#10003;</b> once a prompt is set and
+hovering previews it; clearing the text turns the feature off for that
+window.</p>
+<p>Four idle-looking states deliberately never count as "finished":</p>
 <ul>
-<li>plain text — typed, then Enter</li>
+<li>a session never seen running while watched — a fresh shell sitting at a
+prompt is not a completed run;</li>
+<li>a standing safeguard notice — that session is <i>blocked</i>, not
+finished;</li>
+<li>the post-send cooldown — the fire's own follow-up is still in
+flight;</li>
+<li>a model recovery in progress — that script owns the window.</li>
+</ul>
+
+<h3>Advanced&#8230; &#8594; Triggers</h3>
+<p>Every detection pattern, editable and case-insensitive. Anthropic re-words
+these banners without warning and a rename silently stops detection — this is
+how you fix that yourself the same day instead of waiting for a new
+build.</p>
+<p>Each row names what it detects and has <b>Reset this</b> / <b>Reset
+all</b>. The <b>test box</b> is the useful part: paste real terminal text and
+it tells you whether the pattern matched, which capture groups it produced
+(the limit pattern's groups are the reset time, so they must survive an
+edit), and whether the match sits too far up the scrollback to count at
+runtime — a stale banner thousands of characters back is deliberately
+ignored.</p>
+<p>Edits are validated on OK: the pattern must compile, must keep the capture
+groups the parser indexes, and must not match empty text (which would fire on
+every window). Only patterns you actually changed are stored, so future
+builds' improved defaults still win for everything you left alone.</p>
+
+<h3>Advanced&#8230; &#8594; Model recovery</h3>
+<p><b>Opt-in and off by default</b>, because it is the one feature that types
+more than <code>continue</code> and changes which model your session runs
+on.</p>
+<p><b>The problem.</b> When a model's safeguards block a turn, the session
+stalls on a model that refuses to work. The block judges the <i>whole
+conversation</i>, not the last message: every request re-sends the full
+history, so once the history itself is what trips the filter, retrying the
+same message can never pass — measured live, four recoveries in one evening
+and every switch back was blocked again within seconds. The one thing that
+clears such a block is <code>/compact</code>: it replaces the history with a
+summary, and the flagged content is gone.</p>
+<p><b>So a recovery is one cycle, not a ladder of retries:</b></p>
+<ol>
+<li>switch to the fallback model and <code>continue</code> — it
+<i>finishes</i> the work that was blocked;</li>
+<li>wait for that turn to actually end (nothing interrupts it — an early
+switch back would only be refused again);</li>
+<li><code>/compact</code>;</li>
+<li>switch back to the target model and type that window's <b>After
+recovery</b> prompt — fresh work on a clean context.</li>
+</ol>
+<p>Whether the run succeeded is judged a beat <i>after</i> it ends, once the
+screen has caught up: a refusal ends the new turn within seconds, real work
+keeps it running. The log then says <i>done (on Fable 5)</i>, or warns that
+the session ended on the wrong model or that the block still stands.</p>
+<p><b>Loops</b> (third column of the window list, default <b>1</b>) caps how
+many recoveries per block episode may type the resume prompt. It counts
+<i>whole cycles</i>: a new cycle only starts when a genuinely new block
+appears (each one carries its own request id), never back-to-back. A block
+right after a successful recovery means the prompt <i>itself</i> trips the
+filter — so one past the cap, a final run still lets the fallback finish and
+still compacts, but <b>parks</b>: the window ends up idle on the target model
+with nothing typed, and the log asks you to edit the prompt by hand. A
+recovery that works costs nothing: once the notice has been gone for two
+minutes the episode is over and the budget resets.</p>
+<p><b>Scope.</b> "Apply to all watched windows" (the default) means recovery
+is <i>eligible</i> everywhere, but only the window actually showing a
+safeguard notice is ever touched. Untick it to restrict recovery to the
+windows you list.</p>
+<p><b>Keeping the window on target.</b> A window you tick explicitly is also
+steered back if it ends up on the fallback model with no notice showing — a
+switch-back that never landed, or Claude Code switching by itself. That
+happens after a grace period, spaced out, and capped, so it can never fight
+you. The target is simply the last <code>/model</code> step in your script; a
+script without one enforces nothing. This is why ticking a window is a bigger
+commitment than leaving it in all-windows mode.</p>
+<p>If <b>you</b> switch a window's model by hand, that is taken as your
+decision: the window is unticked automatically and left alone from then on.
+Tick it again in Advanced to resume enforcement.</p>
+<p><b>Step script</b>, one step per line — every line is editable, and the
+shipped default is only a starting point:</p>
+<ul>
+<li>plain text — typed, then Enter. A <code>/model X</code> line is skipped
+when the status bar already reads X, and always waits for a running turn to
+end first (a <code>/model</code> typed mid-turn is only queued and never
+takes effect).</li>
 <li><code>&lt;confirm&gt;</code> — accept whichever confirmable dialog is
-showing; does nothing if there is none</li>
+showing (the "Switch model?" prompt, or the safeguard chooser). Presses Enter
+exactly once per dialog, and does nothing at all when there is none.</li>
 <li><code>&lt;idle&gt;</code> — wait until the current turn ends and the
-session stays quiet for a while; a network outage does not count as
-finished</li>
-<li><code>&lt;wait&gt;</code> / <code>&lt;wait:N&gt;</code> — pause. Counts
-only time the session is actually <i>running</i>, so a network outage costs
-the recovery nothing</li>
-<li><code>&lt;esc&gt;</code> — interrupts a running turn so the next
-<code>/model</code> lands as a command instead of being queued. Not in the
-default script — the default never cuts a turn short; for custom
-scripts</li>
+session stays quiet for a while. No fixed duration: it takes as long as the
+work takes. A network outage does not count as finished.</li>
+<li><code>&lt;wait&gt;</code> / <code>&lt;wait:N&gt;</code> — pause for N
+seconds (bare <code>&lt;wait&gt;</code> uses the <b>Wait</b> value on this
+tab). Counts only time the session is actually <i>running</i>, so an outage
+costs the recovery nothing. The default script uses <code>&lt;idle&gt;</code>
+instead; this is for scripts that want a fixed budget.</li>
+<li><code>&lt;esc&gt;</code> — interrupts a running turn so the next step
+lands as a command instead of being queued. <b>Not</b> in the default script:
+the default never cuts a turn short. It is skipped on an idle session and
+never fires onto an open dialog.</li>
+<li><code>&lt;enter&gt;</code> — a bare Enter.</li>
 <li><code>&lt;resume&gt;</code> — types the window's <b>After recovery</b>
-command (second column of the window list on this tab), or a plain
-<code>continue</code> when none is set — after the compact, that picks the
-summary back up. Types nothing on the parking run</li>
+command (second column of the window list), or a plain <code>continue</code>
+when none is set, which picks the compacted summary back up. Types nothing on
+the parking run.</li>
+</ul>
+<p>Every step is bounded, so a dialog that never appears, a window that will
+not come to the foreground, or a turn that never ends can each be waited out
+and moved past rather than pinning the window forever.</p>
+
+<h3>Timings</h3>
+<ul>
+<li><b>Poll interval</b> (60s) — how often every window is read. Reading a
+window costs real time, and nothing here needs sub-minute latency.</li>
+<li><b>Buffer</b> (60s) — extra margin past the stated reset time.</li>
+<li><b>Retry interval</b> (600s) — the gap between <code>continue</code>s
+while a session is network-stuck. Short values just bury the log: an outage
+here once ran 90 minutes.</li>
+<li><b>Wait</b> (Model recovery tab, 180s) — the duration a
+<code>&lt;wait&gt;</code> step asks for. Unused by the default script.</li>
 </ul>
 
 <h3>Starting over</h3>
 <p><b>Reset</b> puts every setting back to how it ships — timings, the
-per-window model and effort overrides, exclusions, trigger patterns, and
-model recovery (off). It asks first and lists what it clears. Dry-run,
-keep-awake and the start-up options are left as they are.</p>
-<p>Everything else you change is remembered across restarts, so the app
-comes back exactly as you left it.</p>
+per-window model and effort overrides, After finish prompts, exclusions,
+trigger patterns, and model recovery (back to off). It asks first and lists
+what it clears. Dry-run, keep-awake and the start-up options are left as they
+are.</p>
+<p>Everything else you change is remembered across restarts, so the app comes
+back exactly as you left it.</p>
 
 <h3>Good to know</h3>
 <ul>
 <li>Before typing, the target window must actually reach the foreground. If
-Windows refuses — you're typing elsewhere — it retries later rather than
-typing into the wrong app.</li>
+Windows refuses — because you are typing somewhere else — the send is retried
+later rather than landing in the wrong app.</li>
 <li><b>Keep awake</b> stops Modern Standby from killing the watcher during a
 long unattended wait.</li>
+<li><b>Start on launch</b> (on by default) means protection resumes by
+itself, including after a self-update.</li>
+<li>Only one copy runs at a time; a second launch shows the existing window
+instead of double-typing into the same sessions.</li>
 <li>The minimize button hides to the tray; the X button quits.</li>
 <li>Everything in the log pane is also appended to
-<code>%LOCALAPPDATA%\\auto_continue\\activity.log</code> for morning-after
-postmortems.</li>
-<li>Settings persist per window <i>title</i>, so two windows with identical
-titles share one setting.</li>
+<code>%LOCALAPPDATA%\\auto_continue\\activity.log</code> (rotated at about
+1 MB) for morning-after postmortems.</li>
+<li>Settings are keyed by window <i>title</i>, so two windows with identical
+titles share one set of settings — worth knowing before ticking one of them
+for model recovery.</li>
+<li><b>Check updates</b> asks GitHub whether a newer release exists and can
+download, verify and swap the exe in place. Only the packaged exe updates
+itself; running from source just reports what is available.</li>
 </ul>
 
 <p><a href="https://github.com/zhh198903-ctrl/claude-code-auto-continue">Project page on GitHub</a></p>
