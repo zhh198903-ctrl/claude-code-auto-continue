@@ -505,6 +505,8 @@ PERMISSION = ("Do you want to proceed?\n" + _M + "1" ". Yes\n"
               "  2" ". Yes, and don" + chr(8217) + "t ask again\n"
               "  3" ". No, and tell Claude what to do differently")
 EMPTY_BOX = "\n>" + chr(0xa0) + "   "
+# A real chooser has NO input box — it replaces it. Verified live.
+NO_BOX = "\nEnter to select - Tab/Arrow keys to navigate - Esc to cancel"
 DRAFT_BOX = "\n>" + chr(0xa0) + "half a thought"
 
 set_now(T0)
@@ -566,6 +568,40 @@ check("H8 an ordinary chooser is left alone when its switch is off",
 check("H9 both switches default to on",
       new_watcher()._auto_choose is True
       and new_watcher()._auto_permission is True)
+
+# The shape a real chooser actually has: no input box at all. Every fixture
+# above prints one, which is what let a "no box means maybe a draft" rule
+# pass the suite while refusing to act on every real chooser.
+set_now(T0)
+reset([(26, "win")], {26: CHOOSER + NO_BOX})
+w = new_watcher()
+w._tick()
+check("H14 a chooser that replaced the input box is still answered",
+      SENT == [(26, [""])])
+SENT.clear()
+
+# The safeguard picker and the "Switch model?" confirmation are choosers
+# too, but confirming either CHANGES WHICH MODEL the session runs on. That
+# belongs to the recovery feature, which is opt-in for exactly that reason —
+# and answering out of band also puts a second Enter on a dialog the
+# recovery's own <confirm> step is about to answer.
+_SG2 = "safegu" "ards flagged"
+_SW2 = "Switch t" "o"
+_ED2 = "Edit promp" "t and retry"
+PICKER2 = (f"Session paused\n\nFable 5's {_SG2} this message.\n\n"
+           f"> " "1" f". {_SW2} Opus 5\n  2" f". {_ED2} with Fable 5")
+DIALOG2 = ("Switch model?\n> " "1" ". Yes, swi" "tch to Opus 5\n"
+           "  2" ". No, go b" "ack")
+
+for _name, _text in (("safeguard picker", PICKER2),
+                     ("switch-model dialog", DIALOG2)):
+    set_now(T0)
+    reset([(27, "win")], {27: _text + NO_BOX})
+    w = new_watcher()
+    w._tick()
+    w._tick()
+    check(f"H15 the {_name} is left to the recovery, not auto-answered",
+          not SENT)
 
 # A send is REFUSED when the window will not come to the foreground — which
 # is correct, since typing blind is how keys land in the wrong app. What was

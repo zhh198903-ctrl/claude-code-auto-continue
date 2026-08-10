@@ -956,20 +956,28 @@ def chooser_signature(text: str, pattern=None):
         m.group(0).encode("utf-8", "replace")).hexdigest()[:12]
 
 
-def composer_is_empty(text: str) -> bool:
-    """True if the user has nothing half-typed in the input box.
+def composer_has_draft(text: str) -> bool:
+    """True if the user has something half-typed in the input box.
 
     Every auto-answer path presses a bare Enter, and Enter with a draft in
-    the box SUBMITS the draft. An empty composer makes a false positive
-    harmless (Enter on an empty prompt does nothing) instead of destructive.
-    Unreadable buffer -> False, i.e. don't act, because "cannot tell" must
-    never mean "go ahead".
+    the box SUBMITS the draft. That is the whole risk being guarded against,
+    and it exists only when a composer is on screen AND has text in it.
+
+    An ABSENT composer is not a draft. Measured on a live session: while one
+    of Claude Code's choosers is open it replaces the input box entirely —
+    the screen ends with the "Enter to select / Tab to navigate / Esc to
+    cancel" hint and no composer line exists. Treating that as "might be a
+    draft" refused to act on every real chooser, i.e. on the only case the
+    feature is for, while stand-ins that printed a composer line kept the
+    tests green.
+
+    An unreadable buffer is still "no", because nothing about it is known.
     """
     if not text:
         return False
     for line in text.splitlines():
         if _COMPOSER_LINE_RE.match(line):
-            return not line[1:].strip()
+            return bool(line[1:].strip())
     return False
 
 

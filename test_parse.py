@@ -825,6 +825,34 @@ check_reset("ordinary prose is not mistaken for a chooser",
             ac.parse_chooser_prompt(
                 "I weighed > 1. this and 2. that, both fine.") is False)
 
+# Captured from a live session (2026-08-10). While one of Claude Code's
+# choosers is open it REPLACES the input box: there is no composer line at
+# all, just the navigation hint. An earlier version of the draft check read
+# that as "cannot tell, so don't act" and therefore refused on every real
+# chooser — the only case the feature exists for — while stand-ins that
+# printed a composer line kept every test green. Absence of an input box is
+# not a draft.
+_LIVE_CHOOSER = (
+    "\u80cc\u666f/\u4e3b\u9898\u505a\u6210\u4ec0\u4e48\u5f62\u5f0f\uff1f\n\n"
+    "> 1" ". \u51e0\u5957\u9884\u8bbe\u4e3b\u9898\uff08\u63a8\u8350\uff09\n"
+    "     \u6df1\u8272 / \u6d45\u8272 / \u62a4\u773c\u7eff\n"
+    "  2" ". \u9884\u8bbe\u4e3b\u9898 + \u80cc\u666f\u8272\u81ea\u5b9a\u4e49\n"
+    "     \u5728\u9884\u8bbe\u57fa\u7840\u4e0a\u518d\u7ed9\u4e00\u4e2a\u53d6\u8272\u5668\n"
+    "  3" ". \u5b8c\u5168\u81ea\u7531\u53d6\u8272\n"
+    "  4" ". Type something.\n"
+    "  5" ". Chat about this\n\n"
+    "Enter to select \u00b7 Tab/Arrow keys to navigate \u00b7 Esc to cancel")
+
+check_reset("a live chooser with descriptions is recognised",
+            ac.parse_chooser_prompt(_LIVE_CHOOSER) is True)
+check_reset("a chooser that replaced the input box counts as no draft",
+            ac.composer_has_draft(_LIVE_CHOOSER) is False)
+check_reset("an idle session with an empty box is no draft either",
+            ac.composer_has_draft("output\n>" + chr(0xa0) + "   ") is False)
+check_reset("but text in the box IS a draft",
+            ac.composer_has_draft(
+                "output\n>" + chr(0xa0) + "half a thought") is True)
+
 
 # =============================================================================
 print()

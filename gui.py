@@ -88,7 +88,7 @@ from auto_continue import (
     TRIGGER_SPECS, compile_trigger_patterns, find_terminal_windows,
     init_uia_thread, list_tab_titles, next_reset_datetime,
     current_model, fable_refusal_distance, fable_refusal_id,
-    composer_is_empty, chooser_signature,
+    chooser_signature, composer_has_draft,
     parse_chooser_prompt, parse_econnreset_stuck,
     parse_fable_picker, parse_permission_prompt,
     parse_limit_message,
@@ -1988,9 +1988,22 @@ class Watcher(QObject):
                     _is_chooser = parse_chooser_prompt(
                         tail, self._patterns.get("chooser"),
                         self._patterns.get("permission"))
-                    _want = ((_is_perm and self._auto_permission)
-                             or (_is_chooser and self._auto_choose))
-                    if _want and composer_is_empty(tail):
+                    # The two dialogs that change which model the session
+                    # runs on are NOT ordinary choosers. Confirming them is
+                    # the recovery's job, at the step in its script that
+                    # expects them; answering out of band would put a second
+                    # Enter on a dialog that has already been answered, and
+                    # would switch models on windows that never opted into
+                    # having their model touched at all.
+                    _model_dlg = bool(
+                        parse_fable_picker(
+                            tail, self._patterns.get("fable_picker"))
+                        or parse_switch_model_prompt(
+                            tail, self._patterns.get("switch_model")))
+                    _want = (not _model_dlg
+                             and ((_is_perm and self._auto_permission)
+                                  or (_is_chooser and self._auto_choose)))
+                    if _want and not composer_has_draft(tail):
                         _sig = chooser_signature(
                             tail, self._patterns.get("chooser"))
                         _fresh = _sig and _sig != st.chooser_sig
@@ -4400,8 +4413,9 @@ whereas a stray "1" would be sent to Claude as a message.</p>
 make a false positive harmless:</p>
 <ul>
 <li>the turn is <b>not running</b> — there is nothing to answer mid-stream;</li>
-<li>your input box is <b>empty</b> — Enter with a half-written message in it
-would submit that message;</li>
+<li>you have <b>nothing half-typed</b> — Enter with a draft in the input box
+would submit that draft. A chooser that has replaced the input box entirely
+(most of them do) counts as nothing typed, which is the normal case;</li>
 <li>the chooser is one we have <b>not already answered</b> — its text stays
 on screen afterwards, so "it still matches" is not evidence it is still
 open. One chooser, one Enter.</li>
@@ -4419,6 +4433,10 @@ bypass-permissions is off. This one is different in kind: answering it
 <i>authorises work</i> rather than merely unblocking a stalled session. It is
 a separate switch precisely so it can be turned off on its own — do that if
 you rely on reviewing those requests yourself.</p>
+<p>Two dialogs are deliberately left out of both switches: the safeguard
+picker and the <i>Switch model?</i> confirmation. Answering either changes
+which model the session runs on, and that belongs to <b>Model recovery</b>,
+which is opt-in for exactly that reason.</p>
 <p>Both are detected by patterns you can edit on the <b>Triggers</b> tab
 (“Any chooser” and “Tool-permission prompt”); the permission pattern is what
 keeps the two switches apart, so a chooser matching it is never answered by
