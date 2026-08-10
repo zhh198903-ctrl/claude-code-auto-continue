@@ -4426,6 +4426,11 @@ would submit that draft. A chooser that has replaced the input box entirely
 <li>the chooser is one we have <b>not already answered</b> — its text stays
 on screen afterwards, so "it still matches" is not evidence it is still
 open. One chooser, one Enter.</li>
+<li>the chooser is genuinely <b>open</b>. One that is waiting has taken the
+input box away; if a box is showing beneath it, what you are looking at is
+a chooser <i>quoted</i> in the conversation, or one that was answered a
+while ago. Ask Claude to explain a dialog and it will print one — that must
+not be answered, and is not.</li>
 </ul>
 <p>Detection deliberately errs towards matching. A wrong match presses Enter
 on an idle session whose input box is empty, where Enter does nothing; a

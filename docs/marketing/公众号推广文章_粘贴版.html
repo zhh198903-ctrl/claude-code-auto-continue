@@ -40,9 +40,9 @@
 
     <!-- v2.0.5 发布说明 -->
     <div style="background:linear-gradient(135deg,#fff7ed 0%,#fef3c7 100%);border:1px solid #fed7aa;border-radius:10px;padding:18px 22px;margin:24px 0 20px;">
-      <div style="font-weight:700;color:#7c2d12;font-size:15px;margin-bottom:8px;">📢 v2.0.6 上线</div>
+      <div style="font-weight:700;color:#7c2d12;font-size:15px;margin-bottom:8px;">📢 v2.0.7 上线</div>
       <p style="font-size:14px;color:#92400e;line-height:1.8;margin:0;">
-        这个工具最早只做一件事：<b>检测到 5 小时限制 → 等到 reset 时刻 → 自动输入 continue</b>。v2.0 起它多了两个身份：<b>被安全策略拦住时自动换模型顶上</b>（模型恢复），以及 <b>After finish —— 会话跑完当前任务后，自动输入你预设的下一条指令，让窗口一直有活干</b>。v2.0.6 把模型恢复整个重写：实测确认拦截是基于<b>整段对话历史</b>判定的，光重试永远过不去，只有 /compact 压缩上文才能解 —— 所以现在是"备用模型跑完 → /compact → 切回输新指令"一个周期。已经在用旧版本的朋友，直接看 <b>"⏭ After finish"</b> 和 <b>"⇄ 模型恢复"</b> 两节。
+        这个工具最早只做一件事：<b>检测到 5 小时限制 → 等到 reset 时刻 → 自动输入 continue</b>。v2.0 起它多了两个身份：<b>被安全策略拦住时自动换模型顶上</b>（模型恢复），以及 <b>After finish —— 会话跑完当前任务后，自动输入你预设的下一条指令，让窗口一直有活干</b>。v2.0.7 又补上了一件更常遇到的事：<b>会话停下来问你一句，就没人回答了</b>——计划做完等你批准、要不要建这个文件、三选一的设计问题……人一走开，窗口就空等一整夜。现在这些都能自动回答。（v2.0.6 则重写了模型恢复：实测确认安全拦截是基于<b>整段对话历史</b>判定的，光重试永远过不去，只有 /compact 压缩上文才能解。）已经在用旧版本的朋友，直接看 <b>"⏭ After finish"</b> 和 <b>"⇄ 模型恢复"</b> 两节。
       </p>
     </div>
 
@@ -112,7 +112,56 @@
     <hr style="border:none;border-top:1px dashed #e5e7eb;margin:28px 0;">
 
     <!-- ══════════ 重点：模型恢复 ══════════ -->
-    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #fb923c;">⇄ 重点功能：模型安全拦截自动恢复</div>
+    <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #fb923c;">⏎ v2.0.7 新功能：会话停下来问你时，自动替你回答</div>
+
+    <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:16px;">
+      限流会自己到点恢复，网络断了会自己重连，<b>但"等你回答"不会</b>。Claude Code 停下来弹一个选择框，
+      在你回来之前，那个窗口就一直停在那儿——这是无人值守时最容易白白浪费一整夜的一种停顿。
+    </p>
+
+    <div style="background:#fff7ed;border-left:4px solid #fb923c;padding:14px 18px;margin:16px 0 20px;font-size:14px;color:#7c2d12;line-height:1.8;">
+      <b>Advanced → Answering</b> 里两个开关，<b>默认都开</b>：<br>
+      · <b>Answer choosers</b>——普通提问选择框，包括<b>计划模式做完后的批准框</b><br>
+      · <b>Answer tool-permission requests</b>——"要不要建这个文件 / 跑这条命令"的授权框
+    </div>
+
+    <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:12px;">
+      两个开关都只按一次 <b>Enter</b>，取会话自己已经选中的第 1 项，<b>绝不输入数字</b>——万一判断错了，
+      代价只是一个空回车（空输入框上的回车什么也不做），而不是给 Claude 发一个莫名其妙的"1"。
+    </p>
+
+    <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:12px;">
+      三道闸门保证误判无害：<b>正在出词时不动</b>、<b>你输入框里有半截字时不动</b>（否则回车会把你的草稿提交出去）、
+      <b>同一个选择框只答一次</b>（答过的文字会留在屏幕上，"还能匹配"不等于"还开着"）。
+    </p>
+
+    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;margin:16px 0 20px;">
+      <div style="font-weight:700;font-size:14px;color:#14532d;margin-bottom:6px;">🎯 最实用的一个场景：plan 模式全自动</div>
+      <div style="font-size:13px;color:#4b5563;line-height:1.7;">
+        实测过一整条链路，全程没人碰键盘：会话切到 plan 模式 → 中途问了三个设计问题（自动选推荐项）→
+        写出计划 → 弹出批准框（自动放行）→ 回到原权限档位开始写代码。<br>
+        <b>要知道这一点</b>：批准框的第 1 项会<b>把会话放回它启动时的权限档位</b>——
+        实测普通启动的会话给的是"改成 auto mode"，用 bypass 开的会话给的是"回到 bypass"。
+        想自己过目计划，把 <b>Answer choosers</b> 关掉即可（批准框归它管，不归权限那个开关）。
+      </div>
+    </div>
+
+    <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:14px 16px;margin:16px 0 20px;">
+      <div style="font-weight:700;font-size:14px;color:#7f1d1d;margin-bottom:6px;">⚠ 权限那个开关，请自己权衡</div>
+      <div style="font-size:13px;color:#4b5563;line-height:1.7;">
+        它自动放行的是"要不要执行"的授权框——那道确认恰恰是没开 bypass 的人特意留着的。
+        默认开是为了无人值守；想自己把关，单独关掉它即可，普通选择框仍然照答。<br>
+        另外有一点务必知道：<b>开着这个功能时退出软件，正等在选择框上的会话会一直等下去</b>，
+        不像限流那样自己恢复。
+      </div>
+    </div>
+
+    <p style="font-size:14px;color:#6b7280;line-height:1.8;margin-bottom:20px;">
+      顺带一提：切换模型的那两个对话框<b>被特意排除在外</b>，它们归"模型恢复"管——
+      替人改模型这件事必须留在会明确告知的开关里。
+    </p>
+
+<div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #fb923c;">⇄ 重点功能：模型安全拦截自动恢复</div>
 
     <p style="font-size:15px;color:#333;line-height:1.9;margin-bottom:16px;">
       先说这个功能解决的问题。做正经的安全审计、漏洞排查、协议分析这类工作时，模型的安全策略<b>有时会把合法的编码任务误判为敏感内容</b>，于是整轮回答直接中止，屏幕上留下这样一段：
@@ -489,7 +538,14 @@
     <div style="font-size:18px;font-weight:700;color:#1a1a1a;margin:32px 0 14px;padding-left:12px;border-left:4px solid #fb923c;">📝 更新日志</div>
 
     <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:16px 20px;margin-bottom:18px;">
-      <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">🆕 v2.0.6</div>
+      <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">🆕 v2.0.7</div>
+      <ul style="padding-left:20px;font-size:13px;color:#78350f;margin:0 0 14px;line-height:1.8;">
+        <li><b>自动回答选择框</b>（两个独立开关，默认开）：包括 <b>plan 模式的计划批准框</b>，无人值守时不再卡在"等你点一下"</li>
+        <li><b>只按 Enter、不输数字</b>；正在出词、输入框有草稿、同一个框已答过，三种情况一律不动</li>
+        <li><b>切换模型类对话框排除在外</b>，仍归模型恢复管</li>
+        <li>大量真机验证修正：真实选择框会把输入框整个替换掉、输入框提示符有两种字形、选项说明很长时的识别范围——这些只有在真实窗口上才暴露</li>
+      </ul>
+      <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">🕘 v2.0.6</div>
       <ul style="padding-left:20px;font-size:13px;color:#78350f;margin:0 0 14px;line-height:1.8;">
         <li><b>恢复流程重写</b>：实测拦截基于整段对话历史，重试永远过不去 —— 现在是备用模型跑完 → /compact → 切回输新指令，一个周期解决</li>
         <li><b>新步骤 &lt;idle&gt;</b>：等这一轮真正跑完再动，全程不打断任何 turn</li>
