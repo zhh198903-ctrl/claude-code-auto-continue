@@ -19,6 +19,7 @@ and verified twice; more than once only one copy was fixed. Run the GUI
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import re
 import sys
 import time
@@ -68,11 +69,13 @@ APP_VERSION = "2.0.6"
 # terminal can never false-trigger the detector.)
 #
 # The leading "hit your ..." may say `limit`, `session limit`, `usage limit`,
-# `weekly limit`, etc. The reset time may or may not carry minutes (`Hpm`
-# vs `H:MMpm`). Requiring the /upgrade follow-up line is what tells us this
-# is a real rate-limit hit and not e.g. our own test output or this script's
-# source code visible in the user's scrollback. The DOTALL `[\s\S]{0,400}`
-# lets the two lines be separated by terminal padding/whitespace.
+# `weekly limit`, `daily usage limit` (up to ~3 qualifier words), or a
+# hyphenated/numeric one like `5-hour limit`, etc. The reset time may or may
+# not carry minutes (`Hpm` vs `H:MMpm`). Requiring the /upgrade follow-up
+# line is what tells us this is a real rate-limit hit and not e.g. our own
+# test output or this script's source code visible in the user's scrollback.
+# The DOTALL `[\s\S]{0,400}` lets the two lines be separated by terminal
+# padding/whitespace.
 #
 # The follow-up wording is a moving target — Anthropic has shipped
 # `/extra-usage`, then renamed it `/usage-credits`, with the tail either
@@ -82,7 +85,7 @@ APP_VERSION = "2.0.6"
 # and "resets" also varies (middle dot ·, bullet operator ∙, dot operator ⋅,
 # en/em dash), so the class enumerates all of them.
 LIMIT_RE = re.compile(
-    r"You['’]ve hit your (?:\w+\s+)?limit\s*[·•‧․∙⋅⸱\-–—]?\s*"
+    r"You['’]ve hit your (?:[\w-]+\s+){0,3}limit\s*[·•‧․∙⋅⸱\-–—]?\s*"
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)"
     r"[\s\S]{0,400}?"
     r"/upgrade\b[^\n]{0,80}?"
@@ -490,6 +493,44 @@ def fable_refusal_id(text: str, pattern=None):
     return m.group(1) if m else None
 
 
+# A detector can only tell an application-printed banner from the user
+# TYPING that same phrase into the composer if it looks at WHERE the match
+# sits, not just what it says — e.g. asking for help with "API Error: Unable
+# to conn·ect to API (ECONN·RESET)" in one's own message reads identically
+# to the real banner. (De-fanged with · like the pattern comments above, so
+# this comment cannot self-trigger the very detector it documents.) Sampled
+# from a live Claude Code TUI
+# (2026-08): the composer/input-box line always renders with '>' as its
+# first character, followed by a non-breaking space (U+00A0) — `repr()`
+# shows it as `'>\xa0                    '`.
+#
+# The NBSP is the load-bearing part of the prefix, not the '>' alone: the
+# limit picker, safeguard picker and "Switch model?" dialog all print their
+# pre-selected option with a leading "> " of their own (e.g. "> 1. Switch to
+# ..."), but with a PLAIN space (U+0020) — never NBSP. Treating a plain space
+# as equivalent would make this helper misfire on that legitimate app output
+# and hide a real, open picker. So the prefix checked here is deliberately
+# narrow — '>' immediately followed by NBSP, nothing else — no attempt is
+# made to recognise any other TUI chrome, since guessing wrong there risks
+# hiding a REAL banner instead.
+_COMPOSER_LINE_RE = re.compile(r"^>\xa0")
+
+
+def _is_composer_line(text: str, pos: int) -> bool:
+    """True if `pos` falls on a line the user is actively composing (see
+    _COMPOSER_LINE_RE), i.e. NOT a line Claude Code itself printed.
+
+    Used by detectors where a false positive causes an unwanted keystroke —
+    typing 'continue' would corrupt the user's half-written message, and the
+    picker/dialog detectors send a bare Enter, which would SUBMIT it.
+    """
+    line_start = text.rfind("\n", 0, pos) + 1
+    line_end = text.find("\n", pos)
+    if line_end == -1:
+        line_end = len(text)
+    return _COMPOSER_LINE_RE.match(text[line_start:line_end]) is not None
+
+
 def parse_retry_exhausted(text: str, pattern=None) -> bool:
     """True if the most recent network-retry banner shows N == total (e.g.
     `attempt 10/10`) and the banner sits near the tail of the buffer.
@@ -499,9 +540,14 @@ def parse_retry_exhausted(text: str, pattern=None) -> bool:
 
     `pattern` may be a user-supplied compiled regex; it MUST expose the two
     numeric groups (attempt, total) that RETRY_RE does.
+
+    A match sitting on a composer line (see `_is_composer_line`) is dropped —
+    that's the user typing the phrase, not a real banner — so 'continue'
+    never lands mid-message.
     """
     rx = pattern or RETRY_RE
-    matches = list(rx.finditer(text))
+    matches = [m for m in rx.finditer(text)
+               if not _is_composer_line(text, m.start())]
     if not matches:
         return False
     m = matches[-1]
@@ -523,9 +569,14 @@ def parse_econnreset_stuck(text: str, pattern=None) -> bool:
     without the usual retry banner. Tail-anchored just like
     `parse_retry_exhausted`, so stale errors from a previous outage don't
     retrigger.
+
+    A match on a composer line (see `_is_composer_line`) is dropped — e.g. a
+    user asking for help by typing the exact error text reads identically to
+    the real banner otherwise, and would get 'continue' typed into it.
     """
     rx = pattern or ECONNRESET_RE
-    matches = list(rx.finditer(text))
+    matches = [m for m in rx.finditer(text)
+               if not _is_composer_line(text, m.start())]
     if not matches:
         return False
     m = matches[-1]
@@ -544,9 +595,13 @@ def parse_server_error_stuck(text: str, pattern=None) -> bool:
     a 'continue' to resume. Tail-anchored exactly like `parse_econnreset_stuck`
     so a stale marker from an earlier, already-resolved outage doesn't
     retrigger.
+
+    A match on a composer line (see `_is_composer_line`) is dropped — the
+    user typing this text is not a real banner.
     """
     rx = pattern or SERVER_ERROR_RE
-    matches = list(rx.finditer(text))
+    matches = [m for m in rx.finditer(text)
+               if not _is_composer_line(text, m.start())]
     if not matches:
         return False
     m = matches[-1]
@@ -692,9 +747,14 @@ def parse_fable_picker(text: str, pattern=None) -> bool:
     """True if the safeguard picker is open at the tail of the buffer, i.e. a
     bare Enter accepts the pre-selected "Switch to <fallback>" option.
     Tail-anchored like the other modals so a stale one further up scrollback
-    can't make us press Enter into the input box."""
+    can't make us press Enter into the input box.
+
+    A match on a composer line (see `_is_composer_line`) is dropped — the
+    user typing this text is not an open picker, and a bare Enter would
+    SUBMIT whatever else they'd typed."""
     rx = pattern or FABLE_PICKER_RE
-    matches = list(rx.finditer(text))
+    matches = [m for m in rx.finditer(text)
+               if not _is_composer_line(text, m.start())]
     if not matches:
         return False
     m = matches[-1]
@@ -706,9 +766,14 @@ def parse_fable_picker(text: str, pattern=None) -> bool:
 def parse_switch_model_prompt(text: str, pattern=None) -> bool:
     """True if the 'Switch model?' Yes/No dialog is open at the tail of the
     buffer (a plain Enter confirms the pre-selected 'Yes, switch to …').
-    Tail-anchored so a stale one further up scrollback doesn't retrigger."""
+    Tail-anchored so a stale one further up scrollback doesn't retrigger.
+
+    A match on a composer line (see `_is_composer_line`) is dropped for the
+    same reason as `parse_fable_picker` — a bare Enter here SUBMITS the
+    user's half-typed message."""
     rx = pattern or SWITCH_MODEL_RE
-    matches = list(rx.finditer(text))
+    matches = [m for m in rx.finditer(text)
+               if not _is_composer_line(text, m.start())]
     if not matches:
         return False
     m = matches[-1]
@@ -732,9 +797,14 @@ def parse_limit_prompt(text: str, pattern=None, limit_pattern=None) -> bool:
 
     `limit_pattern` overrides the banner regex used by that second guard, so
     a user who customises the limit banner keeps the guard working.
+
+    A match on a composer line (see `_is_composer_line`) is dropped — the
+    user typing this text is not an open picker, and a bare Enter would
+    SUBMIT whatever else they'd typed.
     """
     rx = pattern or LIMIT_PROMPT_RE
-    matches = list(rx.finditer(text))
+    matches = [m for m in rx.finditer(text)
+               if not _is_composer_line(text, m.start())]
     if not matches:
         return False
     m = matches[-1]
@@ -772,6 +842,133 @@ def parse_oauth_expired(text: str, pattern=None) -> bool:
 # rejects it up front and the built-in default stays in force. Defaults are
 # read back off the compiled objects (`.pattern`) so there is exactly one
 # source of truth for each regex.
+# A Claude Code chooser in general: it pauses the session and waits for a
+# selection. Two shapes matter and both are covered by "the selected option
+# is marked, and the options are numbered":
+#
+#     > 1. Do the thing            <- selection marker + first option
+#       2. Do something else
+#
+# Deliberately NOT `\s` after the marker: the composer line is a '>' followed
+# by U+00A0, and `\s` matches that, which would let a half-typed message read
+# as a chooser. A plain space or tab is the chooser's own marker.
+#
+# The examples in this comment are de-fanged (the marker and the digit are
+# separated by a word) so that reading this file in a watched terminal cannot
+# make the watchdog press Enter.
+CHOOSER_RE = re.compile(
+    r"(?m)^[^\S\n]{0,6}[>\u276f][ \t]+1[.)]\s+\S[\s\S]{0,400}?"
+    r"^[^\S\n]{0,6}2[.)]\s+\S")
+
+# Claude Code's tool-permission prompt. It is a chooser like any other, but
+# answering it AUTHORISES an action — an edit, a command — so it gets its own
+# switch rather than riding along with the harmless ones. The tells are
+# stable across its variants: the question, and the two option wordings that
+# only ever appear on permission prompts.
+PERMISSION_RE = re.compile(
+    r"Do\s+you\s+want\s+to\s+(?:proceed|make|run|allow|create|edit|apply)"
+    r"|and\s+don['\u2019]t\s+ask\s+again"
+    r"|tell\s+Claude\s+what\s+to\s+do\s+differently",
+    re.IGNORECASE,
+)
+
+
+def _chooser_match(text: str, pattern=None):
+    """The last chooser on screen, if one is genuinely showing.
+
+    Shared by both parsers below. A chooser far up the scrollback is one the
+    user already answered, and a match on the composer line is the user
+    typing something that looks like one.
+    """
+    rx = pattern or CHOOSER_RE
+    matches = list(rx.finditer(text or ""))
+    if not matches:
+        return None
+    m = matches[-1]
+    if len(text) - m.end() > PROMPT_POST_MATCH_TAIL:
+        return None
+    if _is_composer_line(text, m.start()):
+        return None
+    return m
+
+
+def _permission_context(text: str, m) -> str:
+    """The text a permission prompt's tells actually live in.
+
+    The chooser match itself is a poor place to look: the question sits on
+    the line ABOVE the selection marker, and the giveaway option wordings
+    ("and don't ask again") fall past the match's non-greedy end. So widen to
+    a window around it — enough for the question and the full option list,
+    not so much that an unrelated earlier permission prompt in the scrollback
+    makes an ordinary chooser look dangerous.
+    """
+    return text[max(0, m.start() - 300):min(len(text), m.end() + 400)]
+
+
+def parse_chooser_prompt(text: str, pattern=None, perm_pattern=None) -> bool:
+    """True if a chooser is waiting that is NOT a permission prompt.
+
+    Answering this kind of chooser only picks an option the session already
+    offered; the session was going to sit there until someone did. Permission
+    prompts are excluded here on purpose — they are gated by their own
+    switch, because accepting one authorises work rather than merely
+    unblocking it.
+    """
+    m = _chooser_match(text, pattern)
+    if m is None:
+        return False
+    prx = perm_pattern or PERMISSION_RE
+    return not prx.search(_permission_context(text, m))
+
+
+def parse_permission_prompt(text: str, pattern=None, perm_pattern=None) -> bool:
+    """True if the chooser waiting on screen is a tool-permission prompt.
+
+    Separate from parse_chooser_prompt so the two can never be enabled by
+    accident together: this one says yes to running a command or editing a
+    file, which is only appropriate when the user has decided that this
+    session may act unattended.
+    """
+    m = _chooser_match(text, pattern)
+    if m is None:
+        return False
+    prx = perm_pattern or PERMISSION_RE
+    return bool(prx.search(_permission_context(text, m)))
+
+
+def chooser_signature(text: str, pattern=None):
+    """A short stable id for the chooser currently on screen, or None.
+
+    Enter must be pressed ONCE per chooser. "The pattern still matches" is
+    not evidence the chooser is still open — an answered modal's text stays
+    in the scrollback, and treating that as "still open" once fired eight
+    Enters at one dialog, each submitting whatever was in the input box.
+    Comparing this id against the last one answered is what makes it once.
+    """
+    m = _chooser_match(text, pattern)
+    if m is None:
+        return None
+    return hashlib.sha1(
+        m.group(0).encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def composer_is_empty(text: str) -> bool:
+    """True if the user has nothing half-typed in the input box.
+
+    Every auto-answer path presses a bare Enter, and Enter with a draft in
+    the box SUBMITS the draft. An empty composer makes a false positive
+    harmless (Enter on an empty prompt does nothing) instead of destructive.
+    Unreadable buffer -> False, i.e. don't act, because "cannot tell" must
+    never mean "go ahead".
+    """
+    if not text:
+        return False
+    for line in text.splitlines():
+        if _COMPOSER_LINE_RE.match(line):
+            return not line[1:].strip()
+    return False
+
+
 TRIGGER_SPECS = [
     {
         "key": "limit",
@@ -841,6 +1038,24 @@ TRIGGER_SPECS = [
                 "(“Session paused”). Option 1 offers the fallback model and "
                 "is pre-selected, so Enter alone performs the whole "
                 "recovery — no /model needed.",
+    },
+    {
+        "key": "chooser",
+        "label": "Any chooser (auto-answer)",
+        "default": CHOOSER_RE.pattern,
+        "groups": 0,
+        "help": "A numbered chooser the session is waiting on. Only used "
+                "when “Answer choosers” is enabled; Enter accepts the "
+                "pre-selected first option.",
+    },
+    {
+        "key": "permission",
+        "label": "Tool-permission prompt",
+        "default": PERMISSION_RE.pattern,
+        "groups": 0,
+        "help": "Tells a permission request apart from an ordinary chooser. "
+                "It is EXCLUDED from “Answer choosers” and only answered "
+                "when the separate permission switch is on.",
     },
     {
         "key": "switch_model",
@@ -1022,6 +1237,14 @@ def send_text_lines(window_ctrl, lines, dry_run: bool = False) -> bool:
         # user is actively typing elsewhere), the old code injected
         # 'continue' into the user's editor/browser. Refusing to type and
         # returning False is strictly better: callers retry next tick.
+        #
+        # A zero/unreadable target_hwnd (NativeWindowHandle raised or was
+        # falsy) means the foreground check CANNOT be performed — that must
+        # be treated as "not verified", i.e. failure, not as an automatic
+        # pass. The loop below still runs (SetActive/SetFocus are attempted
+        # regardless) but never breaks early on a zero handle, and the
+        # post-loop guard always fires when the handle is unreadable so
+        # unverified typing never happens.
         for _ in range(2):
             try:
                 window_ctrl.SetActive()
@@ -1033,9 +1256,9 @@ def send_text_lines(window_ctrl, lines, dry_run: bool = False) -> bool:
                 pass
             # Tiny pause so the focus change actually lands.
             time.sleep(0.25)
-            if not target_hwnd or _get_foreground_hwnd() == target_hwnd:
+            if target_hwnd and _get_foreground_hwnd() == target_hwnd:
                 break
-        if target_hwnd and _get_foreground_hwnd() != target_hwnd:
+        if _get_foreground_hwnd() != target_hwnd:
             return False
         for i, line in enumerate(lines):
             if i > 0:
@@ -1089,6 +1312,9 @@ def send_keys(window_ctrl, keyspec: str, dry_run: bool = False) -> bool:
         target_hwnd = 0
     saved_fg = _get_foreground_hwnd()
     try:
+        # Same "unreadable handle means unverified, not verified" rule as
+        # send_text_lines — see the comment there. A zero target_hwnd must
+        # never cause an early break/pass; the post-loop check always fires.
         for _ in range(2):
             try:
                 window_ctrl.SetActive()
@@ -1099,9 +1325,9 @@ def send_keys(window_ctrl, keyspec: str, dry_run: bool = False) -> bool:
             except Exception:
                 pass
             time.sleep(0.25)
-            if not target_hwnd or _get_foreground_hwnd() == target_hwnd:
+            if target_hwnd and _get_foreground_hwnd() == target_hwnd:
                 break
-        if target_hwnd and _get_foreground_hwnd() != target_hwnd:
+        if _get_foreground_hwnd() != target_hwnd:
             return False
         auto.SendKeys(str(keyspec), interval=0.02)
         return True

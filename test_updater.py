@@ -12,7 +12,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from updater import (
     parse_version, is_newer, _normalize_release, verify_sha256,
-    build_swap_bat, ASSET_NAME,
+    build_swap_bat, update_failure_marker_path, ASSET_NAME,
 )
 
 failures = 0
@@ -119,12 +119,49 @@ check_true("bat uses ping (not timeout)", "ping -n 2 127.0.0.1" in bat and "time
 check_true("bat retries on lock (errorlevel 1)", "if errorlevel 1" in bat)
 check_true("bat relaunches", 'start "" "C:\\dir\\Auto-Continue.exe"' in bat)
 check_true("bat self-deletes", '(goto) 2>nul & del "%~f0"' in bat)
-check_true("bat caps the wait loop", "if %tries% gtr 150 goto cleanup" in bat
-           and "set /a tries+=1" in bat and ":cleanup" in bat)
-check_true("bat relaunch line precedes cleanup label (skip on give-up)",
-           bat.index('start ""') < bat.index(":cleanup"))
+check_true("bat caps the wait loop", "if %tries% gtr 150 goto giveup" in bat
+           and "set /a tries+=1" in bat and ":giveup" in bat)
+
+# Regression (the actual bug): give-up used to jump straight to :cleanup,
+# placed AFTER the relaunch line, so a permanent failure skipped relaunch
+# entirely and left the user with no Auto-Continue running at all (the
+# caller already quit the app to drop the file lock before this bat runs).
+# Both the success path and the give-up path must now reach the SAME
+# relaunch line before self-delete.
+relaunch_idx = bat.index('start ""')
+giveup_idx = bat.index(":giveup")
+cleanup_idx = bat.index(":cleanup")
+success_skip_idx = bat.index("goto relaunch")
+check_true("success path jumps past the give-up handling",
+           success_skip_idx < giveup_idx)
+check_true("give-up label precedes the relaunch line (give-up reaches it)",
+           giveup_idx < relaunch_idx)
+check_true("relaunch line precedes cleanup (runs before self-delete)",
+           relaunch_idx < cleanup_idx)
+
+# Regression: give-up must leave a marker behind. By the time this bat runs
+# the app has already quit, so a silent give-up (old behavior) left no
+# running app AND no trace of what happened — the exact silent overnight
+# stall this tool exists to prevent.
+marker = update_failure_marker_path(r"C:\dir\Auto-Continue.exe")
+check("marker path sits next to the target exe", marker,
+      r"C:\dir\Auto-Continue.exe.update-failed.txt")
+check_true("bat writes the marker file", f'"{marker}"' in bat)
+marker_idx = bat.index(f'"{marker}"')
+check_true("marker is written on the give-up path, before relaunch",
+           giveup_idx < marker_idx < relaunch_idx)
+
+# relaunch=False must omit the relaunch line on BOTH paths (respected by
+# tests / callers that don't want the bat to start anything) — but the
+# give-up marker is unconditional: visibility into a permanent failure
+# shouldn't depend on whether the caller wanted a relaunch.
 bat_no = build_swap_bat(r"C:\d\new.exe", r"C:\d\t.exe", relaunch=False)
 check_true("no-relaunch omits start", 'start ""' not in bat_no)
+marker_no = update_failure_marker_path(r"C:\d\t.exe")
+check_true("no-relaunch still writes the give-up marker",
+           f'"{marker_no}"' in bat_no)
+check_true("no-relaunch: give-up label still precedes cleanup",
+           bat_no.index(":giveup") < bat_no.index(":cleanup"))
 
 print()
 print("RESULT:", "ALL OK" if failures == 0 else f"{failures} FAILURE(S)")

@@ -584,21 +584,36 @@ class _FakeSettings:
 
 
 def _migrate(stored_steps):
-    """Mirror _load_settings' merge + migration on a stored fable_cfg."""
-    cfg = {"enabled": False, "all_windows": True, "delay": 180,
-           "steps": gui.DEFAULT_FABLE_STEPS, "windows": []}
-    cfg.update(_json.loads(_json.dumps({"steps": stored_steps})))
-    if cfg.get("steps") == gui.LEGACY_FABLE_STEPS_V1016:
-        cfg["steps"] = gui.DEFAULT_FABLE_STEPS
-    return cfg["steps"]
+    """Round-trip a stored value through JSON (as QSettings does) and then
+    through the SHIPPED migration — not a reimplementation of it. The old
+    version of this helper mirrored the v1.0.16 case only, so a break in any
+    of the other five migrations went uncaught."""
+    stored = _json.loads(_json.dumps({"steps": stored_steps}))["steps"]
+    return gui.migrate_fable_steps(stored)
 
 
 check("P4 untouched legacy script is migrated",
-      _migrate(gui.LEGACY_FABLE_STEPS_V1016) == gui.DEFAULT_FABLE_STEPS)
+      _migrate(gui.LEGACY_FABLE_STEPS_V1016)
+      == (gui.DEFAULT_FABLE_STEPS, "v1.0.16"))
 _custom = "/model haiku\n<confirm>\ncontinue"
-check("P5 a customised script is NOT touched", _migrate(_custom) == _custom)
+check("P5 a customised script is NOT touched",
+      _migrate(_custom) == (_custom, None))
 check("P6 the current script is left as-is",
-      _migrate(gui.DEFAULT_FABLE_STEPS) == gui.DEFAULT_FABLE_STEPS)
+      _migrate(gui.DEFAULT_FABLE_STEPS) == (gui.DEFAULT_FABLE_STEPS, None))
+# Every shipped script must migrate AND be labelled, or its owner gets the
+# wrong explanation — or worse, silently keeps a script that no longer
+# matches how Claude Code behaves.
+for _label, _script in {"v1.0.16": gui.LEGACY_FABLE_STEPS_V1016,
+                        "v2.0.1": gui.LEGACY_FABLE_STEPS_V201,
+                        "v2.0.1a": gui.LEGACY_FABLE_STEPS_V201_NOCONT,
+                        "v2.0.2": gui.LEGACY_FABLE_STEPS_V202,
+                        "v2.0.4": gui.LEGACY_FABLE_STEPS_V204,
+                        "v2.0.5": gui.LEGACY_FABLE_STEPS_V205}.items():
+    check(f"P7 the {_label} script migrates and is labelled {_label}",
+          _migrate(_script) == (gui.DEFAULT_FABLE_STEPS, _label))
+check("P8 a non-string stored value cannot raise",
+      gui.migrate_fable_steps(None) == (None, None)
+      and gui.migrate_fable_steps(["a"]) == (["a"], None))
 
 
 # =============================================================================
@@ -1674,6 +1689,117 @@ for _ in range(12):
         stx.fable_handled = False               # the notice keeps re-appearing
 check("AC8 a script without <resume> is still bounded",
       w._states[1].fable_parked is True and w._states[1].fable_runs <= 2)
+
+# Parking is for ONE episode, not for life. If the flag survived a genuinely
+# cleared block, a window parked once would be abandoned by the recovery
+# forever — silently, with the only evidence a log line from days earlier.
+reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_F})
+w = new_watcher(steps="<resume>")
+for rid in ("req_P1", "req_P2"):                 # spend the try, then park
+    TEXTS[1] = NOTICE + f"\nRequest ID: {rid}\n" + _BAR_F
+    for _ in range(3):
+        w._tick()
+        advance(1)
+check("AC9 window is parked", w._states[1].fable_parked is True)
+
+TEXTS[1] = "back to work, nothing wrong here\n" + _BAR_F   # block clears
+w._tick()
+advance(gui.FABLE_CLEARED_S + 5)
+w._tick()
+check("AC10 a cleared episode releases the parking",
+      w._states[1].fable_parked is False
+      and w._states[1].fable_tried == 0
+      and w._states[1].fable_runs == 0)
+
+SENT.clear()
+TEXTS[1] = NOTICE + "\nRequest ID: req_P3\n" + _BAR_F      # a new episode
+for _ in range(3):
+    advance(1)
+    w._tick()
+check("AC11 so a later block is recovered again, not ignored",
+      texts_sent() == [["continue"]])
+
+
+# =============================================================================
+print("---- AE: the shipped default script, end to end ----")
+# Every other test drives a short custom script. U1b only compares the PARSED
+# default against a literal, which cannot catch a step that misbehaves when
+# chained — the second <idle> inheriting the first one's state, /compact
+# landing while the fallback is still streaming, the resume firing before the
+# switch back. This runs the real thing through one full cycle.
+_D_SPIN = "  ✽ Whirring… (12s · ↓ 2k tokens)"
+reset([(1, "claude")], {1: NOTICE + "\n" + _BAR_F})
+w = new_watcher()                                # DEFAULT_FABLE_STEPS
+w._interval = 60
+LOGS_AD2 = []
+w.log.connect(lambda k, m: LOGS_AD2.append((k, m)))
+
+w._tick()                                        # detect -> arm
+check("AE1 armed on the default script",
+      w._states[1].fable_step == 0 and len(w._fable_steps) == 10)
+
+# <confirm>: Claude Code offered no chooser this time, so it times out.
+advance(2 * 60 + 5)
+w._tick()
+# /model opus — the bar still reads Fable, session idle, so it goes out.
+w._tick()
+check("AE2 switches to the fallback first",
+      texts_sent() == [["/model opus"]])
+
+TEXTS[1] = NOTICE + "\n" + DIALOG + "\n" + _BAR_O          # switch dialog
+w._tick()
+check("AE3 confirms the switch dialog", texts_sent()[-1] == [""])
+TEXTS[1] = NOTICE + "\nswitched.\n" + _BAR_O
+advance(gui.FABLE_KEY_GAP_S + 1)
+w._tick()                                        # advance off <confirm>
+w._tick()                                        # 'continue' on the fallback
+check("AE4 redoes the blocked work on the fallback",
+      texts_sent()[-1] == ["continue"])
+
+# <idle>: the fallback is streaming, so nothing moves until it goes quiet.
+_n_before = len(texts_sent())
+TEXTS[1] = NOTICE + "\n" + _BAR_O + "\n" + _D_SPIN
+for _ in range(4):
+    advance(60)
+    w._tick()
+check("AE5 <idle> waits out the fallback's turn",
+      len(texts_sent()) == _n_before)
+
+TEXTS[1] = NOTICE + "\nall done\n" + _BAR_O                 # turn ends
+w._tick()
+advance(gui.FABLE_IDLE_SETTLE_S + 5)
+w._tick()                                        # settled -> next step
+w._tick()                                        # /compact
+check("AE6 compacts only after the turn really ended",
+      texts_sent()[-1] == ["/compact"])
+
+# Second <idle> must start from scratch, not inherit the first one's state.
+TEXTS[1] = "compacting…\n" + _BAR_O + "\n" + _D_SPIN
+w._tick()
+check("AE7 the second <idle> re-arms rather than passing straight through",
+      texts_sent()[-1] == ["/compact"])
+TEXTS[1] = "conversation compacted\n" + _BAR_O
+w._tick()
+advance(gui.FABLE_IDLE_SETTLE_S + 5)
+w._tick()
+w._tick()                                        # /model fable
+check("AE8 switches back to the target",
+      texts_sent()[-1] == ["/model fable"])
+
+TEXTS[1] = "conversation compacted\n" + DIALOG + "\n" + _BAR_F
+w._tick()
+check("AE9 confirms the switch back", texts_sent()[-1] == [""])
+TEXTS[1] = "conversation compacted\n" + _BAR_F
+advance(gui.FABLE_KEY_GAP_S + 1)
+w._tick()
+w._tick()                                        # <resume>
+check("AE10 resumes on the target model",
+      texts_sent()[-1] == ["continue"])
+check("AE11 the run is complete and latched",
+      w._states[1].fable_step == -1 and w._states[1].fable_handled is True)
+check("AE12 and the whole cycle typed each step exactly once",
+      texts_sent() == [["/model opus"], [""], ["continue"], ["/compact"],
+                       ["/model fable"], [""], ["continue"]])
 
 
 # =============================================================================

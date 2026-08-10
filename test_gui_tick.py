@@ -419,11 +419,115 @@ check("G10 a corrupt loops store collapses to defaults",
 
 # v2.0.6 stored a CAP where 0 meant unlimited; the countdown store reads 0 as
 # spent. Migrating that exact value is the difference between a prompt that
-# repeats forever and one that silently never fires again.
-_MIG = {"a": 0, "b": 3, "c": 1}
+# repeats forever and one that silently never fires again. These drive the
+# SHIPPED function — an earlier version of this check compared a dict
+# comprehension written here against itself, so a broken migration would
+# have sailed through it.
 check("G11 the v2.0.6 'unlimited' cap migrates to the new sentinel",
-      {k: (-1 if v == 0 else v) for k, v in _MIG.items()}
+      gui.migrate_after_finish_loops({"a": 0, "b": 3, "c": 1}, False)
       == {"a": -1, "b": 3, "c": 1})
+check("G11b once migrated, 0 is a real value and stays put",
+      gui.migrate_after_finish_loops({"a": 0, "b": 3}, True)
+      == {"a": 0, "b": 3})
+check("G11c garbage and out-of-range values are coerced, not raised",
+      gui.migrate_after_finish_loops(
+          {"a": "2", "b": "x", "c": -9, "d": None}, True)
+      == {"a": 2, "c": -1})
+check("G11d a non-dict store collapses instead of exploding",
+      gui.migrate_after_finish_loops("not-a-dict", True) == {}
+      and gui.migrate_after_finish_loops(None, False) == {})
+
+# The After finish dialog snapshots the remaining count when it opens, and a
+# modal exec() keeps pumping queued signals — so the worker can spend a run
+# while the dialog is up. Writing the untouched pre-fire number back on OK
+# would silently re-arm a prompt that had just been used, which is exactly
+# the repeat-firing the budget exists to prevent. (The file already carries
+# the same class of fix for the fable opt-out list.)
+check("G12 a run spent while the dialog was open wins over the snapshot",
+      gui.reconcile_loops(chosen=1, snapshot=1, fired=0) == 0)
+check("G12b but moving the spinner is an explicit instruction and wins",
+      gui.reconcile_loops(chosen=5, snapshot=1, fired=0) == 5)
+check("G12c with no fire in the meantime the dialog's value stands",
+      gui.reconcile_loops(chosen=1, snapshot=1, fired=None) == 1)
+check("G12d setting the spinner back to the snapshot after a fire re-arms",
+      gui.reconcile_loops(chosen=0, snapshot=0, fired=0) == 0)
+check("G12e unlimited chosen during a fire is still honoured",
+      gui.reconcile_loops(chosen=-1, snapshot=1, fired=0) == -1)
+
+
+# =============================================================================
+print("---- H: auto-answering a chooser the session is waiting on ----")
+# Claude Code stops on a chooser and waits; until someone picks, the window
+# is idle for no better reason than an unanswered question. Enter accepts the
+# option it already pre-selected. Fixtures are de-fanged (the marker and the
+# digit split apart) so this file cannot make a watched terminal press Enter.
+_M = "> "
+CHOOSER = "Ready to continue?\n" + _M + "1" ". Keep going\n  2" ". Stop here"
+PERMISSION = ("Do you want to proceed?\n" + _M + "1" ". Yes\n"
+              "  2" ". Yes, and don" + chr(8217) + "t ask again\n"
+              "  3" ". No, and tell Claude what to do differently")
+EMPTY_BOX = "\n>" + chr(0xa0) + "   "
+DRAFT_BOX = "\n>" + chr(0xa0) + "half a thought"
+
+set_now(T0)
+reset([(20, "win")], {20: CHOOSER + EMPTY_BOX})
+w = new_watcher()
+w._tick()
+check("H1 an ordinary chooser is answered with a bare Enter",
+      SENT == [(20, [""])])
+SENT.clear()
+w._tick()
+advance(30)
+w._tick()
+check("H2 the same chooser is answered exactly once", not SENT)
+
+# The answered text lingers, so a NEW chooser must still be recognised.
+TEXTS[20] = "Ready to continue?\n" + _M + "1" ". Something else\n  2" ". No" + EMPTY_BOX
+advance(5)
+w._tick()
+check("H3 a different chooser is answered", SENT == [(20, [""])])
+SENT.clear()
+
+# A draft in the input box turns Enter into "submit my half-written message".
+set_now(T0)
+reset([(21, "win")], {21: CHOOSER + DRAFT_BOX})
+w = new_watcher()
+w._tick()
+check("H4 nothing is pressed while the user has text typed", not SENT)
+
+# Mid-turn there is nothing to answer.
+set_now(T0)
+reset([(22, "win")], {22: CHOOSER + "\n" + SPIN + EMPTY_BOX})
+w = new_watcher()
+w._tick()
+check("H5 a running turn is left alone", not SENT)
+
+# Permission requests authorise work, so they ride on their own switch.
+set_now(T0)
+reset([(23, "win")], {23: PERMISSION + EMPTY_BOX})
+w = new_watcher()
+w.set_auto_answer(True, False)                  # choosers on, permission off
+w._tick()
+check("H6 a permission request is NOT answered by the chooser switch",
+      not SENT)
+w.set_auto_answer(True, True)
+w._tick()
+check("H7 ...and IS answered once its own switch is on",
+      SENT == [(23, [""])])
+SENT.clear()
+
+set_now(T0)
+reset([(24, "win")], {24: CHOOSER + EMPTY_BOX})
+w = new_watcher()
+w.set_auto_answer(False, True)                  # choosers off
+w._tick()
+check("H8 an ordinary chooser is left alone when its switch is off",
+      not SENT)
+
+# Both default ON — a fresh worker answers without being configured.
+check("H9 both switches default to on",
+      new_watcher()._auto_choose is True
+      and new_watcher()._auto_permission is True)
 
 
 print()

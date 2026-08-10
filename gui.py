@@ -72,7 +72,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QAction, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-    QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog,
+    QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView,
     QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
@@ -88,8 +88,9 @@ from auto_continue import (
     TRIGGER_SPECS, compile_trigger_patterns, find_terminal_windows,
     init_uia_thread, list_tab_titles, next_reset_datetime,
     current_model, fable_refusal_distance, fable_refusal_id,
-    parse_econnreset_stuck,
-    parse_fable_picker,
+    composer_is_empty, chooser_signature,
+    parse_chooser_prompt, parse_econnreset_stuck,
+    parse_fable_picker, parse_permission_prompt,
     parse_limit_message,
     parse_limit_prompt, parse_oauth_expired, parse_retry_exhausted,
     parse_server_error_stuck, parse_switch_model_prompt, read_terminal_text,
@@ -292,6 +293,64 @@ LEGACY_FABLE_STEPS_V202 = (
     "<confirm>\n"
     "continue"
 )
+# Every shipped step script, newest first. A stored script that still
+# matches one of these was never edited by its owner, so it can be migrated
+# to the current default; anything else is left alone. Each entry needs its
+# own explanation, because they broke for different reasons and their
+# replacements fix different things — see _MIGRATION_REASONS.
+LEGACY_FABLE_SCRIPTS = {}     # filled in below, after the strings exist
+
+
+def migrate_fable_steps(stored):
+    """(steps, legacy_label) — rewrite an untouched shipped script.
+
+    Returns the stored value unchanged with a None label when the script is
+    customised, already current, or not a string at all.
+    """
+    label = LEGACY_FABLE_SCRIPTS.get(stored) if isinstance(stored, str) else None
+    return (DEFAULT_FABLE_STEPS, label) if label else (stored, None)
+
+
+def reconcile_loops(chosen: int, snapshot: int, fired):
+    """What the After finish dialog should store when OK is pressed.
+
+    `snapshot` is what the spinner showed when the dialog opened, `chosen` is
+    what it shows now, and `fired` is a value the worker wrote WHILE the
+    dialog was up (None if it did not fire).
+
+    A modal exec() keeps pumping this thread's queued signals, so a run can
+    be spent mid-dialog. Writing the spinner's untouched pre-fire number back
+    would re-arm a prompt that had just been used — the repeat-firing the
+    budget exists to prevent. So the worker's number wins, unless the user
+    actually moved the spinner, which is an explicit instruction.
+    """
+    if fired is None or chosen != snapshot:
+        return chosen
+    return fired
+
+
+def migrate_after_finish_loops(stored, already_migrated: bool):
+    """title_key -> runs remaining, out of whatever the registry holds.
+
+    v2.0.6 stored a CAP in this key, where 0 meant "unlimited". It now holds
+    runs REMAINING, where 0 means spent and -1 means unlimited — so a value
+    carried over from v2.0.6 without translation would silently stop a
+    prompt its owner had set to repeat forever. The rewrite is one-shot and
+    flagged, because after it 0 is a real, meaningful value.
+    """
+    out = {}
+    if isinstance(stored, dict):
+        for k, v in stored.items():
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                continue
+            out[str(k)] = max(-1, n)
+    if not already_migrated:
+        out = {k: (-1 if v == 0 else v) for k, v in out.items()}
+    return out
+
+
 # Shipped defaults, in one place so first run and Reset agree.
 #   poll   60s — a UIA read of every window costs 100ms+, and nothing
 #                this tool reacts to needs sub-minute latency.
@@ -301,9 +360,26 @@ LEGACY_FABLE_STEPS_V202 = (
 #                old 30s default poked it ~180 times through a real
 #                90-minute outage, which helps nothing and buries the
 #                log; 600s is what a real deployment converged on.
+LEGACY_FABLE_SCRIPTS.update({
+    LEGACY_FABLE_STEPS_V1016: "v1.0.16",
+    LEGACY_FABLE_STEPS_V201: "v2.0.1",
+    LEGACY_FABLE_STEPS_V201_NOCONT: "v2.0.1a",
+    LEGACY_FABLE_STEPS_V202: "v2.0.2",
+    LEGACY_FABLE_STEPS_V204: "v2.0.4",
+    LEGACY_FABLE_STEPS_V205: "v2.0.5",
+})
+
 DEFAULT_INTERVAL_S = 60
 DEFAULT_BUFFER_S = 60
 DEFAULT_RETRY_S = 600
+
+# A chooser gets ONE Enter. Its text stays in the scrollback after it is
+# answered, so "the pattern still matches" cannot be the exit condition —
+# that mistake once fired eight Enters at a single dialog. The answered
+# chooser's signature is remembered instead, and only a DIFFERENT one is
+# answered again. This is the backstop for the case where our Enter did not
+# take: after this long, the same chooser may be answered once more.
+CHOOSER_RETRY_S = 300
 
 SWITCH_SETTLE_S = 10       # if no dialog within this after a step, move on
 FABLE_RETICK_MS = 6000     # fast follow-up tick while a recovery is running
@@ -572,6 +648,8 @@ class _WState:
     af_seen_running: bool = False                 # ran since the last fire
     af_idle_since: Optional[datetime] = None      # idle streak start
     af_spent_logged: bool = False                 # budget-spent said once
+    chooser_sig: Optional[str] = None             # last chooser we answered
+    chooser_at: Optional[datetime] = None         # when we answered it
     fable_picker_used: bool = False               # picker accepted this run
     fable_hold_logged: bool = False               # 'waiting for idle' said once
     fable_drift_at: Optional[datetime] = None     # last drift correction
@@ -644,6 +722,13 @@ class Watcher(QObject):
         # re-arming (missing = 1, 0 = unlimited). Typing the same follow-up
         # after every run is an infinite loop unless the user asked for it.
         self._after_finish_loops: dict[str, int] = {}
+
+        # Auto-answer switches (Advanced). Both ON by default: a session
+        # sitting on an unanswered chooser is exactly the stall this tool
+        # exists to clear, and Enter only accepts the option the session
+        # itself pre-selected.
+        self._auto_choose = True
+        self._auto_permission = True
 
         # User overrides for the detection regexes (Advanced → Triggers).
         # Only keys the user actually changed (and that validated) live here;
@@ -823,6 +908,11 @@ class Watcher(QObject):
         for st in self._states.values():
             if turned_off or st.fable_step >= n:
                 _fable_reset(st)
+
+    @pyqtSlot(bool, bool)
+    def set_auto_answer(self, choosers: bool, permissions: bool) -> None:
+        self._auto_choose = bool(choosers)
+        self._auto_permission = bool(permissions)
 
     @pyqtSlot(dict)
     def set_trigger_patterns(self, overrides: dict) -> None:
@@ -1866,6 +1956,50 @@ class Watcher(QObject):
                 if st.status == ST_PROMPT:
                     st.status = ST_IDLE
 
+            # 0.56. Any other chooser the session is waiting on. Claude Code
+            # pauses and waits for a selection; until someone picks, nothing
+            # happens — the same overnight stall as a limit or a network
+            # error, just with a different cause. Enter accepts the option
+            # the session already pre-selected; we never type a number, so a
+            # false positive is a bare Enter rather than a stray character.
+            #
+            # Three gates make that false positive harmless:
+            #   * the turn must not be running (nothing to answer mid-stream)
+            #   * the composer must be EMPTY — Enter with a draft in the box
+            #     would submit the draft
+            #   * the chooser's signature must differ from the last one we
+            #     answered, so one chooser gets exactly one Enter
+            # Permission prompts are split out under their own switch: those
+            # authorise an edit or a command rather than merely unblocking.
+            if tail and not session_running(tail):
+                _is_perm = parse_permission_prompt(
+                    tail, self._patterns.get("chooser"),
+                    self._patterns.get("permission"))
+                _is_chooser = parse_chooser_prompt(
+                    tail, self._patterns.get("chooser"),
+                    self._patterns.get("permission"))
+                _want = ((_is_perm and self._auto_permission)
+                         or (_is_chooser and self._auto_choose))
+                if _want and composer_is_empty(tail):
+                    _sig = chooser_signature(
+                        tail, self._patterns.get("chooser"))
+                    _fresh = _sig and _sig != st.chooser_sig
+                    _stale = (st.chooser_at is not None
+                              and now - st.chooser_at
+                              >= timedelta(seconds=CHOOSER_RETRY_S))
+                    if _sig and (_fresh or _stale):
+                        self.log.emit(
+                            "fire",
+                            f"{dr}answering "
+                            + ("permission prompt" if _is_perm
+                               else "chooser")
+                            + f" (Enter = option 1) → {title!r}")
+                        if send_text_lines(w, [""], dry_run=self._dry_run):
+                            st.chooser_sig = _sig
+                            st.chooser_at = now
+                        st.status = ST_PROMPT
+                        continue
+
             # 0.6. Network-stuck path. Runs *before* the rate-limit logic and
             # ignores the cooldown — if the API is unreachable in the middle
             # of a 5h wait we still want to resend 'continue' every
@@ -2466,6 +2600,7 @@ class MainWindow(QMainWindow):
     sig_set_model_overrides = pyqtSignal(dict)
     sig_set_after_finish = pyqtSignal(dict)
     sig_set_after_finish_loops = pyqtSignal(dict)
+    sig_set_auto_answer = pyqtSignal(bool, bool)
     sig_set_fable_config = pyqtSignal(dict)
     sig_set_trigger_patterns = pyqtSignal(dict)
     # Into the updater (its own thread).
@@ -2489,6 +2624,8 @@ class MainWindow(QMainWindow):
         self._model_overrides: dict = {}
         self._after_finish: dict = {}
         self._after_finish_loops: dict = {}
+        self._auto_choose = True
+        self._auto_permission = True
         # Fable refusal-recovery config (Advanced dialog). Empty pattern =
         # use the built-in default.
         self._fable_cfg: dict = {
@@ -2503,6 +2640,13 @@ class MainWindow(QMainWindow):
         # Opt-outs recorded while an Advanced dialog is open, so its OK
         # cannot resurrect a window the user just took over.
         self._pending_optouts: set = set()
+        # title_key -> runs left, for after-finish budgets spent WHILE the
+        # After finish dialog is open. Its spinner snapshots the count when
+        # it opens, and a modal exec() keeps pumping this thread's queued
+        # signals, so OK would write the pre-fire number back and re-arm a
+        # prompt that had just been used. Same hazard, same shape of fix as
+        # _pending_optouts above.
+        self._pending_loops: dict = {}
         # Version string of the stale step script _load_settings rewrote
         # ("v1.0.16" / "v2.0.1"), or False when nothing was migrated.
         self._migrated_fable_steps = False
@@ -2934,6 +3078,7 @@ class MainWindow(QMainWindow):
         self.sig_set_after_finish.connect(self.worker.set_after_finish)
         self.sig_set_after_finish_loops.connect(
             self.worker.set_after_finish_loops)
+        self.sig_set_auto_answer.connect(self.worker.set_auto_answer)
         self.sig_set_fable_config.connect(self.worker.set_fable_config)
         self.sig_set_trigger_patterns.connect(
             self.worker.set_trigger_patterns)
@@ -3099,6 +3244,7 @@ class MainWindow(QMainWindow):
         if not key:
             return
         self._after_finish_loops[key] = left
+        self._pending_loops[key] = left
         self._save_settings()
         self._render_table()          # button label shows what is left
         self._append_log(
@@ -3177,6 +3323,7 @@ class MainWindow(QMainWindow):
         self._model_overrides = {}
         self._after_finish = {}
         self._after_finish_loops = {}
+        self._pending_loops.clear()
         self._excluded_titles = set()
         self._trigger_patterns = {}
         self._fable_cfg = {
@@ -3196,6 +3343,9 @@ class MainWindow(QMainWindow):
         self.sig_set_model_overrides.emit({})
         self.sig_set_after_finish.emit({})
         self.sig_set_after_finish_loops.emit({})
+        self._auto_choose = True
+        self._auto_permission = True
+        self.sig_set_auto_answer.emit(True, True)
         self.sig_set_trigger_patterns.emit({})
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self._save_settings()
@@ -3232,7 +3382,9 @@ class MainWindow(QMainWindow):
             if k:
                 seen[k] = r["title"]
         dlg = AdvancedDialog(self, dict(self._fable_cfg), seen,
-                             dict(self._trigger_patterns))
+                             dict(self._trigger_patterns),
+                             {"choose": self._auto_choose,
+                              "permission": self._auto_permission})
         self._pending_optouts.clear()
         if dlg.exec():
             new_cfg = dlg.result_config()
@@ -3252,6 +3404,21 @@ class MainWindow(QMainWindow):
                 new_cfg["optout"] = outs
                 self._pending_optouts.clear()
             self._fable_cfg = new_cfg
+            _auto = dlg.result_auto()
+            _auto_changed = (
+                _auto["choose"] != self._auto_choose
+                or _auto["permission"] != self._auto_permission)
+            self._auto_choose = _auto["choose"]
+            self._auto_permission = _auto["permission"]
+            self.sig_set_auto_answer.emit(self._auto_choose,
+                                          self._auto_permission)
+            if _auto_changed:
+                self._append_log(
+                    "info",
+                    "auto-answer: choosers "
+                    + ("ON" if self._auto_choose else "OFF")
+                    + ", permission requests "
+                    + ("ON" if self._auto_permission else "OFF"))
             self._trigger_patterns = dlg.result_patterns()
             self.sig_set_fable_config.emit(dict(self._fable_cfg))
             self.sig_set_trigger_patterns.emit(
@@ -3371,27 +3538,18 @@ class MainWindow(QMainWindow):
                 "after_finish_loops", "", type=str) or ""
             try:
                 loaded_al = json.loads(raw_al) if raw_al else {}
-                self._after_finish_loops = {}
-                if isinstance(loaded_al, dict):
-                    for _k, _v in loaded_al.items():
-                        try:
-                            _n = int(_v)
-                        except (TypeError, ValueError):
-                            continue
-                        self._after_finish_loops[str(_k)] = max(-1, _n)
-                # v2.0.6 stored a CAP, where 0 meant "unlimited". v2.0.7
-                # stores runs REMAINING, where 0 means spent and -1 means
-                # unlimited — so an unmigrated 0 would silently stop a
-                # prompt its owner had set to repeat forever. One-shot, and
-                # flagged, because after the migration 0 is a real value.
-                if not self.settings.value(
-                        "after_finish_loops_v2", False, type=bool):
-                    self._after_finish_loops = {
-                        k: (-1 if v == 0 else v)
-                        for k, v in self._after_finish_loops.items()}
+                _done = self.settings.value(
+                    "after_finish_loops_v2", False, type=bool)
+                self._after_finish_loops = migrate_after_finish_loops(
+                    loaded_al, _done)
+                if not _done:
                     self.settings.setValue("after_finish_loops_v2", True)
             except Exception:
                 self._after_finish_loops = {}
+            self._auto_choose = self.settings.value(
+                "auto_choose", True, type=bool)
+            self._auto_permission = self.settings.value(
+                "auto_permission", True, type=bool)
             raw_f = self.settings.value("fable_cfg", "", type=str) or ""
             try:
                 loaded_f = json.loads(raw_f) if raw_f else {}
@@ -3409,22 +3567,15 @@ class MainWindow(QMainWindow):
                     # v1.0.16 one — which types /model into the open picker
                     # and then ESCs it away — even after upgrading. Migrate
                     # that exact string; anything edited is left untouched.
-                    _old = self._fable_cfg.get("steps")
-                    _legacy = {
-                        LEGACY_FABLE_STEPS_V1016: "v1.0.16",
-                        LEGACY_FABLE_STEPS_V201: "v2.0.1",
-                        LEGACY_FABLE_STEPS_V201_NOCONT: "v2.0.1a",
-                        LEGACY_FABLE_STEPS_V202: "v2.0.2",
-                        LEGACY_FABLE_STEPS_V204: "v2.0.4",
-                        LEGACY_FABLE_STEPS_V205: "v2.0.5",
-                    }
-                    if _old in _legacy:
-                        self._fable_cfg["steps"] = DEFAULT_FABLE_STEPS
+                    _steps, _label = migrate_fable_steps(
+                        self._fable_cfg.get("steps"))
+                    if _label:
+                        self._fable_cfg["steps"] = _steps
                         # Which one it was decides what the notice should say
                         # — the shipped scripts were broken for different
                         # reasons, and a migration notice that describes the
                         # wrong one is worse than none.
-                        self._migrated_fable_steps = _legacy[_old]
+                        self._migrated_fable_steps = _label
             except Exception:
                 pass
             raw_t = self.settings.value("trigger_patterns", "", type=str) or ""
@@ -3461,6 +3612,8 @@ class MainWindow(QMainWindow):
         self.sig_set_model_overrides.emit(dict(self._model_overrides))
         self.sig_set_after_finish.emit(dict(self._after_finish))
         self.sig_set_after_finish_loops.emit(dict(self._after_finish_loops))
+        self.sig_set_auto_answer.emit(self._auto_choose,
+                                      self._auto_permission)
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self.sig_set_trigger_patterns.emit(dict(self._trigger_patterns))
         if self._migrated_fable_steps:
@@ -3531,6 +3684,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue(
             "after_finish_loops", json.dumps(self._after_finish_loops)
         )
+        self.settings.setValue("auto_choose", self._auto_choose)
+        self.settings.setValue("auto_permission", self._auto_permission)
         self.settings.setValue("fable_cfg", json.dumps(self._fable_cfg))
         self.settings.setValue(
             "trigger_patterns", json.dumps(self._trigger_patterns))
@@ -3926,10 +4081,18 @@ class MainWindow(QMainWindow):
         btns.rejected.connect(dlg.reject)
         lay.addWidget(btns)
         dlg.resize(480, 300)
+        self._pending_loops.pop(key, None)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         text = edit.toPlainText().strip()
         loops = spin.value()
+        # A run spent while this dialog was open wins over the number the
+        # spinner snapshotted before it opened — otherwise clicking OK after
+        # only editing the prompt text silently re-arms a spent budget, which
+        # is the repeat-firing this feature exists to prevent. Touching the
+        # spinner is an explicit instruction and still wins.
+        loops = reconcile_loops(loops, cur_loops,
+                                self._pending_loops.pop(key, None))
         # A prompt that was edited but left at 0 runs would silently never
         # fire. Typing a new prompt is asking for it to run, so give it one.
         if text and text != cur and loops == 0:
@@ -4127,7 +4290,8 @@ until it fires.</li>
 so the message still in scrollback can't trigger a second fire.</li>
 <li><b>Fable-recover</b> — a model-recovery script is running on that
 window.</li>
-<li><b>Limit prompt</b> — confirming the limit chooser.</li>
+<li><b>Limit prompt</b> — confirming the limit chooser, or answering
+another chooser the session was waiting on.</li>
 <li><b>Excluded</b> — you told it to ignore this window.</li>
 </ul>
 <p>Per-row controls:</p>
@@ -4182,6 +4346,40 @@ finished;</li>
 flight;</li>
 <li>a model recovery in progress — that script owns the window.</li>
 </ul>
+
+<h3>Advanced&#8230; &#8594; Answering</h3>
+<p><b>What it is for.</b> Claude Code sometimes stops and asks. A chooser
+appears, the session waits, and nothing else happens until someone picks —
+which, if you stepped away, means the window is idle for the rest of the
+night for no better reason than an unanswered question. These two switches
+answer it for you.</p>
+<p>Both press a single <b>Enter</b>, which accepts the option the chooser
+already has selected (its first one). Nothing types a number: if the
+detection were ever wrong, a bare Enter on an empty prompt does nothing,
+whereas a stray "1" would be sent to Claude as a message.</p>
+<p>Three conditions must hold before either fires, and together they are what
+make a false positive harmless:</p>
+<ul>
+<li>the turn is <b>not running</b> — there is nothing to answer mid-stream;</li>
+<li>your input box is <b>empty</b> — Enter with a half-written message in it
+would submit that message;</li>
+<li>the chooser is one we have <b>not already answered</b> — its text stays
+on screen afterwards, so "it still matches" is not evidence it is still
+open. One chooser, one Enter.</li>
+</ul>
+<p><b>Answer choosers</b> (on by default) handles ordinary questions — the
+session stopped to ask something and picking the offered option is simply
+what unblocks it.</p>
+<p><b>Answer tool-permission requests</b> (on by default) handles the
+requests to run a command or edit a file that Claude Code shows when
+bypass-permissions is off. This one is different in kind: answering it
+<i>authorises work</i> rather than merely unblocking a stalled session. It is
+a separate switch precisely so it can be turned off on its own — do that if
+you rely on reviewing those requests yourself.</p>
+<p>Both are detected by patterns you can edit on the <b>Triggers</b> tab
+(“Any chooser” and “Tool-permission prompt”); the permission pattern is what
+keeps the two switches apart, so a chooser matching it is never answered by
+the first switch.</p>
 
 <h3>Advanced&#8230; &#8594; Triggers</h3>
 <p>Every detection pattern, editable and case-insensitive. Anthropic re-words
@@ -4330,8 +4528,12 @@ instead of double-typing into the same sessions.</li>
 titles share one set of settings — worth knowing before ticking one of them
 for model recovery.</li>
 <li><b>Check updates</b> asks GitHub whether a newer release exists and can
-download, verify and swap the exe in place. Only the packaged exe updates
-itself; running from source just reports what is available.</li>
+download, verify and swap the exe in place. If the swap cannot complete —
+antivirus quarantines the staged file, the folder is read-only — the helper
+starts the <i>previous</i> version back up rather than leaving you with
+nothing running, and drops an <code>.update-failed.txt</code> marker beside
+the exe. Only the packaged exe updates itself; running from source just
+reports what is available.</li>
 </ul>
 
 <p><a href="https://github.com/zhh198903-ctrl/claude-code-auto-continue">Project page on GitHub</a></p>
@@ -4353,7 +4555,8 @@ class AdvancedDialog(QDialog):
       after a delay.
     """
 
-    def __init__(self, parent, cfg: dict, windows: dict, patterns: dict):
+    def __init__(self, parent, cfg: dict, windows: dict, patterns: dict,
+                 auto: dict = None):
         super().__init__(parent)
         self.setWindowTitle("Advanced")
         self.resize(660, 640)
@@ -4365,6 +4568,10 @@ class AdvancedDialog(QDialog):
         outer = QVBoxLayout(self)
         tabs = QTabWidget()
         outer.addWidget(tabs, 1)
+
+        ans_tab = QWidget()
+        tabs.addTab(ans_tab, "Answering")
+        self._build_answer_tab(ans_tab, auto or {})
 
         trig_tab = QWidget()
         tabs.addTab(trig_tab, "Triggers")
@@ -4530,6 +4737,46 @@ class AdvancedDialog(QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         outer.addWidget(btns)
+
+    def _build_answer_tab(self, tab, auto: dict) -> None:
+        root = QVBoxLayout(tab)
+        intro = QLabel(
+            "Claude Code sometimes pauses on a chooser and waits. These "
+            "answer it with Enter, which takes the option it already "
+            "pre-selected. See <b>Help</b>.")
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        self.auto_choose_chk = QCheckBox("Answer choosers")
+        self.auto_choose_chk.setChecked(bool(auto.get("choose", True)))
+        self.auto_choose_chk.setToolTip(
+            "Ordinary numbered choosers — the session had stopped to ask, "
+            "and picking the first option is what unblocks it. Never fires "
+            "while a turn is running, never while you have anything typed "
+            "in the input box, and once per chooser.")
+        root.addWidget(self.auto_choose_chk)
+
+        self.auto_perm_chk = QCheckBox(
+            "Answer tool-permission requests")
+        self.auto_perm_chk.setChecked(bool(auto.get("permission", True)))
+        self.auto_perm_chk.setToolTip(
+            "Requests to run a command or edit a file (the ones you see "
+            "when bypass-permissions is off). Answering these AUTHORISES "
+            "the work — turn this off if you want to approve them "
+            "yourself.")
+        root.addWidget(self.auto_perm_chk)
+
+        warn = QLabel(
+            "⚠ The second one approves work Claude asked permission for. "
+            "Leave it off if you review those by hand.")
+        warn.setWordWrap(True)
+        warn.setStyleSheet("font-weight: bold;")
+        root.addWidget(warn)
+        root.addStretch(1)
+
+    def result_auto(self) -> dict:
+        return {"choose": self.auto_choose_chk.isChecked(),
+                "permission": self.auto_perm_chk.isChecked()}
 
     # ---- Triggers tab ----------------------------------------------------
 

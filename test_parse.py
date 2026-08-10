@@ -2,6 +2,7 @@
 import sys, io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
+import auto_continue as ac
 from auto_continue import (
     NETWORK_POST_MATCH_TAIL, SWITCH_POST_MATCH_TAIL,
     compile_trigger_patterns, parse_limit_message, parse_retry_exhausted,
@@ -9,6 +10,7 @@ from auto_continue import (
     parse_fable_picker, parse_switch_model_prompt, parse_limit_prompt,
     parse_oauth_expired,
     next_reset_datetime,
+    send_text_lines, send_keys,
 )
 from datetime import datetime, timedelta
 import pytz
@@ -82,6 +84,21 @@ samples = [
     # Hypothetical "usage limit" wording — also matches.
     ("You've hit your usage limit · resets 4pm (Asia/Shanghai)\n" + UP,
      (4, 0, "pm", "Asia/Shanghai")),
+    # --- Defect regression: multi-word / hyphenated qualifiers (previously
+    # missed — LIMIT_RE only accepted a single \w+ qualifier). ---
+    # Two-word qualifier: "daily usage limit".
+    ("You've hit your daily usage limit · resets 6pm (Asia/Shanghai)\n" + UP2,
+     (6, 0, "pm", "Asia/Shanghai")),
+    # Hyphenated + numeric qualifier: "5-hour limit".
+    ("You've hit your 5-hour limit · resets 8pm (Asia/Shanghai)\n" + UP2,
+     (8, 0, "pm", "Asia/Shanghai")),
+    # Three-word qualifier — still within the allowed bound.
+    ("You've hit your weekly usage session limit · resets 1am (UTC)\n" + UP2,
+     (1, 0, "am", "UTC")),
+    # Bound check: MORE than 3 qualifier words must NOT match — keeps the
+    # pattern from drifting into matching unrelated prose.
+    ("You've hit your one two three four limit · resets 1am (UTC)\n" + UP2,
+     None),
     # --- Different-timezone users (Anthropic renders the user's local tz). ---
     # West coast US.
     ("You've hit your session limit · resets 7pm (America/Los_Angeles)\n"
@@ -606,5 +623,168 @@ tcheck("mid-stream truncation honours the gate",
        parse_server_error_stuck(f"{_TRUNC}\n  ✽ Swirling… (9s · ↓ 1k tokens)")
        is False
        and parse_server_error_stuck(f"{_TRUNC}\n> \n{_BAR}") is True)
+
+
+# ---------- composer-line guard (defect 3) ----------
+# Verified bug: text the user is TYPING is indistinguishable from a real
+# banner by content alone —
+# parse_econnreset_stuck("I'm asking for help: API Error: Unable to conn"
+#                         "ect to API (ECONNRESET) -- any ideas?")
+# returned True, so the watchdog would type 'continue' into a half-written
+# message, or — for the picker/dialog detectors — press a bare Enter that
+# SUBMITS it. The fix: a match whose line begins with '>' + NBSP (U+00A0),
+# the composer's own prefix as sampled from a live terminal, is dropped.
+print()
+print("---- composer-line guard (defect 3) ----")
+
+NBSP = " "  # non-breaking space -- see _COMPOSER_LINE_RE in auto_continue.py
+
+
+def _composed(s):
+    """Simulate `s` sitting on the composer/input-box line."""
+    return ">" + NBSP + s
+
+
+for label, fn, snippet in (
+    ("retry-exhausted", parse_retry_exhausted, _RETRY),
+    ("connection error", parse_econnreset_stuck, _ERR),
+    ("truncated response", parse_server_error_stuck, _TRUNC),
+):
+    tcheck(f"{label}: real banner (no composer prefix) still detected",
+           fn(snippet) is True)
+    tcheck(f"{label}: same text on a composer line is NOT detected",
+           fn(_composed(snippet)) is False)
+
+# The user typing a message that happens to embed the picker/dialog wording
+# must not earn a bare Enter that SUBMITS whatever else they had typed.
+_picker_prose = "I want to " + _SW + " Opus 5, or " + _ED + " later"
+tcheck("safeguard picker: composed user text is NOT detected",
+       parse_fable_picker(_composed(_picker_prose)) is False)
+
+_switch_prose = "should I say " + _YES + " Fable 5, or " + _NO + "?"
+tcheck("switch-model dialog: composed user text is NOT detected",
+       parse_switch_model_prompt(_composed(_switch_prose)) is False)
+
+tcheck("limit picker: composed user text is NOT detected",
+       parse_limit_prompt(_composed(PICKER)) is False)
+
+# Defect-3 REGRESSION for the wrong first fix: treating a PLAIN space after
+# '>' as the composer prefix would ALSO suppress the picker/dialog's own
+# pre-selected "> 1. ..." option line — that's real Claude Code output, not
+# the user's composer, and it must keep firing so the watchdog still presses
+# Enter for the user.
+tcheck("safeguard picker: real app-printed '> 1. ...' option line still fires",
+       parse_fable_picker("> 1. " + _SW + " Opus 5\n  2. " + _ED + " with Fable 5")
+       is True)
+tcheck("switch-model dialog: real app-printed '> 1. ...' option line still fires",
+       parse_switch_model_prompt(
+           "Switch model?\n> 1. " + _YES + " Fable 5\n  2. " + _NO) is True)
+tcheck("limit picker: real app-printed picker still fires",
+       parse_limit_prompt(PICKER) is True)
+
+
+# ---------- foreground-verification safety net (defect 1) ----------
+# Verified bug: when window_ctrl.NativeWindowHandle is unreadable (raises, or
+# is 0/None), `target_hwnd` was 0, and the old loop guard
+#     if not target_hwnd or _get_foreground_hwnd() == target_hwnd: break
+# broke on the FIRST iteration purely because `target_hwnd` was falsy — never
+# actually checking whether the window reached the foreground — and the
+# post-loop guard
+#     if target_hwnd and _get_foreground_hwnd() != target_hwnd: return False
+# was skipped for the same reason, so SendKeys fired with NO verification at
+# all and the function still reported success. An unreadable handle must be
+# treated as "cannot verify" == failure, exactly like a handle that IS
+# readable but never reaches the foreground.
+print()
+print("---- foreground-verification safety net (defect 1) ----")
+
+
+class _FakeTerm:
+    """Stand-in for a WindowControl whose TermControl is itself: ClassName
+    == 'TermControl' makes find_termcontrol(w) return w directly, so this one
+    fake plays both `window_ctrl` and `term`."""
+    ClassName = "TermControl"
+
+    def __init__(self, hwnd, raise_on_handle=False):
+        self._hwnd = hwnd
+        self._raise = raise_on_handle
+        self.set_active_calls = 0
+        self.set_focus_calls = 0
+
+    @property
+    def NativeWindowHandle(self):
+        if self._raise:
+            raise OSError("handle unreadable")
+        return self._hwnd
+
+    def SetActive(self):
+        self.set_active_calls += 1
+
+    def SetFocus(self):
+        self.set_focus_calls += 1
+
+    def GetChildren(self):
+        return []
+
+
+def _fg_check(win, fg_hwnd, expect_ok, label, use_send_keys=False):
+    """Run send_text_lines (or send_keys) against `win` with the foreground
+    hwnd fixed at `fg_hwnd`, and check the result AND whether a keystroke was
+    actually sent match `expect_ok`."""
+    sent = []
+    orig_fg = ac._get_foreground_hwnd
+    orig_send = ac.auto.SendKeys
+    ac._get_foreground_hwnd = lambda: fg_hwnd
+    ac.auto.SendKeys = lambda *a, **k: sent.append(a)
+    try:
+        if use_send_keys:
+            ok = send_keys(win, "{Esc}")
+        else:
+            ok = send_text_lines(win, ["continue"])
+    finally:
+        ac._get_foreground_hwnd = orig_fg
+        ac.auto.SendKeys = orig_send
+    got_ok = (ok is True) and bool(sent)
+    got_blocked = (ok is False) and not sent
+    cond = got_ok if expect_ok else got_blocked
+    tcheck(label, cond)
+
+
+# Handle raises on read (e.g. a COM error) — must be treated as unverified,
+# never as an automatic pass, regardless of what the "foreground" window is.
+_w = _FakeTerm(hwnd=0, raise_on_handle=True)
+_fg_check(_w, fg_hwnd=999, expect_ok=False,
+          label="send_text_lines: unreadable handle -> refuses to type")
+_w = _FakeTerm(hwnd=0, raise_on_handle=True)
+_fg_check(_w, fg_hwnd=999, expect_ok=False,
+          label="send_keys: unreadable handle -> refuses to send", use_send_keys=True)
+
+# Handle reads as a plain 0 (falsy but no exception) — same rule applies.
+_w = _FakeTerm(hwnd=0, raise_on_handle=False)
+_fg_check(_w, fg_hwnd=999, expect_ok=False,
+          label="send_text_lines: zero handle -> refuses to type")
+_w = _FakeTerm(hwnd=0, raise_on_handle=False)
+_fg_check(_w, fg_hwnd=999, expect_ok=False,
+          label="send_keys: zero handle -> refuses to send", use_send_keys=True)
+
+# Sanity: a VALID handle that DOES reach the foreground must still work —
+# the fix must not turn every send into a refusal.
+_w = _FakeTerm(hwnd=555)
+_fg_check(_w, fg_hwnd=555, expect_ok=True,
+          label="send_text_lines: verified foreground -> types")
+_w = _FakeTerm(hwnd=555)
+_fg_check(_w, fg_hwnd=555, expect_ok=True,
+          label="send_keys: verified foreground -> sends", use_send_keys=True)
+
+# Sanity: a VALID handle that never reaches the foreground (SetForegroundWindow
+# silently denied) must still refuse, as before this fix.
+_w = _FakeTerm(hwnd=555)
+_fg_check(_w, fg_hwnd=111, expect_ok=False,
+          label="send_text_lines: valid handle never foregrounded -> refuses")
+_w = _FakeTerm(hwnd=555)
+_fg_check(_w, fg_hwnd=111, expect_ok=False,
+          label="send_keys: valid handle never foregrounded -> refuses",
+          use_send_keys=True)
+
 
 sys.exit(1 if failures else 0)

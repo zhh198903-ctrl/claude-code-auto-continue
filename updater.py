@@ -219,9 +219,24 @@ _DETACHED_PROCESS = 0x00000008
 _CREATE_NO_WINDOW = 0x08000000
 
 
+def update_failure_marker_path(target_exe: str) -> str:
+    """Where build_swap_bat records a permanent swap failure: next to
+    `target_exe`, named `<target>.update-failed.txt`.
+
+    Written only on the give-up path (wait-loop cap hit), since by the time
+    the bat runs the app has already quit (the caller quits it so the file
+    lock drops) — there is no live process left to raise a toast, so the
+    marker is the only trace of the failure. A human can find it next to the
+    exe; a future app-side startup check could surface/clear it too. This
+    module doesn't read it back — it only defines where the bat writes it.
+    """
+    return target_exe + ".update-failed.txt"
+
+
 def build_swap_bat(new_exe: str, target_exe: str, relaunch: bool = True) -> str:
     """Return the .bat text that waits for the old exe's lock to drop, moves
-    the new exe over it, relaunches, and self-deletes. Split out for testing.
+    the new exe over it, and relaunches `target_exe` — on BOTH the success
+    path and the give-up path — then self-deletes. Split out for testing.
 
     Uses `ping` (not `timeout`) for the wait because a detached process has no
     console and `timeout` would error. `chcp 65001` + quoted paths handle
@@ -230,9 +245,17 @@ def build_swap_bat(new_exe: str, target_exe: str, relaunch: bool = True) -> str:
     The wait loop is CAPPED (~150 tries ≈ 2.5 min): a permanent failure
     (staged .new quarantined by AV, unwritable target dir, app never exits)
     must not leave a hidden detached cmd.exe looping forever. On give-up the
-    bat just self-deletes without relaunching — the running app keeps its
-    old version, which is the safe outcome.
+    `move` never happened, so `target_exe` is still the old exe on disk —
+    but the caller (gui.py's `_on_update_ready`) already quit the app to
+    drop the file lock, so nothing is running any more. To avoid silently
+    stranding the user with no Auto-Continue at all, give-up writes a small
+    UTF-8 marker file next to `target_exe` (see `update_failure_marker_path`)
+    recording that the swap failed, then falls through to the SAME relaunch
+    line the success path uses, starting the old exe back up. `relaunch`
+    (default True; tests pass False to inspect the bat without that line)
+    gates that single relaunch line, which both paths converge on.
     """
+    marker = update_failure_marker_path(target_exe)
     relaunch_line = f'start "" "{target_exe}"\r\n' if relaunch else ""
     return (
         "@echo off\r\n"
@@ -240,12 +263,17 @@ def build_swap_bat(new_exe: str, target_exe: str, relaunch: bool = True) -> str:
         "set tries=0\r\n"
         ":waitloop\r\n"
         "set /a tries+=1\r\n"
-        "if %tries% gtr 150 goto cleanup\r\n"
+        "if %tries% gtr 150 goto giveup\r\n"
         f'move /y "{new_exe}" "{target_exe}" >nul 2>&1\r\n'
         "if errorlevel 1 (\r\n"
         "    ping -n 2 127.0.0.1 >nul\r\n"
         "    goto waitloop\r\n"
         ")\r\n"
+        "goto relaunch\r\n"
+        ":giveup\r\n"
+        "echo Auto-Continue update failed after %tries% attempts: exe still "
+        f'locked or unwritable; kept previous version running. > "{marker}"\r\n'
+        ":relaunch\r\n"
         f"{relaunch_line}"
         ":cleanup\r\n"
         '(goto) 2>nul & del "%~f0"\r\n'
