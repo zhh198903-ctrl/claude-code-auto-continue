@@ -4441,12 +4441,17 @@ what unblocks it. The one this matters most for is the prompt that ends
 approves it — so with this on, an unattended session carries straight on
 into the work. Dialogs drawn inside a box are recognised the same as plain
 ones.</p>
-<p><b>Know what Enter takes there.</b> That prompt's first option is
-<i>Yes, and bypass permissions</i>, so approving it this way also stops
-that session asking permission for the rest of its run. If you would rather
-approve plans yourself, turn <b>Answer choosers</b> off — the plan prompt
-rides on that switch, not on the permission one, because it is a chooser
-like any other until you look at what its first option says.</p>
+<p><b>Know what Enter takes there.</b> That prompt's first option does not
+just approve the plan — it also raises the session's permission level.
+Captured live, minutes apart: a session with permission checks on offered
+<i>Yes, and use auto mode</i> (and was in auto mode afterwards), while
+another offered <i>Yes, and bypass permissions</i>. The wording tracks
+where the session already is; what stays true is that Enter accepts the
+looser setting.</p>
+<p>If you would rather approve plans yourself, turn <b>Answer choosers</b>
+off — the plan prompt rides on that switch, not on the permission one,
+because it is a chooser like any other until you read what its first option
+says.</p>
 <p><b>Answer tool-permission requests</b> (on by default) handles the
 requests to run a command or edit a file that Claude Code shows when
 bypass-permissions is off. This one is different in kind: answering it

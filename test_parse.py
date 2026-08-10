@@ -824,6 +824,21 @@ check_reset("plan approval is not treated as a permission request",
             and ac.parse_permission_prompt(_plan_boxed) is False)
 check_reset("Enter would take the first option (bypass permissions)",
             ac._chooser_match(_plan_boxed).group(0).find(_O1) >= 0)
+
+# The first option's wording tracks the session's current permission level.
+# Both of these were captured verbatim from live sessions minutes apart, so
+# neither may be relied on alone — what the detector must do is recognise
+# the prompt in either dress. Note the marker here is U+276F, indented,
+# which is how a real one renders.
+_alt = ("   Claude has written up a plan and is ready to execute. "
+        "Would you like to proceed?\n"
+        "   " + chr(0x276F) + " 1" ". Yes, and use auto mode\n"
+        "     2" ". Yes, manually approve edits\n"
+        "     3" ". Tell Claude what to change")
+check_reset("the auto-mode wording of the plan prompt is recognised too",
+            ac.parse_chooser_prompt(_alt) is True)
+check_reset("and it is still not a permission request",
+            ac.parse_permission_prompt(_alt) is False)
 # Prose that merely contains a marker and numbers must not qualify.
 check_reset("ordinary prose is not mistaken for a chooser",
             ac.parse_chooser_prompt(

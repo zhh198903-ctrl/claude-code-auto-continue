@@ -19,3 +19,7 @@ dist/
 *.log
 plts_smith*.png
 plts_hang.png
+
+# Throwaway sessions used to verify the watchdog against a real Claude
+# Code window. Whatever a probe task produces there is scratch, not source.
+ccdebug/
