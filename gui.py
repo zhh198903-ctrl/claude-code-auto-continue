@@ -1735,7 +1735,7 @@ class Watcher(QObject):
                                 # window's prompt onto a freshly compacted
                                 # context — so a block landing HERE means the
                                 # prompt itself trips the filter, and each window
-                                # gets a budget ("Loops" in Advanced, default 1)
+                                # gets a budget ("Tries" in Advanced, default 1)
                                 # of recoveries that may type it. One past the
                                 # budget, the PARKING run: finish on the
                                 # fallback, /compact, switch back — but type
@@ -4564,7 +4564,9 @@ commitment than leaving it in all-windows mode.</p>
 decision: the window is unticked automatically and left alone from then on.
 Tick it again in Advanced to resume enforcement.</p>
 <p><b>Step script</b>, one step per line — every line is editable, and the
-shipped default is only a starting point:</p>
+shipped default is only a starting point. The editor is sized to show the
+built-in script in full, so what you read is the whole recovery: if a script
+you wrote runs past the box, the rest is still there, just scrolled.</p>
 <ul>
 <li>plain text — typed, then Enter. A <code>/model X</code> line is skipped
 when the status bar already reads X, and always waits for a running turn to
@@ -4755,7 +4757,20 @@ class AdvancedDialog(QDialog):
         if not isinstance(_steps_src, str) or not _steps_src.strip():
             _steps_src = DEFAULT_FABLE_STEPS
         self.steps_edit = QPlainTextEdit(_steps_src)
-        self.steps_edit.setFixedHeight(150)
+        # Tall enough for the built-in script to be read without scrolling.
+        # This was a hard-coded 150px, which fitted until the script grew to
+        # ten lines and hid its own last step (<resume> — the one that types
+        # your prompt) below the fold. Deriving it from the default keeps the
+        # box honest if the script changes length again.
+        _lines = max(len(DEFAULT_FABLE_STEPS.strip().splitlines()), 10)
+        _fm = self.steps_edit.fontMetrics()
+        # The +1 line is slack, not decoration: the document's own margins and
+        # the frame together eat more than their nominal width, and a box that
+        # is one pixel short scrolls exactly like one that is short by ten.
+        self.steps_edit.setFixedHeight(
+            _fm.lineSpacing() * (_lines + 1)
+            + int(self.steps_edit.document().documentMargin()) * 2
+            + self.steps_edit.frameWidth() * 2)
         root.addWidget(self.steps_edit)
 
         self.all_windows_chk = QCheckBox(
@@ -5170,7 +5185,7 @@ class AdvancedDialog(QDialog):
                 cmd = (cmd_it.text().strip() if cmd_it is not None else "")
                 if cmd:
                     resume[k] = cmd
-                # Loops: anything that isn't a number is the default of 1,
+                # Tries: anything that isn't a number is the default of 1,
                 # and only non-defaults are stored.
                 lp_it = self.win_list.item(i, 2)
                 try:
