@@ -4427,6 +4427,13 @@ would submit that draft. A chooser that has replaced the input box entirely
 on screen afterwards, so "it still matches" is not evidence it is still
 open. One chooser, one Enter.</li>
 </ul>
+<p>Detection deliberately errs towards matching. A wrong match presses Enter
+on an idle session whose input box is empty, where Enter does nothing; a
+missed one leaves the session sitting on the question all night, which is
+the thing you turned this on to avoid.</p>
+<p>Note the flip side of that: while this is on, <b>quitting Auto-Continue
+leaves any session that is waiting on a chooser waiting</b> — unlike a rate
+limit, which resumes by itself once the clock passes.</p>
 <p><b>Answer choosers</b> (on by default) handles ordinary questions — the
 session stopped to ask something and picking the offered option is simply
 what unblocks it. The one this matters most for is the prompt that ends

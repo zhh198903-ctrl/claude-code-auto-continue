@@ -861,7 +861,7 @@ def parse_oauth_expired(text: str, pattern=None) -> bool:
 # in "> 1." cannot pose as a chooser.
 _ROW = r"[^\S\n]{0,6}[\u2502\u2503\u2551|]?[^\S\n]{0,4}"
 CHOOSER_RE = re.compile(
-    r"(?m)^" + _ROW + r"[>\u276f][ \t]+1[.)]\s+\S[\s\S]{0,400}?"
+    r"(?m)^" + _ROW + r"[>\u276f][ \t]+1[.)]\s+\S[\s\S]{0,2000}?"
     r"^" + _ROW + r"2[.)]\s+\S")
 
 # Claude Code's tool-permission prompt. It is a chooser like any other, but

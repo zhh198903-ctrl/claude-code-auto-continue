@@ -857,6 +857,27 @@ check_reset("but text in the box IS a draft",
             ac.composer_has_draft(
                 "output\n>" + chr(0xa0) + "half a thought") is True)
 
+# Long option descriptions, padded to the terminal width the way UIA reports
+# them. Reproduces the live measurement that exposed the too-tight gap.
+_pad = " " * 60
+_long_desc = "\n".join(f"     description line {i}{_pad}" for i in range(6))
+_LONG_CHOOSER = (
+    "How much should the manual cover?\n\n"
+    "> 1" ". Fix the errors and fill the common gaps (recommended)" + _pad
+    + "\n" + _long_desc + "\n"
+    "  2" ". Fix the errors only" + _pad + "\n"
+    "     a shorter description\n"
+    "  3" ". Write everything up\n\n"
+    "Enter to select - arrow keys to navigate - Esc to cancel")
+_gap = (_LONG_CHOOSER.index("  2" ". Fix")
+        - _LONG_CHOOSER.index("> 1" ". Fix"))
+check_reset(f"the fixture spans {_gap} chars, past the old 400 allowance",
+            _gap > 400)
+check_reset("a chooser with long option descriptions is still recognised",
+            ac.parse_chooser_prompt(_LONG_CHOOSER) is True)
+check_reset("and it is not mistaken for a permission request",
+            ac.parse_permission_prompt(_LONG_CHOOSER) is False)
+
 
 # =============================================================================
 print()
