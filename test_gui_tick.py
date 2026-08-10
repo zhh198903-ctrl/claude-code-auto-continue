@@ -354,6 +354,25 @@ check("G4j setting Loops again re-arms the prompt",
       SENT == [(9, ["next task: refactor the parser"])])
 SENT.clear()
 
+# Dry-run must not spend the budget: the send types nothing and still
+# reports success, so counting there charged a run that never happened — and
+# because the count is persisted, one dry-run pass left every configured
+# prompt at zero runs for good.
+w = af_watcher()
+w._dry_run = True
+SPENT = []
+w.loops_spent.connect(lambda k, n: SPENT.append((k, n)))
+w._tick()
+TEXTS[9] = IDLE
+advance(60)
+w._tick()
+advance(gui.AFTER_FINISH_SETTLE_S)
+w._tick()
+check("G4k dry-run leaves the remaining count alone",
+      w._after_finish_loops.get("win", 1) == 1 and not SPENT)
+SENT.clear()
+
+
 # Never ran while watched -> never fires.
 set_now(T0)
 reset([(9, "win")], {9: IDLE})

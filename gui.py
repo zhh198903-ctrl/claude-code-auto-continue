@@ -561,7 +561,9 @@ class _WState:
     fable_idle_from: Optional[datetime] = None    # <idle>: wall-clock start
     fable_park: bool = False                      # final run: <resume> muted
     fable_last_key_at: Optional[datetime] = None  # rate-limit repeated Enter
-    fable_runs: int = 0                           # recoveries since idle
+    fable_runs: int = 0                           # cycles armed this episode
+    fable_tried: int = 0                          # cycles that TYPED the prompt
+    fable_parked: bool = False                    # a parking cycle completed
     fable_notice_dist: Optional[int] = None       # tail-distance when latched
     fable_notice_id: Optional[str] = None         # request id of that notice
     fable_clear_since: Optional[datetime] = None  # notice absent since when
@@ -1527,6 +1529,19 @@ class Watcher(QObject):
                                     # judge on a later tick, once the screen
                                     # has caught up with reality.
                                     wanted = _last_model_step(steps)
+                                    # A cycle counts against Tries only by
+                                    # reaching the end. One killed on the way
+                                    # (a window that never came forward, a
+                                    # run gone stale) never attempted the
+                                    # thing the allowance is for, and with
+                                    # the default of 1 that used to spend the
+                                    # entire budget without a single try.
+                                    # Both flags are read before the reset,
+                                    # which clears the per-run one.
+                                    if st.fable_park:
+                                        st.fable_parked = True
+                                    else:
+                                        st.fable_tried += 1
                                     _fable_reset(st)
                                     st.fable_handled = True
                                     st.fable_verdict_at = now
@@ -1603,6 +1618,8 @@ class Watcher(QObject):
                             elif (now - st.fable_clear_since
                                   >= timedelta(seconds=FABLE_CLEARED_S)):
                                 st.fable_runs = 0
+                                st.fable_tried = 0
+                                st.fable_parked = False
                                 st.fable_notice_dist = None
                                 st.fable_notice_id = None
                         elif not st.fable_handled and steps:
@@ -1616,8 +1633,15 @@ class Watcher(QObject):
                             # fallback, /compact, switch back — but type
                             # nothing, because retyping a blocked prompt is
                             # the infinite loop this cap exists to prevent.
+                            # Counted on the cycles that actually TYPED the
+                            # prompt, not on the ones that merely started: a
+                            # cycle can die for reasons that have nothing to
+                            # do with the block (the window never reaches the
+                            # foreground, the run goes stale), and with the
+                            # default allowance of 1 that consumed the whole
+                            # budget without ever making an attempt.
                             _loops = self._fable_resume_loops.get(_key, 1)
-                            if st.fable_runs > _loops:
+                            if st.fable_parked:
                                 # The parking run already happened and the
                                 # window got blocked AGAIN — something else
                                 # (the user, an after-finish prompt) started
@@ -1628,7 +1652,7 @@ class Watcher(QObject):
                                     f"after parking — leaving it alone; the "
                                     f"prompt needs a human edit")
                                 st.fable_handled = True
-                            elif st.fable_runs >= _loops:
+                            elif st.fable_tried >= _loops:
                                 st.fable_runs += 1
                                 self.log.emit(
                                     "warn",
@@ -2110,11 +2134,15 @@ class Watcher(QObject):
                             # once per completed run, not once per tick.
                             st.af_seen_running = False
                             st.af_idle_since = None
-                            # Spend one run. Negative means unlimited and is
-                            # left alone. Persisting happens on the GUI
-                            # thread, so a crash between here and the next
-                            # completed run cannot resurrect the budget.
-                            if _af_left > 0:
+                            # Spend one run — but only when one was really
+                            # spent. In dry-run the send types nothing and
+                            # still returns True, so counting here charged
+                            # the budget for work that never happened, and
+                            # persisting made it permanent: one dry-run pass
+                            # left every configured prompt at 0 runs, which
+                            # is the opposite of what dry-run promises.
+                            # Negative means unlimited and is left alone.
+                            if _af_left > 0 and not self._dry_run:
                                 _af_left -= 1
                                 self._after_finish_loops[_af_key] = _af_left
                                 self.loops_spent.emit(_af_key, _af_left)
@@ -4056,8 +4084,9 @@ terminal window found.</li>
 needs it.</li>
 </ol>
 <p>Not sure yet? Tick <b>Dry-run</b> first: everything is detected, scheduled
-and logged, but no keystroke is ever sent. The log then shows exactly what
-would have happened, prefixed <code>[dry-run]</code>.</p>
+and logged, but no keystroke is ever sent and no Loops budget is spent. The
+log shows exactly what would have happened, prefixed
+<code>[dry-run]</code>.</p>
 
 <h3>What it reacts to</h3>
 <ul>
@@ -4199,8 +4228,11 @@ keeps it running. The log then says <i>done (on Fable 5)</i>, or warns that
 the session ended on the wrong model or that the block still stands.</p>
 <p><b>Tries</b> (third column of the window list, default <b>1</b>) is how
 many recoveries <i>one block episode</i> may spend typing the resume prompt.
-It counts whole cycles, and a new cycle only starts when a genuinely new
-block appears (each carries its own request id) — never back-to-back. A block
+It counts whole cycles, and only ones that <i>finish</i>: a cycle killed on
+the way (the window never came to the foreground, the run went stale) never
+attempted the thing the allowance is for, so it costs nothing. A new cycle
+only starts when a genuinely new block appears (each carries its own request
+id) — never back-to-back. A block
 right after a successful recovery means the prompt <i>itself</i> trips the
 filter, so one past the allowance a final run still lets the fallback finish
 and still compacts, but <b>parks</b>: the window ends up idle on the target

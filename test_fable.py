@@ -1624,6 +1624,57 @@ _wb.set_fable_config({"enabled": True, "all_windows": True, "steps": "x",
 check("AC4 a corrupt loops store collapses to defaults",
       _wb._fable_resume_loops == {})
 
+# A Try is spent by a cycle that RUNS TO THE END, never by one that arms.
+# A cycle can die for reasons that have nothing to do with the block — the
+# window never reaches the foreground, the run goes stale — and with the
+# default allowance of 1, charging those parked the window on its next real
+# block without a single attempt ever being made.
+reset([(1, "claude")], {1: NOTICE + _ID_A + _BAR_F})
+w = new_watcher(steps="<resume>")
+w._tick()                                       # arm
+SEND_OK[0] = False                              # window won't come forward
+for _ in range(gui.FABLE_SEND_RETRIES + 1):
+    advance(1)
+    w._tick()
+st = w._states[1]
+check("AC5 an abandoned cycle is not counted as a try",
+      st.fable_step == -1 and st.fable_runs == 1 and st.fable_tried == 0)
+
+SEND_OK[0] = True
+TEXTS[1] = NOTICE + _ID_B + _BAR_F              # the next real block
+st.fable_handled = False
+SENT.clear()
+for _ in range(3):
+    advance(1)
+    w._tick()
+check("AC6 so the next block still gets a real attempt",
+      texts_sent() == [["continue"]]
+      and w._states[1].fable_tried == 1)
+
+# ...and once an attempt HAS been made, the allowance behaves as before.
+TEXTS[1] = NOTICE + "\nRequest ID: req_EEEEEEEEEEEE\n" + _BAR_F
+w._states[1].fable_handled = False
+SENT.clear()
+for _ in range(3):
+    advance(1)
+    w._tick()
+check("AC7 a block after the allowance is spent parks instead",
+      w._states[1].fable_parked is True and texts_sent() == [])
+
+# A script with no <resume> step must still be bounded: nothing would ever
+# increment an attempt counter tied to that step, so every new block would
+# arm another cycle forever.
+reset([(1, "claude")], {1: NOTICE})
+w = new_watcher(steps="continue")
+for _ in range(12):
+    advance(30)
+    w._tick()
+    stx = w._states[1]
+    if stx.fable_step < 0 and stx.fable_handled:
+        stx.fable_handled = False               # the notice keeps re-appearing
+check("AC8 a script without <resume> is still bounded",
+      w._states[1].fable_parked is True and w._states[1].fable_runs <= 2)
+
 
 # =============================================================================
 print("---- AD: <idle> waits for the turn to actually end ----")
