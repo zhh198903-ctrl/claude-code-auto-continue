@@ -569,7 +569,6 @@ class _WState:
     fable_verdict_want: Optional[str] = None      # model that run aimed for
     af_seen_running: bool = False                 # ran since the last fire
     af_idle_since: Optional[datetime] = None      # idle streak start
-    af_fired: int = 0                             # prompt typed this many x
     af_spent_logged: bool = False                 # budget-spent said once
     fable_picker_used: bool = False               # picker accepted this run
     fable_hold_logged: bool = False               # 'waiting for idle' said once
@@ -594,6 +593,10 @@ class Watcher(QObject):
     # Emitted with a title_key when the user has taken manual control of
     # a window's model and it should be dropped from the recovery scope.
     fable_untick = pyqtSignal(str)
+    # (title_key, runs left) after an after-finish prompt spent one. The GUI
+    # owns persistence, so the remaining count survives a restart — which is
+    # the whole point of counting down rather than up.
+    loops_spent = pyqtSignal(str, int)
     log = pyqtSignal(str, str)  # (level, message). level ∈ {info,warn,err,fire}
     running_changed = pyqtSignal(bool)
 
@@ -719,21 +722,19 @@ class Watcher(QObject):
             str(k): str(v).strip() for k, v in overrides.items()
             if str(v).strip()
         }
-        # A changed (or newly set) prompt is a NEW task: its Loops budget
-        # starts fresh. Without this the counter from the previous prompt
-        # would swallow the first firing of the next one.
         changed = {k for k in new if new.get(k) != self._after_finish.get(k)}
         self._after_finish = new
+        # A new prompt deserves a fresh "no runs left" line if it runs out
+        # too; the remaining count itself lives in the loops map.
         for st in self._states.values():
             if title_key(st.title) in changed:
-                st.af_fired = 0
                 st.af_spent_logged = False
 
     @pyqtSlot(dict)
     def set_after_finish_loops(self, overrides: dict) -> None:
-        # title_key -> how many times the after-finish prompt may be typed
-        # (missing = 1, 0 = unlimited). Defensively coerced like every other
-        # persisted map — this runs on the worker thread.
+        # title_key -> runs REMAINING for that window's after-finish prompt
+        # (missing = 1, 0 = spent, negative = unlimited). Defensively coerced
+        # like every other persisted map — this runs on the worker thread.
         loops: dict[str, int] = {}
         if isinstance(overrides, dict):
             for k, v in overrides.items():
@@ -741,14 +742,11 @@ class Watcher(QObject):
                     n = int(v)
                 except (TypeError, ValueError):
                     continue
-                if n >= 0:
-                    loops[str(k)] = n
+                loops[str(k)] = max(-1, n)
         changed = {k for k in loops
                    if loops.get(k) != self._after_finish_loops.get(k)}
         changed |= {k for k in self._after_finish_loops if k not in loops}
         self._after_finish_loops = loops
-        # A raised cap deserves a fresh "spent" announcement if it runs out
-        # again; only the log latch resets, the count itself stands.
         for st in self._states.values():
             if title_key(st.title) in changed:
                 st.af_spent_logged = False
@@ -2072,20 +2070,25 @@ class Watcher(QObject):
             #   * recovery in flight       -> fable_step >= 0
             af_cmd = self._after_finish.get(title_key(title))
             if af_cmd and tail:
-                _af_cap = self._after_finish_loops.get(title_key(title), 1)
-                if _af_cap and st.af_fired >= _af_cap:
-                    # Budget spent: the prompt was typed its allotted number
-                    # of times ("Loops", default 1). Re-typing the same
-                    # follow-up after every run is an infinite loop unless
-                    # the user explicitly asked for it (Loops = unlimited).
-                    # Editing the prompt resets the count.
+                _af_key = title_key(title)
+                # Loops is a REMAINING count, not a cap: each firing spends
+                # one and the new value is persisted immediately. A cap plus
+                # an in-memory counter looked equivalent but wasn't — the
+                # counter died with the process, so every restart (including
+                # a self-update) re-armed every spent prompt and the next
+                # completed run typed it a second time, into whatever task
+                # the window had moved on to.
+                _af_left = self._after_finish_loops.get(_af_key, 1)
+                if _af_left == 0:
+                    # Spent. Says so once, then stays quiet: the prompt text
+                    # is still visible in the dialog, and raising Loops (or
+                    # editing the prompt) is what re-arms it.
                     if not st.af_spent_logged:
                         st.af_spent_logged = True
                         self.log.emit(
                             "info",
-                            f"after-finish on {title!r}: prompt typed "
-                            f"{st.af_fired}x (Loops {_af_cap}) — not "
-                            f"repeating; edit the prompt to re-arm")
+                            f"after-finish on {title!r}: no runs left "
+                            f"(Loops 0) — set Loops again to re-arm")
                 elif session_running(tail):
                     st.af_seen_running = True
                     st.af_idle_since = None
@@ -2104,11 +2107,17 @@ class Watcher(QObject):
                         if send_text_lines(w, [af_cmd],
                                            dry_run=self._dry_run):
                             # Re-arm only after it is seen running again:
-                            # once per completed run, not once per tick —
-                            # and count it against the Loops budget.
-                            st.af_fired += 1
+                            # once per completed run, not once per tick.
                             st.af_seen_running = False
                             st.af_idle_since = None
+                            # Spend one run. Negative means unlimited and is
+                            # left alone. Persisting happens on the GUI
+                            # thread, so a crash between here and the next
+                            # completed run cannot resurrect the budget.
+                            if _af_left > 0:
+                                _af_left -= 1
+                                self._after_finish_loops[_af_key] = _af_left
+                                self.loops_spent.emit(_af_key, _af_left)
                         else:
                             self.log.emit(
                                 "warn",
@@ -2905,6 +2914,7 @@ class MainWindow(QMainWindow):
         self.worker.snapshot.connect(self._on_snapshot)
         self.worker.log.connect(self._append_log)
         self.worker.fable_untick.connect(self._on_fable_untick)
+        self.worker.loops_spent.connect(self._on_loops_spent)
         self.worker.running_changed.connect(self._on_running_changed)
 
         self.worker_thread.start()
@@ -3049,6 +3059,26 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(url))
 
     @pyqtSlot(str)
+    def _on_loops_spent(self, key: str, left: int) -> None:
+        """Persist the remaining after-finish runs the moment one is spent.
+
+        The worker owns the countdown but not the registry, and the whole
+        reason Loops counts DOWN is that the number has to survive a restart:
+        an in-memory tally re-armed every spent prompt on every launch, and
+        the window's next task got the previous task's follow-up typed into
+        it a second time.
+        """
+        if not key:
+            return
+        self._after_finish_loops[key] = left
+        self._save_settings()
+        self._render_table()          # button label shows what is left
+        self._append_log(
+            "info",
+            f"after-finish for {key!r}: "
+            + (f"{left} run(s) left" if left else
+               "no runs left — set Loops again to re-arm"))
+
     def _on_fable_untick(self, key: str) -> None:
         """Stop enforcing the target model on a window the user took over.
 
@@ -3320,8 +3350,18 @@ class MainWindow(QMainWindow):
                             _n = int(_v)
                         except (TypeError, ValueError):
                             continue
-                        if _n >= 0:
-                            self._after_finish_loops[str(_k)] = _n
+                        self._after_finish_loops[str(_k)] = max(-1, _n)
+                # v2.0.6 stored a CAP, where 0 meant "unlimited". v2.0.7
+                # stores runs REMAINING, where 0 means spent and -1 means
+                # unlimited — so an unmigrated 0 would silently stop a
+                # prompt its owner had set to repeat forever. One-shot, and
+                # flagged, because after the migration 0 is a real value.
+                if not self.settings.value(
+                        "after_finish_loops_v2", False, type=bool):
+                    self._after_finish_loops = {
+                        k: (-1 if v == 0 else v)
+                        for k, v in self._after_finish_loops.items()}
+                    self.settings.setValue("after_finish_loops_v2", True)
             except Exception:
                 self._after_finish_loops = {}
             raw_f = self.settings.value("fable_cfg", "", type=str) or ""
@@ -3722,11 +3762,25 @@ class MainWindow(QMainWindow):
                 # show one would crowd out the table.
                 _af_key = title_key(row["title"])
                 _af_cur = self._after_finish.get(_af_key, "")
-                af_btn = QPushButton(
-                    "After finish ✓" if _af_cur else "After finish…")
+                try:
+                    _af_left = int(self._after_finish_loops.get(_af_key, 1))
+                except (TypeError, ValueError):
+                    _af_left = 1
+                if not _af_cur:
+                    _af_label = "After finish…"
+                elif _af_left < 0:
+                    _af_label = "After finish ∞"
+                elif _af_left == 0:
+                    _af_label = "After finish ✓ (0 left)"
+                else:
+                    _af_label = f"After finish ✓ ({_af_left} left)"
+                af_btn = QPushButton(_af_label)
                 af_btn.setToolTip(
                     ("When this session finishes a run and sits idle, type "
-                     "this prompt so it keeps working:\n\n" + _af_cur)
+                     "this prompt so it keeps working"
+                     + (" (unlimited runs)" if _af_left < 0
+                        else f" ({_af_left} run(s) left)")
+                     + ":\n\n" + _af_cur)
                     if _af_cur else
                     "Set a prompt to type automatically when this session "
                     "finishes its current run and sits idle. Empty = off.")
@@ -3808,7 +3862,7 @@ class MainWindow(QMainWindow):
         key = title_key(title)
         cur = self._after_finish.get(key, "")
         try:
-            cur_loops = max(0, int(self._after_finish_loops.get(key, 1)))
+            cur_loops = max(-1, int(self._after_finish_loops.get(key, 1)))
         except (TypeError, ValueError):
             cur_loops = 1
         dlg = QDialog(self)
@@ -3823,17 +3877,19 @@ class MainWindow(QMainWindow):
         lay.addWidget(edit, 1)
         form = QFormLayout()
         spin = QSpinBox()
-        spin.setRange(0, 999)
-        # 0 shows as "unlimited": the pre-Loops behaviour, re-arming after
-        # every completed run until the prompt is cleared.
+        # -1 is the minimum, so specialValueText labels it: QSpinBox only
+        # substitutes text for the minimum value.
+        spin.setRange(-1, 999)
         spin.setSpecialValueText("unlimited")
         spin.setValue(cur_loops)
         spin.setToolTip(
-            "How many times the prompt may be typed before it stops "
-            "re-arming (default 1). \"unlimited\" repeats after every "
-            "completed run until you clear the prompt. Editing the prompt "
-            "text resets the count.")
-        form.addRow("Loops", spin)
+            "Runs REMAINING for this prompt. Each firing spends one, and "
+            "the new value is saved immediately — so a restart cannot "
+            "re-arm a prompt that is already used up, and the window's "
+            "next task never inherits the previous task's follow-up. "
+            "0 = spent (set it again to re-arm); unlimited = repeat after "
+            "every completed run.")
+        form.addRow("Loops (runs left)", spin)
         lay.addLayout(form)
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -3841,18 +3897,18 @@ class MainWindow(QMainWindow):
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
         lay.addWidget(btns)
-        dlg.resize(480, 280)
+        dlg.resize(480, 300)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         text = edit.toPlainText().strip()
         loops = spin.value()
+        # A prompt that was edited but left at 0 runs would silently never
+        # fire. Typing a new prompt is asking for it to run, so give it one.
+        if text and text != cur and loops == 0:
+            loops = 1
         if text:
             self._after_finish[key] = text
-            # Only non-defaults are stored, same policy as resume Loops.
-            if loops != 1:
-                self._after_finish_loops[key] = loops
-            else:
-                self._after_finish_loops.pop(key, None)
+            self._after_finish_loops[key] = loops
         else:
             self._after_finish.pop(key, None)
             self._after_finish_loops.pop(key, None)
@@ -3862,10 +3918,10 @@ class MainWindow(QMainWindow):
         self._append_log(
             "info",
             f"after-finish for {key!r} "
-            + (f"set to {text!r} (loops "
-               + ("unlimited" if loops == 0 else str(loops)) + ")"
-               if text else "cleared"))
-        self._render_table()      # refresh the ✓ on the button
+            + (f"set to {text!r} ("
+               + ("unlimited runs" if loops < 0 else f"{loops} run(s) left")
+               + ")" if text else "cleared"))
+        self._render_table()      # refresh the button's remaining count
 
     def _do_unexclude(self, title: str) -> None:
         key = title_key(title)
@@ -4069,14 +4125,21 @@ re-detect.</li>
 <p>Click <b>After finish&#8230;</b> on a row and type what that session
 should do when it runs out of work. When the session finishes a run and stays
 idle for 90 seconds, the prompt is typed for you.</p>
-<p><b>Loops</b> (in the same dialog, default <b>1</b>) is how many times the
-prompt may be typed. It counts <i>completed runs</i>, not keystrokes: after
-each firing the window must be seen running again, and then finish again,
-before anything else is typed — the prompt is never repeated into an idle
-session. Set it to <b>unlimited</b> to keep re-arming after every completed
-run until you clear the prompt. Editing the prompt text resets the count (a
-new prompt is a new task), and the count starts fresh when the app
-restarts.</p>
+<p><b>Loops (runs left)</b> in the same dialog is a countdown, default
+<b>1</b>: each firing spends one and the new value is saved immediately. At
+<b>0</b> the prompt is done and nothing more is typed — it stays visible so
+you can see what ran, and setting Loops again (or editing the prompt, which
+bumps a spent one back to 1) re-arms it. <b>unlimited</b> never counts down
+and repeats after every completed run.</p>
+<p>Counting down rather than up is what makes this survive a restart: an
+in-memory tally reset on every launch — including a self-update — so a
+prompt that had already done its one run got typed a second time, into
+whatever task the window had moved on to. The saved number cannot do
+that.</p>
+<p>A run is only spent when the prompt is actually typed, and the window must
+then be seen running <i>and</i> finishing again before anything else is
+typed — the prompt is never repeated into a session that is merely
+sitting idle.</p>
 <p>The button shows <b>After finish &#10003;</b> once a prompt is set and
 hovering previews it; clearing the text turns the feature off for that
 window.</p>
@@ -4134,16 +4197,21 @@ recovery</b> prompt — fresh work on a clean context.</li>
 screen has caught up: a refusal ends the new turn within seconds, real work
 keeps it running. The log then says <i>done (on Fable 5)</i>, or warns that
 the session ended on the wrong model or that the block still stands.</p>
-<p><b>Loops</b> (third column of the window list, default <b>1</b>) caps how
-many recoveries per block episode may type the resume prompt. It counts
-<i>whole cycles</i>: a new cycle only starts when a genuinely new block
-appears (each one carries its own request id), never back-to-back. A block
+<p><b>Tries</b> (third column of the window list, default <b>1</b>) is how
+many recoveries <i>one block episode</i> may spend typing the resume prompt.
+It counts whole cycles, and a new cycle only starts when a genuinely new
+block appears (each carries its own request id) — never back-to-back. A block
 right after a successful recovery means the prompt <i>itself</i> trips the
-filter — so one past the cap, a final run still lets the fallback finish and
-still compacts, but <b>parks</b>: the window ends up idle on the target model
-with nothing typed, and the log asks you to edit the prompt by hand. A
-recovery that works costs nothing: once the notice has been gone for two
-minutes the episode is over and the budget resets.</p>
+filter, so one past the allowance a final run still lets the fallback finish
+and still compacts, but <b>parks</b>: the window ends up idle on the target
+model with nothing typed, and the log asks you to edit the prompt by hand.
+Once the notice has been gone for two minutes the episode is over and the
+allowance starts over — a recovery that works costs nothing.</p>
+<p>This is deliberately <i>not</i> the same as After finish's Loops. That one
+is a countdown for a one-shot task; this one is an allowance per block, for a
+standing "if this window gets blocked, do that instead" instruction, and a
+window with no prompt configured relies on it to bound how often a bare
+<code>continue</code> is retried.</p>
 <p><b>Scope.</b> "Apply to all watched windows" (the default) means recovery
 is <i>eligible</i> everywhere, but only the window actually showing a
 safeguard notice is ever touched. Untick it to restrict recovery to the
@@ -4351,17 +4419,20 @@ class AdvancedDialog(QDialog):
             "The tick column only matters with \"all windows\" off. The "
             "\"After recovery\" command is typed by <resume> after the "
             "/compact and the switch back — put real follow-up work here so "
-            "the session doesn't sit idle. \"Loops\" caps how many "
-            "recoveries per block episode may type it (default 1): past the "
-            "cap the prompt itself is what keeps getting blocked, so the "
-            "final run still finishes on the fallback and compacts, but "
-            "parks the window with nothing typed.")
+            "the session doesn't sit idle. \"Tries\" is how many "
+            "recoveries one block episode may spend typing it (default 1): "
+            "past that, the prompt itself is what keeps getting blocked, so "
+            "the final run still finishes on the fallback and compacts, but "
+            "parks the window with nothing typed. It counts attempts per "
+            "block, and starts over at the next one — unlike the main "
+            "table's After finish Loops, which counts down and stays "
+            "down.")
         after_hint.setWordWrap(True)
         root.addWidget(after_hint)
         self.win_list = QTableWidget()
         self.win_list.setColumnCount(3)
         self.win_list.setHorizontalHeaderLabels(
-            ["Window", "After recovery", "Loops"])
+            ["Window", "After recovery", "Tries"])
         _wl_h = self.win_list.horizontalHeader()
         _wl_h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         _wl_h.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
@@ -4414,9 +4485,10 @@ class AdvancedDialog(QDialog):
                     _n = 1
                 lp = QTableWidgetItem(str(_n))
                 lp.setToolTip(
-                    "How many recoveries per block episode may type the "
-                    "command (default 1). One past this, the final run "
-                    "parks the window instead of typing it again.")
+                    "Recoveries per block episode that may type the command "
+                    "(default 1). One past this, the final run parks the "
+                    "window instead of typing it again. Counts attempts "
+                    "within one block and starts over at the next block.")
                 self.win_list.setItem(r, 2, lp)
             self.win_list.resizeColumnToContents(0)
         root.addWidget(self.win_list, 1)

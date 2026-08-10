@@ -278,50 +278,80 @@ w._tick()
 advance(120)
 w._tick()
 check("G3 does not repeat while still idle", not SENT)
-# The prompt started a run which finished again — but the default Loops
-# budget is 1: typing the same follow-up after every run is an infinite
-# loop unless the user asked for it.
+# The prompt started a run which finished again — but Loops counts the runs
+# REMAINING and the default is 1, now spent. Typing the same follow-up after
+# every run is an infinite loop unless the user asked for it.
 af_cycle(w)
-check("G4 the default Loops budget of 1 is spent — no second fire",
-      not SENT)
+check("G4 the default single run is spent — no second fire", not SENT)
+check("G4a and the remaining count was decremented to zero",
+      w._after_finish_loops.get("win") == 0)
 
-# Loops = 0 ("unlimited") is the old behaviour: re-arm after every run.
-w = af_watcher(loops=0)
-w._tick()                                       # running observed
+# Spending a run is reported so the GUI can persist it — the whole reason
+# Loops counts DOWN instead of up.
+w = af_watcher()
+SPENT = []
+w.loops_spent.connect(lambda k, n: SPENT.append((k, n)))
+w._tick()
 TEXTS[9] = IDLE
 advance(60)
 w._tick()
 advance(gui.AFTER_FINISH_SETTLE_S)
-w._tick()                                       # fire 1
-SENT.clear()
-af_cycle(w)                                     # fire 2
-check("G4b Loops=unlimited re-arms after every completed run",
-      SENT == [(9, ["next task: refactor the parser"])])
+w._tick()
+check("G4b the decrement is announced for persistence",
+      SPENT == [("win", 0)])
 SENT.clear()
 
-# Loops = 2: two fires, then it stops and says so.
-w = af_watcher(loops=2)
+# ...and a restart therefore cannot re-arm it: a fresh worker loading the
+# persisted 0 must leave the window alone, even though the prompt text is
+# still configured. This is the failure the countdown exists to prevent —
+# the window's NEXT task inheriting the previous task's follow-up.
+w = af_watcher(loops=0)
 AF_LOGS = []
 w.log.connect(lambda k, m: AF_LOGS.append((k, m)))
+for _ in range(2):
+    af_cycle(w)
+check("G4c a restart with 0 runs left types nothing", not SENT)
+check("G4d and it says so exactly once",
+      len([m for k, m in AF_LOGS if "no runs left" in m]) == 1)
+
+# Loops = unlimited (-1) is the old behaviour: re-arm after every run, and
+# never decrement.
+w = af_watcher(loops=-1)
 w._tick()
 TEXTS[9] = IDLE
 advance(60)
 w._tick()
 advance(gui.AFTER_FINISH_SETTLE_S)
 w._tick()                                       # fire 1
-af_cycle(w)                                     # fire 2
-check("G4c Loops=2 fires twice", len(SENT) == 2)
 SENT.clear()
-af_cycle(w)                                     # budget spent
-check("G4d the third completed run gets nothing", not SENT)
-check("G4e and the budget exhaustion is logged once",
-      len([m for k, m in AF_LOGS if "edit the prompt to re-arm" in m]) == 1)
+af_cycle(w)                                     # fire 2
+check("G4e unlimited re-arms after every completed run",
+      SENT == [(9, ["next task: refactor the parser"])])
+check("G4f and unlimited never counts down",
+      w._after_finish_loops.get("win") == -1)
+SENT.clear()
 
-# Editing the prompt is a NEW task: the budget starts fresh.
-w.set_after_finish({"win": "a different follow-up"})
+# Loops = 2: two fires, counting down, then it stops.
+w = af_watcher(loops=2)
+w._tick()
+TEXTS[9] = IDLE
+advance(60)
+w._tick()
+advance(gui.AFTER_FINISH_SETTLE_S)
+w._tick()                                       # fire 1
+check("G4g one run spent leaves one",
+      w._after_finish_loops.get("win") == 1)
+af_cycle(w)                                     # fire 2
+check("G4h Loops=2 fires twice", len(SENT) == 2)
+SENT.clear()
+af_cycle(w)                                     # spent
+check("G4i the third completed run gets nothing", not SENT)
+
+# Setting Loops again re-arms the same prompt — no need to retype it.
+w.set_after_finish_loops({"win": 1})
 af_cycle(w)
-check("G4f editing the prompt resets the budget",
-      SENT == [(9, ["a different follow-up"])])
+check("G4j setting Loops again re-arms the prompt",
+      SENT == [(9, ["next task: refactor the parser"])])
 SENT.clear()
 
 # Never ran while watched -> never fires.
@@ -361,12 +391,20 @@ w = new_watcher()
 w.set_after_finish({"win": "   ", "other": 42, "ok": " do things "})
 check("G8 blank entries are dropped, values coerced and trimmed",
       w._after_finish == {"other": "42", "ok": "do things"})
-w.set_after_finish_loops({"a": "2", "b": -1, "c": "abc", "d": 0})
-check("G9 loops values are coerced; negatives and garbage dropped",
-      w._after_finish_loops == {"a": 2, "d": 0})
+w.set_after_finish_loops({"a": "2", "b": -5, "c": "abc", "d": 0})
+check("G9 loops values are coerced; garbage dropped, unlimited clamped",
+      w._after_finish_loops == {"a": 2, "b": -1, "d": 0})
 w.set_after_finish_loops("not-a-dict")
 check("G10 a corrupt loops store collapses to defaults",
       w._after_finish_loops == {})
+
+# v2.0.6 stored a CAP where 0 meant unlimited; the countdown store reads 0 as
+# spent. Migrating that exact value is the difference between a prompt that
+# repeats forever and one that silently never fires again.
+_MIG = {"a": 0, "b": 3, "c": 1}
+check("G11 the v2.0.6 'unlimited' cap migrates to the new sentinel",
+      {k: (-1 if v == 0 else v) for k, v in _MIG.items()}
+      == {"a": -1, "b": 3, "c": 1})
 
 
 print()

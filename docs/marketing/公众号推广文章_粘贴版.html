@@ -76,14 +76,14 @@
     </p>
 
     <div style="background:#fff7ed;border-left:4px solid #fb923c;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0 20px;font-size:14px;color:#7c2d12;line-height:1.8;">
-      <b>现在：</b>主界面每一行有个 <b>After finish…</b> 按钮，点开填一条提示词。这个会话跑完当前任务、空闲满一个稳定期后，工具自动把提示词输进去。弹窗里的 <b>Loops</b> 数字 = 这条提示词最多自动输几次（<b>默认 1</b>，防止同一句话无限循环）；设成 <b>unlimited</b> 就是老行为——干完一轮再发一轮，直到你清掉提示词为止。改提示词文本会重置计数。睡前给每个窗口排好下一个活，醒来收货。
+      <b>现在：</b>主界面每一行有个 <b>After finish…</b> 按钮，点开填一条提示词。这个会话跑完当前任务、空闲满一个稳定期后，工具自动把提示词输进去。弹窗里的 <b>Loops（剩余次数）</b>= 这条提示词还能自动输几次（<b>默认 1</b>）：<b>每输一次减 1，减到 0 就不再执行</b>，而且剩余次数会立刻存盘——所以重启软件、自更新、关掉窗口再开，都不会让用完的老提示词复活，更不会在你开了新任务后又被输一遍。想再跑就把次数改回去（改提示词文本会自动补成 1）；设成 <b>unlimited</b> 则不递减，一直接续。睡前给每个窗口排好下一个活，醒来收货。
     </div>
 
 <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px 18px;margin:16px 0 8px;">
       <div style="font-weight:700;color:#1e40af;font-size:14px;margin-bottom:8px;">🛠 在 GUI 里怎么配</div>
       <ol style="padding-left:20px;font-size:14px;color:#1e3a5f;margin:0;line-height:1.9;">
         <li>主界面表格里找到目标窗口那一行，在右侧 Action 区点 <b>After finish…</b></li>
-        <li>弹窗里输入"跑完后要干的下一个活"，<b>Loops</b> 选这条指令最多自动输几次（默认 1，unlimited = 无限接续），点 OK —— 按钮变成 <b>After finish ✓</b>，悬停可预览</li>
+        <li>弹窗里输入"跑完后要干的下一个活"，<b>Loops（剩余次数）</b>填还能输几次（默认 1，每输一次减 1；unlimited = 无限接续），点 OK —— 按钮显示成 <b>After finish ✓（还剩 N 次）</b>，悬停可预览</li>
         <li>要停下来：再点按钮，<b>清空文本</b>确定即可（勾选状态不影响这条指令的保存）</li>
       </ol>
     </div>
@@ -210,7 +210,7 @@
         <td style="width:50%;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;vertical-align:top;">
           <div style="font-size:20px;margin-bottom:6px;">🔁</div>
           <div style="font-weight:700;font-size:14px;color:#14532d;margin-bottom:4px;">只做一轮，不再死磕</div>
-          <div style="font-size:13px;color:#4b5563;line-height:1.6;">拦截判定基于<b>整段对话历史</b>——每次请求都会重发全部历史，光重试永远过不去。所以恢复只做一个周期：备用模型跑完 → /compact → 切回。预设指令最多输 Loops 次（默认 1），之后停靠在原模型上并明说：该人工改指令了。</div>
+          <div style="font-size:13px;color:#4b5563;line-height:1.6;">拦截判定基于<b>整段对话历史</b>——每次请求都会重发全部历史，光重试永远过不去。所以恢复只做一个周期：备用模型跑完 → /compact → 切回。预设指令在同一轮拦截里最多用 Tries 次（默认 1），之后停靠在原模型上并明说：该人工改指令了。</div>
         </td>
         <td style="width:50%;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;vertical-align:top;">
           <div style="font-size:20px;margin-bottom:6px;">✋</div>
@@ -493,8 +493,8 @@
       <ul style="padding-left:20px;font-size:13px;color:#78350f;margin:0 0 14px;line-height:1.8;">
         <li><b>恢复流程重写</b>：实测拦截基于整段对话历史，重试永远过不去 —— 现在是备用模型跑完 → /compact → 切回输新指令，一个周期解决</li>
         <li><b>新步骤 &lt;idle&gt;</b>：等这一轮真正跑完再动，全程不打断任何 turn</li>
-        <li><b>每窗口 Loops 上限</b>（默认 1）：预设指令输满次数还被拦就停靠并提醒人工修改，杜绝无限循环</li>
-        <li><b>After finish 也有 Loops</b>（默认 1，可设 unlimited）：跑完自动派活不再默认无限循环，改提示词即重置计数</li>
+        <li><b>每窗口 Tries</b>（默认 1）：同一轮拦截里预设指令最多用几次，用满还被拦就停靠并提醒人工修改，杜绝无限循环</li>
+        <li><b>After finish 加 Loops 剩余次数</b>（默认 1，可设 unlimited）：每输一次减 1、减到 0 停手，且<b>剩余次数存盘</b>——重启或换新任务后，用完的老提示词不会再被输一遍</li>
       </ul>
       <div style="font-weight:700;color:#78350f;font-size:14px;margin-bottom:10px;">🕘 v2.0.5</div>
       <ul style="padding-left:20px;font-size:13px;color:#78350f;margin:0 0 14px;line-height:1.8;">
