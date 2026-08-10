@@ -4343,26 +4343,23 @@ class AdvancedDialog(QDialog):
         root = QVBoxLayout(fable_tab)
 
         intro = QLabel(
-            "When a model's safeguards block a turn, the session stalls on a "
-            "model that refuses to work — and because the block judges the "
-            "whole conversation, retrying the same message can never pass. "
-            "For each ticked window this runs the step script below: switch "
-            "to a fallback model, let it FINISH the remaining work, /compact "
-            "the conversation (the only thing that clears a context-based "
-            "block), then switch back and type that window's \"After "
-            "recovery\" prompt."
+            "When safeguards block a turn: finish the work on a fallback "
+            "model, /compact, switch back. <b>Help</b> has the details."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
 
         prereq = QLabel(
-            "⚠ Ticking a window means this types into it: when its model is "
-            "not the one your script targets, it sends /model to switch it "
-            "back — no safeguard block required. Switch a window's model by "
-            "hand and it is unticked automatically and left alone."
+            "⚠ A ticked window is also kept on the script's target model "
+            "on its own, with no block involved."
         )
         prereq.setWordWrap(True)
         prereq.setStyleSheet("font-weight: bold;")
+        prereq.setToolTip(
+            "Ticking a window means this types into it: whenever its model "
+            "is not the one your script targets, it sends /model to switch "
+            "it back — no safeguard block required. Switch a window's model "
+            "by hand and it is unticked automatically and left alone.")
         root.addWidget(prereq)
 
         form = QFormLayout()
@@ -4381,22 +4378,27 @@ class AdvancedDialog(QDialog):
         root.addLayout(form)
 
         detect_hint = QLabel(
-            "Detection pattern for the safeguard notice lives on the "
-            "<b>Triggers</b> tab (“Fable safeguard block”).")
+            "Detection pattern: <b>Triggers</b> tab → “Fable safeguard "
+            "block”.")
         detect_hint.setWordWrap(True)
         root.addWidget(detect_hint)
 
         steps_hint = QLabel(
-            "Recovery steps (one per line):  plain line = type it + Enter · "
-            "<confirm> = accept whichever chooser/dialog is showing (does "
-            "nothing if none) · <enter> = a bare Enter · <idle> = wait until "
-            "the current turn ends and the session stays quiet · <wait> = "
-            "wait Delay seconds of RUNNING time (outages don't count) · "
-            "<esc> = interrupt a running turn (not in the default script — "
-            "the default never cuts a turn short) · <resume> = type the "
-            "window's \"After recovery\" command from the list below "
-            "('continue' when empty — it picks the compacted summary back "
-            "up)")
+            "Steps, one per line — a plain line is typed + Enter. Hover for "
+            "<b>&lt;confirm&gt; &lt;idle&gt; &lt;wait&gt; &lt;esc&gt; "
+            "&lt;enter&gt; &lt;resume&gt;</b>.")
+        steps_hint.setToolTip(
+            "<b>&lt;confirm&gt;</b> accept whichever chooser/dialog is "
+            "showing (nothing if none)<br>"
+            "<b>&lt;idle&gt;</b> wait until the turn ends and the session "
+            "stays quiet<br>"
+            "<b>&lt;wait&gt;</b> / <b>&lt;wait:N&gt;</b> wait N seconds of "
+            "RUNNING time (outages do not count)<br>"
+            "<b>&lt;esc&gt;</b> interrupt a running turn (not in the "
+            "default script)<br>"
+            "<b>&lt;enter&gt;</b> a bare Enter<br>"
+            "<b>&lt;resume&gt;</b> type this window's After recovery "
+            "command ('continue' when empty)")
         steps_hint.setWordWrap(True)
         root.addWidget(steps_hint)
         _steps_src = cfg.get("steps")
@@ -4416,17 +4418,9 @@ class AdvancedDialog(QDialog):
         root.addWidget(self.all_windows_chk)
 
         after_hint = QLabel(
-            "The tick column only matters with \"all windows\" off. The "
-            "\"After recovery\" command is typed by <resume> after the "
-            "/compact and the switch back — put real follow-up work here so "
-            "the session doesn't sit idle. \"Tries\" is how many "
-            "recoveries one block episode may spend typing it (default 1): "
-            "past that, the prompt itself is what keeps getting blocked, so "
-            "the final run still finishes on the fallback and compacts, but "
-            "parks the window with nothing typed. It counts attempts per "
-            "block, and starts over at the next one — unlike the main "
-            "table's After finish Loops, which counts down and stays "
-            "down.")
+            "Ticks apply only with “all windows” off. <b>After recovery</b> "
+            "= what &lt;resume&gt; types; <b>Tries</b> = how many per block "
+            "(default 1).")
         after_hint.setWordWrap(True)
         root.addWidget(after_hint)
         self.win_list = QTableWidget()
