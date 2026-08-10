@@ -37,6 +37,8 @@ pip install -r requirements.txt
 
 To build your own exe from source: `python -m PyInstaller Auto-Continue.spec --clean --noconfirm` → output at `dist/Auto-Continue.exe`.
 
+`python _make_dist_zip.py` then packages that exe with the README and LICENSE into `D:\claude\Auto-Continue_dist_v<version>.zip`, matching the sibling projects' layout. Nothing calls it automatically — a release publishes the bare exe through CI — so **run it after bumping the version**, or the zip on disk keeps claiming an older release. It takes the version from `APP_VERSION`, so the name can never disagree with what is inside it; the risk is only that a stale file from a previous version is left sitting there.
+
 ## Run
 
 ```powershell
