@@ -912,6 +912,41 @@ check_reset("a chooser with long option descriptions is still recognised",
 check_reset("and it is not mistaken for a permission request",
             ac.parse_permission_prompt(_LONG_CHOOSER) is False)
 
+# What sits BELOW a chooser is not fixed. Measured on a live session that
+# waited until someone noticed: the chooser ended 1556 characters from the
+# end of the buffer — input box, status lines, and a seven-item todo list —
+# against the 1500 the limit picker uses. Fifty-six characters short.
+_pad2 = " " * 110
+_below = "\n".join([
+    "  7 tasks (5 done, 2 open)" + _pad2,
+    "  [ ] Part 3: fix the mislabelled tags" + _pad2,
+    "  [ ] Part 5: publish the release" + _pad2,
+    "  [x] Part 0: reject installs without a digest" + _pad2,
+    "  [x] Part 1: correct nine factual errors" + _pad2,
+    "  [x] Part 2: document the security warnings" + _pad2,
+    "   ... +2 completed" + _pad2,
+    "  [x] Part 4: rebuild and verify the flat package" + _pad2,
+    "  [x] Part 6: check the archive runs from a clean folder" + _pad2,
+    "  " + chr(0x276F) + chr(0xa0) + "   ",
+    "  [Opus 5] usage 17%" + _pad2,
+    "  auto mode on (shift+tab to cycle)" + _pad2,
+])
+_WITH_TODOS = (
+    "How should we handle the release?\n\n"
+    "> 1" ". Commit and fix the tags first (recommended)" + _pad2 + "\n"
+    "     push to the private remote; the upload can wait\n"
+    "  2" ". Do all of it now" + _pad2 + "\n"
+    "  3" ". Commit locally only\n\n" + _below)
+_m = ac._chooser_match(_WITH_TODOS)
+_dist = len(_WITH_TODOS) - _m.end() if _m else None
+check_reset(f"the fixture really does trail the old 1500 allowance "
+            f"(tail {_dist})",
+            _dist is not None and _dist > 1500)
+check_reset("a chooser with a todo list under it is still recognised",
+            ac.parse_chooser_prompt(_WITH_TODOS) is True)
+check_reset("its own allowance is looser than the limit picker's",
+            ac.CHOOSER_POST_MATCH_TAIL > ac.PROMPT_POST_MATCH_TAIL)
+
 
 # =============================================================================
 print()

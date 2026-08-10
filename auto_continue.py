@@ -883,6 +883,15 @@ PERMISSION_RE = re.compile(
 )
 
 
+# How far above the tail a chooser may sit and still count as open. Bigger
+# than the limit picker's allowance because what Claude Code draws BELOW a
+# chooser varies: the input box and status bar always, and often a todo list
+# as well. Measured live at 1556 characters on a session with seven tasks
+# listed, which the 1500 shared with the limit picker missed by fifty-six —
+# and a missed chooser is a session that waits until a human notices.
+CHOOSER_POST_MATCH_TAIL = 4000
+
+
 def _chooser_match(text: str, pattern=None):
     """The last chooser on screen, if one is genuinely showing.
 
@@ -895,7 +904,7 @@ def _chooser_match(text: str, pattern=None):
     if not matches:
         return None
     m = matches[-1]
-    if len(text) - m.end() > PROMPT_POST_MATCH_TAIL:
+    if len(text) - m.end() > CHOOSER_POST_MATCH_TAIL:
         return None
     if _is_composer_line(text, m.start()):
         return None
