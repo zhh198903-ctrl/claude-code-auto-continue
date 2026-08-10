@@ -515,6 +515,8 @@ DRAFT_BOX = "\n>" + chr(0xa0) + "half a thought"
 set_now(T0)
 reset([(20, "win")], {20: CHOOSER + NO_BOX})
 w = new_watcher()
+w.set_auto_answer(True, True)          # choosers ship off; this is
+                                       # a chooser scenario
 w._tick()
 check("H1 an ordinary chooser is answered with a bare Enter",
       SENT == [(20, [""])])
@@ -536,6 +538,7 @@ SENT.clear()
 set_now(T0)
 reset([(21, "win")], {21: CHOOSER + DRAFT_BOX})
 w = new_watcher()
+w.set_auto_answer(True, True)
 w._tick()
 check("H4 nothing is pressed while the user has text typed", not SENT)
 
@@ -543,6 +546,7 @@ check("H4 nothing is pressed while the user has text typed", not SENT)
 set_now(T0)
 reset([(22, "win")], {22: CHOOSER + "\n" + SPIN + NO_BOX})
 w = new_watcher()
+w.set_auto_answer(True, True)
 w._tick()
 check("H5 a running turn is left alone", not SENT)
 
@@ -569,8 +573,12 @@ check("H8 an ordinary chooser is left alone when its switch is off",
       not SENT)
 
 # Both default ON — a fresh worker answers without being configured.
-check("H9 both switches default to on",
-      new_watcher()._auto_choose is True
+# The two do not ship the same way, on purpose. A permission request only
+# says yes to work already asked for; a chooser is where a DECISION sits —
+# which option, and whether a written plan starts running — so that one is
+# the owner's to switch on.
+check("H9 choosers ship OFF, permission requests ship ON",
+      new_watcher()._auto_choose is False
       and new_watcher()._auto_permission is True)
 
 # The shape a real chooser actually has: no input box at all. Every fixture
@@ -579,6 +587,7 @@ check("H9 both switches default to on",
 set_now(T0)
 reset([(26, "win")], {26: CHOOSER + NO_BOX})
 w = new_watcher()
+w.set_auto_answer(True, True)
 w._tick()
 check("H14 a chooser that replaced the input box is still answered",
       SENT == [(26, [""])])
@@ -592,6 +601,7 @@ gui.QTimer.scheduled = []
 set_now(T0)
 reset([(28, "win")], {28: CHOOSER + NO_BOX})
 w = new_watcher()
+w.set_auto_answer(True, True)
 w._tick()
 check("H16 answering schedules a fast follow-up tick",
       SENT == [(28, [""])] and w._retick_at is not None)
@@ -633,6 +643,7 @@ gui.send_text_lines = lambda w, lines, dry_run=False: (
     _send_lines(w, lines) if _ok["v"] else False)
 LOGS_H = []
 w = new_watcher()
+w.set_auto_answer(True, True)
 w.log.connect(lambda k, m: LOGS_H.append((k, m)))
 try:
     for _ in range(3):

@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import ssl
+import time
 import subprocess
 import sys
 import tempfile
@@ -147,7 +148,9 @@ def download_asset(url: str,
                    progress_cb: Optional[Callable[[int, int], None]] = None,
                    chunk: int = 1 << 16,
                    timeout: int = 30,
-                   total_hint: int = 0) -> str:
+                   total_hint: int = 0,
+                   attempts: int = 5,
+                   retry_wait: float = 3.0) -> str:
     """Stream `url` to `dest_path`, reporting progress.
 
     Writes to `dest_path + '.part'` then os.replace()s into place on success
@@ -156,33 +159,74 @@ def download_asset(url: str,
     chunk; `total` comes from Content-Length, falling back to `total_hint`
     (the asset size) when the header is absent. `timeout` is the per-read
     socket timeout, so a slow-but-progressing transfer never trips it.
-    Returns `dest_path`. Raises on network / IO error (after cleaning up the
-    .part file).
+
+    RESUMES. A dropped connection keeps its `.part` file and the next of
+    `attempts` tries asks for `bytes=<what we have>-`; on a link where tens
+    of MB move at tens of KB/s, starting over on every drop can mean never
+    finishing at all. A server that ignores Range answers 200 instead of
+    206, and then the partial is discarded and the transfer restarts — the
+    old behaviour, rather than a file with a seam in it. The size is checked
+    against Content-Length before the rename, because a body that stops
+    early is not an error the socket reports.
+
+    Returns `dest_path`. Raises the last error once the attempts are spent
+    (and only then removes the .part file).
     """
     part = dest_path + ".part"
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     ctx = ssl.create_default_context()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            total = int(resp.headers.get("Content-Length") or 0) or total_hint
-            downloaded = 0
-            with open(part, "wb") as fh:
-                while True:
-                    buf = resp.read(chunk)
-                    if not buf:
-                        break
-                    fh.write(buf)
-                    downloaded += len(buf)
-                    if progress_cb:
-                        progress_cb(downloaded, total)
-        os.replace(part, dest_path)
-    except BaseException:
+    last_err = None
+
+    for attempt in range(attempts):
+        # Whatever survived the previous attempt is the offset to ask from.
+        have = os.path.getsize(part) if os.path.exists(part) else 0
+        headers = {"User-Agent": _USER_AGENT}
+        if have:
+            headers["Range"] = f"bytes={have}-"
+        req = urllib.request.Request(url, headers=headers)
         try:
-            os.remove(part)
-        except OSError:
-            pass
-        raise
-    return dest_path
+            with urllib.request.urlopen(req, timeout=timeout,
+                                        context=ctx) as resp:
+                # 206 continues; a 200 means the server ignored the Range and
+                # is sending the whole file, so the partial must be discarded
+                # rather than appended to.
+                resumed = resp.status == 206 and have > 0
+                if not resumed:
+                    have = 0
+                length = int(resp.headers.get("Content-Length") or 0)
+                total = (have + length) if length else total_hint
+                downloaded = have
+                with open(part, "ab" if resumed else "wb") as fh:
+                    while True:
+                        buf = resp.read(chunk)
+                        if not buf:
+                            break
+                        fh.write(buf)
+                        downloaded += len(buf)
+                        if progress_cb:
+                            progress_cb(downloaded, total)
+            # A truncated body is not an error at the socket level — the read
+            # just ends — so check the size before believing it is done.
+            if total and os.path.getsize(part) < total:
+                raise IOError(
+                    f"connection ended early at {os.path.getsize(part)} of "
+                    f"{total} bytes")
+            os.replace(part, dest_path)
+            return dest_path
+        except KeyboardInterrupt:
+            raise
+        except BaseException as e:
+            last_err = e
+            # The partial file STAYS. That is the whole point: the next
+            # attempt resumes from it. It is only ever renamed to the real
+            # name once complete, so nothing half-written is runnable.
+            if attempt + 1 < attempts:
+                time.sleep(retry_wait)
+
+    try:
+        os.remove(part)
+    except OSError:
+        pass
+    raise last_err
 
 
 def verify_sha256(path: str, expected: Optional[str]) -> bool:

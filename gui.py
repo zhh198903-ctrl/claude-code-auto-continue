@@ -725,11 +725,19 @@ class Watcher(QObject):
         # after every run is an infinite loop unless the user asked for it.
         self._after_finish_loops: dict[str, int] = {}
 
-        # Auto-answer switches (Advanced). Both ON by default: a session
-        # sitting on an unanswered chooser is exactly the stall this tool
-        # exists to clear, and Enter only accepts the option the session
-        # itself pre-selected.
-        self._auto_choose = True
+        # Auto-answer switches (Advanced). They are NOT equally
+        # consequential, so they do not ship the same way.
+        #
+        # A permission request asks whether to carry out work the session was
+        # already told to do; answering it unblocks that work and decides
+        # nothing. It ships ON.
+        #
+        # An ordinary chooser is where a DECISION sits — which design to
+        # take, and whether a written plan starts executing, which also puts
+        # the session back at the permission level it started with. Making
+        # those calls for someone out of the box is the surprising kind of
+        # autonomy, so it ships OFF and is theirs to turn on.
+        self._auto_choose = False
         self._auto_permission = True
 
         # User overrides for the detection regexes (Advanced → Triggers).
@@ -2683,7 +2691,7 @@ class MainWindow(QMainWindow):
         self._model_overrides: dict = {}
         self._after_finish: dict = {}
         self._after_finish_loops: dict = {}
-        self._auto_choose = True
+        self._auto_choose = False
         self._auto_permission = True
         # Fable refusal-recovery config (Advanced dialog). Empty pattern =
         # use the built-in default.
@@ -3402,9 +3410,9 @@ class MainWindow(QMainWindow):
         self.sig_set_model_overrides.emit({})
         self.sig_set_after_finish.emit({})
         self.sig_set_after_finish_loops.emit({})
-        self._auto_choose = True
+        self._auto_choose = False
         self._auto_permission = True
-        self.sig_set_auto_answer.emit(True, True)
+        self.sig_set_auto_answer.emit(False, True)
         self.sig_set_trigger_patterns.emit({})
         self.sig_set_fable_config.emit(dict(self._fable_cfg))
         self._save_settings()
@@ -3606,7 +3614,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 self._after_finish_loops = {}
             self._auto_choose = self.settings.value(
-                "auto_choose", True, type=bool)
+                "auto_choose", False, type=bool)
             self._auto_permission = self.settings.value(
                 "auto_permission", True, type=bool)
             raw_f = self.settings.value("fable_cfg", "", type=str) or ""
@@ -4439,9 +4447,11 @@ the thing you turned this on to avoid.</p>
 <p>Note the flip side of that: while this is on, <b>quitting Auto-Continue
 leaves any session that is waiting on a chooser waiting</b> — unlike a rate
 limit, which resumes by itself once the clock passes.</p>
-<p><b>Answer choosers</b> (on by default) handles ordinary questions — the
-session stopped to ask something and picking the offered option is simply
-what unblocks it. The one this matters most for is the prompt that ends
+<p><b>Answer choosers</b> (<b>off</b> by default) handles ordinary
+questions. It ships off because this is the switch that DECIDES things —
+which option the work takes, and whether a written plan starts running —
+where the other one only says yes to work already asked for. Turn it on
+when you want a session to keep going without you. The one this matters most for is the prompt that ends
 <b>plan mode</b> — the plan is written and nothing runs until someone
 approves it — so with this on, an unattended session carries straight on
 into the work. Dialogs drawn inside a box are recognised the same as plain
@@ -4460,10 +4470,10 @@ because it is a chooser like any other until you read what its first option
 says.</p>
 <p><b>Answer tool-permission requests</b> (on by default) handles the
 requests to run a command or edit a file that Claude Code shows when
-bypass-permissions is off. This one is different in kind: answering it
-<i>authorises work</i> rather than merely unblocking a stalled session. It is
-a separate switch precisely so it can be turned off on its own — do that if
-you rely on reviewing those requests yourself.</p>
+bypass-permissions is off. It answers <i>yes</i> to work the session was
+already told to do, which is why it is the one that ships on — but it does
+authorise that work, so turn it off if you rely on reviewing those
+requests yourself.</p>
 <p>Two dialogs are deliberately left out of both switches: the safeguard
 picker and the <i>Switch model?</i> confirmation. Answering either changes
 which model the session runs on, and that belongs to <b>Model recovery</b>,
@@ -4839,8 +4849,8 @@ class AdvancedDialog(QDialog):
         intro.setWordWrap(True)
         root.addWidget(intro)
 
-        self.auto_choose_chk = QCheckBox("Answer choosers")
-        self.auto_choose_chk.setChecked(bool(auto.get("choose", True)))
+        self.auto_choose_chk = QCheckBox("Answer choosers (off by default)")
+        self.auto_choose_chk.setChecked(bool(auto.get("choose", False)))
         self.auto_choose_chk.setToolTip(
             "Ordinary numbered choosers — the session had stopped to ask, "
             "and picking the first option is what unblocks it. Never fires "
@@ -4859,8 +4869,9 @@ class AdvancedDialog(QDialog):
         root.addWidget(self.auto_perm_chk)
 
         warn = QLabel(
-            "⚠ The second one approves work Claude asked permission for. "
-            "Leave it off if you review those by hand.")
+            "⚠ The first one decides things — which option, and whether a "
+            "plan starts running. The second only says yes to work already "
+            "asked for.")
         warn.setWordWrap(True)
         warn.setStyleSheet("font-weight: bold;")
         root.addWidget(warn)

@@ -163,6 +163,125 @@ check_true("no-relaunch still writes the give-up marker",
 check_true("no-relaunch: give-up label still precedes cleanup",
            bat_no.index(":giveup") < bat_no.index(":cleanup"))
 
+# =============================================================================
+print()
+print("---- download resumes instead of starting over ----")
+# On a link where tens of MB move at tens of KB/s, a drop that restarts the
+# transfer can mean it never finishes. The partial file is the offset for the
+# next attempt; it is only renamed to the real name once complete, so nothing
+# half-written is ever runnable.
+import io                                                   # noqa: E402
+import os as _os                                            # noqa: E402
+import tempfile as _tf                                      # noqa: E402
+import updater                                              # noqa: E402
+
+PAYLOAD = bytes(range(256)) * 40          # 10240 bytes
+_saved_urlopen = updater.urllib.request.urlopen
+
+
+class _Resp(io.BytesIO):
+    """Enough of an HTTP response for the downloader."""
+
+    def __init__(self, body, status, headers):
+        super().__init__(body)
+        self.status = status
+        self.headers = headers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _make_server(cut_after, log):
+    """Serves PAYLOAD, honouring Range, truncating the body at `cut_after`
+    bytes on the FIRST call only — i.e. one dropped connection."""
+    state = {"calls": 0}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        state["calls"] += 1
+        rng = req.headers.get("Range") or req.headers.get("range")
+        start = 0
+        if rng:
+            start = int(rng.split("=")[1].split("-")[0])
+        log.append(start)
+        body = PAYLOAD[start:]
+        status = 206 if rng else 200
+        # Content-Length always states what SHOULD arrive. A real
+        # interruption keeps that promise and stops delivering; shortening
+        # the header to match the truncated body would make a half file look
+        # complete, which is the very thing the size check catches.
+        declared = len(body)
+        if state["calls"] == 1 and cut_after is not None:
+            body = body[:cut_after]
+        return _Resp(body, status, {"Content-Length": str(declared)})
+
+    return fake_urlopen
+
+
+_tmp = _tf.mkdtemp()
+_dest = _os.path.join(_tmp, "asset.bin")
+_log = []
+updater.urllib.request.urlopen = _make_server(3000, _log)
+try:
+    updater.download_asset("https://example.invalid/asset.bin", _dest,
+                           attempts=4, retry_wait=0)
+finally:
+    updater.urllib.request.urlopen = _saved_urlopen
+
+check_true("resume: the file is complete and correct",
+      _os.path.exists(_dest) and open(_dest, "rb").read() == PAYLOAD)
+check_true(f"resume: the retry asked from where it stopped (offsets {_log})",
+      len(_log) >= 2 and _log[0] == 0 and _log[1] == 3000)
+check_true("resume: no .part left behind", not _os.path.exists(_dest + ".part"))
+
+# A server that ignores Range answers 200 with the whole body; appending
+# would splice two copies together, so the partial must be discarded.
+_dest2 = _os.path.join(_tmp, "asset2.bin")
+open(_dest2 + ".part", "wb").write(b"stale bytes that must not survive")
+_log2 = []
+
+
+def _ignores_range(req, timeout=None, context=None):
+    _log2.append(req.headers.get("Range"))
+    return _Resp(PAYLOAD, 200, {"Content-Length": str(len(PAYLOAD))})
+
+
+updater.urllib.request.urlopen = _ignores_range
+try:
+    updater.download_asset("https://example.invalid/asset2.bin", _dest2,
+                           attempts=2, retry_wait=0)
+finally:
+    updater.urllib.request.urlopen = _saved_urlopen
+
+check_true("a server that ignores Range restarts cleanly, no seam",
+      open(_dest2, "rb").read() == PAYLOAD)
+
+# A body that stops early is not a socket error — the size has to be checked
+# before the rename, or a truncated exe gets installed.
+_dest3 = _os.path.join(_tmp, "asset3.bin")
+updater.urllib.request.urlopen = _make_server(None, [])
+
+
+def _always_short(req, timeout=None, context=None):
+    return _Resp(PAYLOAD[:100], 200, {"Content-Length": str(len(PAYLOAD))})
+
+
+updater.urllib.request.urlopen = _always_short
+_raised = False
+try:
+    updater.download_asset("https://example.invalid/asset3.bin", _dest3,
+                           attempts=2, retry_wait=0)
+except Exception:
+    _raised = True
+finally:
+    updater.urllib.request.urlopen = _saved_urlopen
+
+check_true("a truncated body raises instead of installing a short file",
+      _raised and not _os.path.exists(_dest3))
+
+
 print()
 print("RESULT:", "ALL OK" if failures == 0 else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)
