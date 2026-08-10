@@ -567,6 +567,41 @@ check("H9 both switches default to on",
       new_watcher()._auto_choose is True
       and new_watcher()._auto_permission is True)
 
+# A send is REFUSED when the window will not come to the foreground — which
+# is correct, since typing blind is how keys land in the wrong app. What was
+# not correct was announcing the answer first: live, a window that could not
+# be focused produced a "fire" line claiming it had been answered, once per
+# poll, while nothing had been typed at all.
+set_now(T0)
+reset([(25, "win")], {25: CHOOSER + EMPTY_BOX})
+_ok = {"v": False}
+_saved_send = gui.send_text_lines
+gui.send_text_lines = lambda w, lines, dry_run=False: (
+    _send_lines(w, lines) if _ok["v"] else False)
+LOGS_H = []
+w = new_watcher()
+w.log.connect(lambda k, m: LOGS_H.append((k, m)))
+try:
+    for _ in range(3):
+        advance(5)
+        w._tick()
+    check("H10 a refused send types nothing", not SENT)
+    check("H11 and is not reported as an answer",
+          not any("answered the" in m for _k, m in LOGS_H))
+    check("H12 the failure is reported once, not once per poll",
+          len([m for k, m in LOGS_H
+               if k == "warn" and "wouldn't come forward" in m]) == 1)
+    # Once the window can be focused, the answer goes through and says so.
+    _ok["v"] = True
+    advance(5)
+    w._tick()
+    check("H13 the retry succeeds and reports the answer",
+          SENT == [(25, [""])]
+          and any("answered the chooser" in m for _k, m in LOGS_H))
+finally:
+    gui.send_text_lines = _saved_send
+SENT.clear()
+
 
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")

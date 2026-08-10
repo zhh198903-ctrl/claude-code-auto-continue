@@ -650,6 +650,8 @@ class _WState:
     af_spent_logged: bool = False                 # budget-spent said once
     chooser_sig: Optional[str] = None             # last chooser we answered
     chooser_at: Optional[datetime] = None         # when we answered it
+    chooser_warned: bool = False                  # said "couldn't" once
+    chooser_seen_sig: Optional[str] = None        # chooser that warning is for
     fable_picker_used: bool = False               # picker accepted this run
     fable_hold_logged: bool = False               # 'waiting for idle' said once
     fable_drift_at: Optional[datetime] = None     # last drift correction
@@ -1992,19 +1994,42 @@ class Watcher(QObject):
                         _sig = chooser_signature(
                             tail, self._patterns.get("chooser"))
                         _fresh = _sig and _sig != st.chooser_sig
+                        # A different chooser deserves its own warning if it
+                        # cannot be answered either.
+                        if _sig and _sig != st.chooser_seen_sig:
+                            st.chooser_seen_sig = _sig
+                            st.chooser_warned = False
                         _stale = (st.chooser_at is not None
                                   and now - st.chooser_at
                                   >= timedelta(seconds=CHOOSER_RETRY_S))
                         if _sig and (_fresh or _stale):
-                            self.log.emit(
-                                "fire",
-                                f"{dr}answering "
-                                + ("permission prompt" if _is_perm
-                                   else "chooser")
-                                + f" (Enter = option 1) → {title!r}")
-                            if send_text_lines(w, [""], dry_run=self._dry_run):
+                            _what = ("permission prompt" if _is_perm
+                                     else "chooser")
+                            # Reported AFTER the fact. The send refuses when
+                            # the window will not come to the foreground, and
+                            # announcing "answering" before finding that out
+                            # claimed an act that never happened — then
+                            # repeated the claim on every poll, because an
+                            # unanswered chooser stays due.
+                            if send_text_lines(w, [""],
+                                               dry_run=self._dry_run):
                                 st.chooser_sig = _sig
                                 st.chooser_at = now
+                                st.chooser_warned = False
+                                self.log.emit(
+                                    "fire",
+                                    f"{dr}answered the {_what} "
+                                    f"(Enter = option 1) → {title!r}")
+                            elif not st.chooser_warned:
+                                # Once per chooser: it retries every poll,
+                                # and a line each time would bury the log for
+                                # as long as the user keeps typing elsewhere.
+                                st.chooser_warned = True
+                                self.log.emit(
+                                    "warn",
+                                    f"could not answer the {_what} on "
+                                    f"{title!r} — the window wouldn't come "
+                                    f"forward; retrying while it is up")
                             st.status = ST_PROMPT
                             continue
 
