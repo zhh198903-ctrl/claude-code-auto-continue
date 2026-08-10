@@ -504,13 +504,16 @@ CHOOSER = "Ready to continue?\n" + _M + "1" ". Keep going\n  2" ". Stop here"
 PERMISSION = ("Do you want to proceed?\n" + _M + "1" ". Yes\n"
               "  2" ". Yes, and don" + chr(8217) + "t ask again\n"
               "  3" ". No, and tell Claude what to do differently")
+# An input box with nothing typed in it. NOT what sits under an open
+# chooser — a chooser replaces the box entirely while it waits, measured on
+# a live prompt — so this belongs only to scenarios about the box itself.
 EMPTY_BOX = "\n>" + chr(0xa0) + "   "
-# A real chooser has NO input box — it replaces it. Verified live.
+# What an open chooser really looks like from below: the hint, no box.
 NO_BOX = "\nEnter to select - Tab/Arrow keys to navigate - Esc to cancel"
 DRAFT_BOX = "\n>" + chr(0xa0) + "half a thought"
 
 set_now(T0)
-reset([(20, "win")], {20: CHOOSER + EMPTY_BOX})
+reset([(20, "win")], {20: CHOOSER + NO_BOX})
 w = new_watcher()
 w._tick()
 check("H1 an ordinary chooser is answered with a bare Enter",
@@ -522,7 +525,8 @@ w._tick()
 check("H2 the same chooser is answered exactly once", not SENT)
 
 # The answered text lingers, so a NEW chooser must still be recognised.
-TEXTS[20] = "Ready to continue?\n" + _M + "1" ". Something else\n  2" ". No" + EMPTY_BOX
+TEXTS[20] = ("Ready to continue?\n" + _M + "1" ". Something else\n"
+             "  2" ". No" + NO_BOX)
 advance(5)
 w._tick()
 check("H3 a different chooser is answered", SENT == [(20, [""])])
@@ -537,14 +541,14 @@ check("H4 nothing is pressed while the user has text typed", not SENT)
 
 # Mid-turn there is nothing to answer.
 set_now(T0)
-reset([(22, "win")], {22: CHOOSER + "\n" + SPIN + EMPTY_BOX})
+reset([(22, "win")], {22: CHOOSER + "\n" + SPIN + NO_BOX})
 w = new_watcher()
 w._tick()
 check("H5 a running turn is left alone", not SENT)
 
 # Permission requests authorise work, so they ride on their own switch.
 set_now(T0)
-reset([(23, "win")], {23: PERMISSION + EMPTY_BOX})
+reset([(23, "win")], {23: PERMISSION + NO_BOX})
 w = new_watcher()
 w.set_auto_answer(True, False)                  # choosers on, permission off
 w._tick()
@@ -557,7 +561,7 @@ check("H7 ...and IS answered once its own switch is on",
 SENT.clear()
 
 set_now(T0)
-reset([(24, "win")], {24: CHOOSER + EMPTY_BOX})
+reset([(24, "win")], {24: CHOOSER + NO_BOX})
 w = new_watcher()
 w.set_auto_answer(False, True)                  # choosers off
 w._tick()
@@ -622,7 +626,7 @@ for _name, _text in (("safeguard picker", PICKER2),
 # be focused produced a "fire" line claiming it had been answered, once per
 # poll, while nothing had been typed at all.
 set_now(T0)
-reset([(25, "win")], {25: CHOOSER + EMPTY_BOX})
+reset([(25, "win")], {25: CHOOSER + NO_BOX})
 _ok = {"v": False}
 _saved_send = gui.send_text_lines
 gui.send_text_lines = lambda w, lines, dry_run=False: (

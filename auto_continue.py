@@ -909,6 +909,16 @@ def _chooser_match(text: str, pattern=None):
         return None
     if _is_composer_line(text, m.start()):
         return None
+    # An OPEN chooser has replaced the input box — measured on a live prompt
+    # caught while it waited: below the options there was only the
+    # "Esc to cancel" hint and no composer at all. So a composer line after
+    # the match means this is not open: either the session already answered
+    # it and the box came back, or the text is a chooser QUOTED in
+    # conversation. The second case is not hypothetical — a reply that
+    # quoted a permission prompt verbatim got that quotation answered, twice.
+    for line in text[m.end():].splitlines():
+        if _COMPOSER_LINE_RE.match(line):
+            return None
     return m
 
 

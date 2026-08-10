@@ -974,6 +974,35 @@ check_reset("a permission prompt with an unlisted verb is still caught",
             ac.parse_permission_prompt(_perm_delete) is True
             and ac.parse_chooser_prompt(_perm_delete) is False)
 
+# An OPEN chooser has replaced the input box: measured on a live permission
+# prompt caught in the instant it waited, there was nothing below the
+# options but the "Esc to cancel" hint and no composer at all. So a composer
+# line AFTER the match means the thing is not open.
+#
+# That is not a nicety. A reply in one window quoted a real permission
+# prompt verbatim, and the watchdog answered the quotation — twice, five
+# minutes apart, because the "still up after a while" backstop kept finding
+# it. Anyone who asks Claude to explain a chooser reproduces this.
+_open = ("Do you want to create x.txt?\n"
+         "  " + chr(0x276F) + " 1" ". Yes\n"
+         "    2" ". Yes, allow all edits during this session\n"
+         "    3" ". No\n"
+         "  Esc to cancel - Tab to amend")
+_quoted = (_open + "\n\nthat is the prompt I saw earlier\n"
+           + chr(0x276F) + chr(0xa0) + "   ")
+check_reset("an open prompt (no input box beneath) still counts",
+            ac.parse_permission_prompt(_open) is True)
+check_reset("the same text quoted above an input box does NOT",
+            ac.parse_permission_prompt(_quoted) is False
+            and ac.parse_chooser_prompt(_quoted) is False)
+# Same for an ordinary chooser someone pasted into a message.
+_quoted_chooser = ("Ready to continue?\n"
+                   "> " "1" ". Keep going\n"
+                   "  2" ". Stop here\n\nwhat does that mean?\n"
+                   ">" + chr(0xa0) + "   ")
+check_reset("a quoted ordinary chooser is not answered either",
+            ac.parse_chooser_prompt(_quoted_chooser) is False)
+
 
 # =============================================================================
 print()
