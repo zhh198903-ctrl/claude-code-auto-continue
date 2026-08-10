@@ -4442,12 +4442,13 @@ approves it — so with this on, an unattended session carries straight on
 into the work. Dialogs drawn inside a box are recognised the same as plain
 ones.</p>
 <p><b>Know what Enter takes there.</b> That prompt's first option does not
-just approve the plan — it also raises the session's permission level.
-Captured live, minutes apart: a session with permission checks on offered
-<i>Yes, and use auto mode</i> (and was in auto mode afterwards), while
-another offered <i>Yes, and bypass permissions</i>. The wording tracks
-where the session already is; what stays true is that Enter accepts the
-looser setting.</p>
+only approve the plan — it also sets the session's permission level, back
+to whatever it was started with. Captured live: a session started plainly
+offered <i>Yes, and use auto mode</i> and was in auto mode afterwards; a
+session started with permissions bypassed offered <i>Yes, and bypass
+permissions</i> and returned to bypass. So if you start your sessions
+bypassed, approving a plan this way puts it straight back to bypassed and
+begins the work — unattended, which is usually the point.</p>
 <p>If you would rather approve plans yourself, turn <b>Answer choosers</b>
 off — the plan prompt rides on that switch, not on the permission one,
 because it is a chooser like any other until you read what its first option
