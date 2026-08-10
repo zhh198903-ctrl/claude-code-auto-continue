@@ -799,10 +799,14 @@ print("---- plan-mode approval ----")
 # Enter when someone reads it.
 _V = chr(0x2502)          # the box's vertical rule
 _N = chr(0x276F)          # the selection marker
-_Q = "Would you like to proceed?"
-_O1 = "1" ". Yes, and auto-accept edits"
-_O2 = "2" ". Yes, and manually approve edits"
-_O3 = "3" ". No, keep planning"
+# Captured verbatim from a live session on 2026-08-10; the wording was
+# guessed before that and guessed wrong, which is why the fixture now says
+# where it came from.
+_Q = ("Claude has written up a plan and is ready to execute. "
+      "Would you like to proceed?")
+_O1 = "1" ". Yes, and bypass permissions"
+_O2 = "2" ". Yes, manually approve edits"
+_O3 = "3" ". Tell Claude what to change"
 
 _plan_plain = f"{_Q}\n{_N} {_O1}\n  {_O2}\n  {_O3}"
 _plan_boxed = (f"Ready to code?\n{_V} {_Q}\n{_V} {_N} {_O1}\n"
@@ -818,7 +822,7 @@ check_reset("plan approval (boxed) is recognised as a chooser",
 check_reset("plan approval is not treated as a permission request",
             ac.parse_permission_prompt(_plan_plain) is False
             and ac.parse_permission_prompt(_plan_boxed) is False)
-check_reset("Enter would take the first option (auto-accept edits)",
+check_reset("Enter would take the first option (bypass permissions)",
             ac._chooser_match(_plan_boxed).group(0).find(_O1) >= 0)
 # Prose that merely contains a marker and numbers must not qualify.
 check_reset("ordinary prose is not mistaken for a chooser",
