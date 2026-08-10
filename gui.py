@@ -2536,8 +2536,13 @@ class Updater(QObject):
                 tot = total or size
                 self.progress.emit(int(done * 100 / tot) if tot else -1)
 
+            # keep_partial: the staged path sits beside the exe, so what
+            # survives a failed attempt is still there next launch. On a
+            # link where this asset takes tens of minutes, that is the
+            # difference between eventually finishing and never finishing.
             updater.download_asset(rel["asset_url"], dest,
-                                   progress_cb=cb, total_hint=size)
+                                   progress_cb=cb, total_hint=size,
+                                   keep_partial=True)
             if not updater.verify_sha256(dest, rel.get("sha256")):
                 try:
                     os.remove(dest)
@@ -4630,7 +4635,11 @@ instead of double-typing into the same sessions.</li>
 titles share one set of settings — worth knowing before ticking one of them
 for model recovery.</li>
 <li><b>Check updates</b> asks GitHub whether a newer release exists and can
-download, verify and swap the exe in place. If the swap cannot complete —
+download, verify and swap the exe in place. The download <b>resumes</b>: a
+dropped connection keeps what arrived and the next attempt asks only for the
+rest — and what survives is still there on the next launch, so a link that
+drops more often than the transfer takes can still finish. A partial left
+over from an older release is discarded rather than continued. If the swap cannot complete —
 antivirus quarantines the staged file, the folder is read-only — the helper
 starts the <i>previous</i> version back up rather than leaving you with
 nothing running, and drops an <code>.update-failed.txt</code> marker beside

@@ -283,5 +283,68 @@ check_true("a truncated body raises instead of installing a short file",
 
 
 print()
+print("---- a partial survives the run that started it ----")
+# A link that drops more often than a full transfer takes can never finish
+# if every launch begins at zero. keep_partial is what makes the NEXT RUN
+# continue, not merely the next retry.
+def _always_dies(req, timeout=None, context=None):
+    rng = req.headers.get("Range")
+    start = int(rng.split("=")[1].split("-")[0]) if rng else 0
+    return _Resp(PAYLOAD[start:start + 2000], 206 if rng else 200,
+                 {"Content-Length": str(len(PAYLOAD) - start)})
+
+
+_dest4 = _os.path.join(_tmp, "asset4.bin")
+updater.urllib.request.urlopen = _always_dies
+try:
+    try:
+        updater.download_asset("https://example.invalid/asset4.bin", _dest4,
+                               attempts=2, retry_wait=0, total_hint=len(PAYLOAD),
+                               keep_partial=True)
+    except Exception:
+        pass
+finally:
+    updater.urllib.request.urlopen = _saved_urlopen
+
+check_true("keep_partial leaves the bytes for next time",
+           _os.path.exists(_dest4 + ".part")
+           and _os.path.getsize(_dest4 + ".part") > 0)
+
+# The next run resumes from them and finishes.
+_log4 = []
+updater.urllib.request.urlopen = _make_server(None, _log4)
+try:
+    updater.download_asset("https://example.invalid/asset4.bin", _dest4,
+                           attempts=2, retry_wait=0, total_hint=len(PAYLOAD),
+                           keep_partial=True)
+finally:
+    updater.urllib.request.urlopen = _saved_urlopen
+
+check_true("the next run continues from what was kept",
+           _log4 and _log4[0] > 0 and open(_dest4, "rb").read() == PAYLOAD)
+check_true("and the sidecar is gone once the file is complete",
+           not _os.path.exists(_dest4 + ".part.meta"))
+
+# A partial belonging to a DIFFERENT asset must not be appended to. The
+# SHA-256 check would catch the result, but only after paying for the whole
+# download again.
+_dest5 = _os.path.join(_tmp, "asset5.bin")
+open(_dest5 + ".part", "wb").write(b"bytes from some older release")
+open(_dest5 + ".part.meta", "w", encoding="utf-8").write(
+    '{"size": 999, "url": "https://example.invalid/OLD.bin"}')
+_log5 = []
+updater.urllib.request.urlopen = _make_server(None, _log5)
+try:
+    updater.download_asset("https://example.invalid/asset5.bin", _dest5,
+                           attempts=2, retry_wait=0, total_hint=len(PAYLOAD))
+finally:
+    updater.urllib.request.urlopen = _saved_urlopen
+
+check_true("a partial from another asset is discarded, not resumed",
+           _log5 and _log5[0] == 0
+           and open(_dest5, "rb").read() == PAYLOAD)
+
+
+print()
 print("RESULT:", "ALL OK" if failures == 0 else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

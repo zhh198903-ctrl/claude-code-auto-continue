@@ -150,7 +150,9 @@ def download_asset(url: str,
                    timeout: int = 30,
                    total_hint: int = 0,
                    attempts: int = 5,
-                   retry_wait: float = 3.0) -> str:
+                   retry_wait: float = 3.0,
+                   part_path: Optional[str] = None,
+                   keep_partial: bool = False) -> str:
     """Stream `url` to `dest_path`, reporting progress.
 
     Writes to `dest_path + '.part'` then os.replace()s into place on success
@@ -169,12 +171,38 @@ def download_asset(url: str,
     against Content-Length before the rename, because a body that stops
     early is not an error the socket reports.
 
-    Returns `dest_path`. Raises the last error once the attempts are spent
-    (and only then removes the .part file).
+    `keep_partial` leaves the partial behind when the attempts run out, so
+    the next RUN continues instead of only the next retry — on a link that
+    drops more often than a full transfer takes, starting from zero every
+    launch never finishes. `part_path` puts that file somewhere the caller
+    controls rather than beside `dest_path`.
+
+    A kept partial records which asset it belongs to in a sidecar. Without
+    that, a release published while an old partial sat there would have its
+    bytes appended to the wrong ones — the SHA-256 check catches it, but only
+    after paying for the whole download again.
+
+    Returns `dest_path`. Raises the last error once the attempts are spent.
     """
-    part = dest_path + ".part"
+    part = part_path or (dest_path + ".part")
+    meta = part + ".meta"
     ctx = ssl.create_default_context()
     last_err = None
+
+    # Whose bytes are these? A partial kept from a previous run is only worth
+    # resuming if it belongs to the same asset.
+    tag = json.dumps({"url": url, "size": total_hint}, sort_keys=True)
+    if os.path.exists(part):
+        try:
+            same = open(meta, encoding="utf-8").read() == tag
+        except OSError:
+            same = False
+        if not same:
+            for path in (part, meta):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     for attempt in range(attempts):
         # Whatever survived the previous attempt is the offset to ask from.
@@ -211,6 +239,10 @@ def download_asset(url: str,
                     f"connection ended early at {os.path.getsize(part)} of "
                     f"{total} bytes")
             os.replace(part, dest_path)
+            try:
+                os.remove(meta)
+            except OSError:
+                pass
             return dest_path
         except KeyboardInterrupt:
             raise
@@ -222,10 +254,17 @@ def download_asset(url: str,
             if attempt + 1 < attempts:
                 time.sleep(retry_wait)
 
-    try:
-        os.remove(part)
-    except OSError:
-        pass
+    if keep_partial and os.path.exists(part):
+        try:
+            open(meta, "w", encoding="utf-8").write(tag)
+        except OSError:
+            pass
+    else:
+        for path in (part, meta):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
     raise last_err
 
 
