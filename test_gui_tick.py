@@ -580,6 +580,19 @@ check("H14 a chooser that replaced the input box is still answered",
       SENT == [(26, [""])])
 SENT.clear()
 
+# Questions arrive in runs — a form asks several and then offers Submit as
+# one more chooser — so after answering one, look again soon instead of
+# waiting a whole poll. Measured live: a four-step form took three minutes
+# at the default interval.
+gui.QTimer.scheduled = []
+set_now(T0)
+reset([(28, "win")], {28: CHOOSER + NO_BOX})
+w = new_watcher()
+w._tick()
+check("H16 answering schedules a fast follow-up tick",
+      SENT == [(28, [""])] and w._retick_at is not None)
+SENT.clear()
+
 # The safeguard picker and the "Switch model?" confirmation are choosers
 # too, but confirming either CHANGES WHICH MODEL the session runs on. That
 # belongs to the recovery feature, which is opt-in for exactly that reason —

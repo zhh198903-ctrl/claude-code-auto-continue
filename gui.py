@@ -2033,6 +2033,13 @@ class Watcher(QObject):
                                     "fire",
                                     f"{dr}answered the {_what} "
                                     f"(Enter = option 1) → {title!r}")
+                                # Questions come in runs: a form asks
+                                # several and then offers Submit as one more
+                                # chooser. At the poll interval that is a
+                                # minute of idle per question — measured
+                                # live, three minutes to walk a four-step
+                                # form. Look again shortly instead.
+                                self._retick_soon()
                             elif not st.chooser_warned:
                                 # Once per chooser: it retries every poll,
                                 # and a line each time would bury the log for
