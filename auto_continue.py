@@ -856,9 +856,13 @@ def parse_oauth_expired(text: str, pattern=None) -> bool:
 # The examples in this comment are de-fanged (the marker and the digit are
 # separated by a word) so that reading this file in a watched terminal cannot
 # make the watchdog press Enter.
+# The row prefix: indentation, optionally a box rule, more indentation.
+# Kept explicit rather than a loose `.{0,8}` so that ordinary prose ending
+# in "> 1." cannot pose as a chooser.
+_ROW = r"[^\S\n]{0,6}[\u2502\u2503\u2551|]?[^\S\n]{0,4}"
 CHOOSER_RE = re.compile(
-    r"(?m)^[^\S\n]{0,6}[>\u276f][ \t]+1[.)]\s+\S[\s\S]{0,400}?"
-    r"^[^\S\n]{0,6}2[.)]\s+\S")
+    r"(?m)^" + _ROW + r"[>\u276f][ \t]+1[.)]\s+\S[\s\S]{0,400}?"
+    r"^" + _ROW + r"2[.)]\s+\S")
 
 # Claude Code's tool-permission prompt. It is a chooser like any other, but
 # answering it AUTHORISES an action — an edit, a command — so it gets its own

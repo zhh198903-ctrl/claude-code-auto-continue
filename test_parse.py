@@ -787,4 +787,102 @@ _fg_check(_w, fg_hwnd=111, expect_ok=False,
           use_send_keys=True)
 
 
+# =============================================================================
+print()
+print("---- plan-mode approval ----")
+# The prompt that ends plan mode is the case this feature most needs to
+# clear: the plan is written, and the session waits on a chooser before any
+# of it runs. Claude Code draws some dialogs plain and some inside a rounded
+# box, so both renderings must be recognised — a boxed one going unmatched
+# would fail silently, leaving the session exactly as stuck as before.
+# Assembled from parts so this file cannot make a watched terminal press
+# Enter when someone reads it.
+_V = chr(0x2502)          # the box's vertical rule
+_N = chr(0x276F)          # the selection marker
+_Q = "Would you like to proceed?"
+_O1 = "1" ". Yes, and auto-accept edits"
+_O2 = "2" ". Yes, and manually approve edits"
+_O3 = "3" ". No, keep planning"
+
+_plan_plain = f"{_Q}\n{_N} {_O1}\n  {_O2}\n  {_O3}"
+_plan_boxed = (f"Ready to code?\n{_V} {_Q}\n{_V} {_N} {_O1}\n"
+               f"{_V}   {_O2}\n{_V}   {_O3}")
+
+check_reset("plan approval (plain) is recognised as a chooser",
+            ac.parse_chooser_prompt(_plan_plain) is True)
+check_reset("plan approval (boxed) is recognised as a chooser",
+            ac.parse_chooser_prompt(_plan_boxed) is True)
+# It is NOT a permission request: it authorises nothing by itself, so it
+# belongs to the ordinary switch. Classifying it as a permission prompt
+# would leave it unanswered for anyone who turned that one off.
+check_reset("plan approval is not treated as a permission request",
+            ac.parse_permission_prompt(_plan_plain) is False
+            and ac.parse_permission_prompt(_plan_boxed) is False)
+check_reset("Enter would take the first option (auto-accept edits)",
+            ac._chooser_match(_plan_boxed).group(0).find(_O1) >= 0)
+# Prose that merely contains a marker and numbers must not qualify.
+check_reset("ordinary prose is not mistaken for a chooser",
+            ac.parse_chooser_prompt(
+                "I weighed > 1. this and 2. that, both fine.") is False)
+
+
+# =============================================================================
+print()
+print("---- DST: the hour that happens twice ----")
+# When clocks fall back the stated reset hour occurs twice. pytz's default
+# picks the SECOND, which parks the window for an extra hour on a reset that
+# already happened. The first is chosen instead: the fire path re-checks the
+# banner is still current, so waking early is skipped, while waking late is
+# an hour of idle session.
+import pytz as _pytz                                        # noqa: E402
+from datetime import datetime as _dt, timedelta as _td      # noqa: E402
+
+_tz = _pytz.timezone("America/New_York")
+_ambiguous = _dt(2026, 11, 1, 1, 0)
+_early = _tz.localize(_ambiguous, is_dst=True).astimezone(_pytz.UTC)
+_late = _tz.localize(_ambiguous, is_dst=False).astimezone(_pytz.UTC)
+check_reset("the fixture really is an ambiguous hour",
+            _late - _early == _td(hours=1))
+
+_saved_dt = ac.datetime
+
+
+class _FakeDT(_dt):
+    @classmethod
+    def now(cls, tz=None):
+        base = _tz.localize(_dt(2026, 11, 1, 0, 30), is_dst=True)
+        return base.astimezone(tz) if tz else base.replace(tzinfo=None)
+
+
+ac.datetime = _FakeDT
+try:
+    _got = ac.next_reset_datetime(1, 0, "am", "America/New_York")
+finally:
+    ac.datetime = _saved_dt
+check_reset(f"the ambiguous reset resolves to the earlier occurrence "
+            f"(got {_got:%H:%M} UTC, wanted {_early:%H:%M})",
+            _got == _early)
+
+
+class _FakeDT2(_dt):
+    @classmethod
+    def now(cls, tz=None):
+        base = _tz.localize(_dt(2026, 3, 8, 1, 0))
+        return base.astimezone(tz) if tz else base.replace(tzinfo=None)
+
+
+ac.datetime = _FakeDT2
+try:
+    _got2 = ac.next_reset_datetime(2, 30, "am", "America/New_York")
+    _ok2 = _got2 is not None
+except Exception as _e:
+    _ok2 = False
+    print("      raised:", _e)
+finally:
+    ac.datetime = _saved_dt
+check_reset("a non-existent local time (spring forward) still yields a time",
+            _ok2)
+
+
+
 sys.exit(1 if failures else 0)

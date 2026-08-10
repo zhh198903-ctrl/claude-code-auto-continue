@@ -4408,7 +4408,11 @@ open. One chooser, one Enter.</li>
 </ul>
 <p><b>Answer choosers</b> (on by default) handles ordinary questions — the
 session stopped to ask something and picking the offered option is simply
-what unblocks it.</p>
+what unblocks it. The one this matters most for is the prompt that ends
+<b>plan mode</b>: the plan is written and nothing runs until someone
+approves it, so with this on, an unattended session carries straight on
+into the work (Enter takes <i>Yes, and auto-accept edits</i>). Dialogs
+drawn inside a box are recognised the same as plain ones.</p>
 <p><b>Answer tool-permission requests</b> (on by default) handles the
 requests to run a command or edit a file that Claude Code shows when
 bypass-permissions is off. This one is different in kind: answering it
