@@ -50,3 +50,22 @@ with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         print(f"added {arc}  ({os.path.getsize(src)/1e6:.1f} MB raw)")
 
 print(f"\nOUT: {OUT}  ({os.path.getsize(OUT)/1e6:.1f} MB zipped)")
+
+# Only the newest build is worth keeping: an older zip sitting beside it is
+# something someone will eventually pick up believing it is current — this
+# folder had a v2.0.5 package in it four releases later.
+#
+# The pattern is deliberately exact. D:\claude is shared with the sibling
+# projects (CMIS, COM, REA, Scope_Extractor all drop packages here), so
+# anything not named for THIS project at a numeric version is left alone.
+_KEEP = os.path.basename(OUT)
+_pat = re.compile(rf"^{re.escape(NAME)}_dist_v\d+(?:_\d+)*\.zip$")
+for _name in sorted(os.listdir(os.path.dirname(OUT))):
+    if _name == _KEEP or not _pat.match(_name):
+        continue
+    _old = os.path.join(os.path.dirname(OUT), _name)
+    try:
+        os.remove(_old)
+        print(f"pruned older package: {_name}")
+    except OSError as _e:
+        print(f"could not remove {_name}: {_e}")
