@@ -509,11 +509,17 @@ def fable_refusal_id(text: str, pattern=None):
 # pre-selected option with a leading "> " of their own (e.g. "> 1. Switch to
 # ..."), but with a PLAIN space (U+0020) — never NBSP. Treating a plain space
 # as equivalent would make this helper misfire on that legitimate app output
-# and hide a real, open picker. So the prefix checked here is deliberately
-# narrow — '>' immediately followed by NBSP, nothing else — no attempt is
-# made to recognise any other TUI chrome, since guessing wrong there risks
-# hiding a REAL banner instead.
-_COMPOSER_LINE_RE = re.compile(r"^>\xa0")
+# and hide a real, open picker.
+#
+# The GLYPH, unlike the space, varies: ASCII '>' in some builds and U+276F
+# in others — both seen on this machine within one afternoon. Matching only
+# '>' made a line that genuinely held a half-typed message ("delete the
+# folder", in a session that had just offered to delete one) read as an
+# empty box; an empty box is what licenses pressing Enter, which would have
+# SUBMITTED it. Both glyphs are accepted; the NBSP still does the
+# separating. No other TUI chrome is guessed at, since guessing wrong there
+# risks hiding a REAL banner instead.
+_COMPOSER_LINE_RE = re.compile("^[>\u276f]\xa0")
 
 
 def _is_composer_line(text: str, pos: int) -> bool:

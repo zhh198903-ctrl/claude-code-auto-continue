@@ -857,6 +857,25 @@ check_reset("but text in the box IS a draft",
             ac.composer_has_draft(
                 "output\n>" + chr(0xa0) + "half a thought") is True)
 
+# The prompt glyph varies by build: ASCII '>' in one session, U+276F in
+# another, both on this machine the same afternoon. Matching only the first
+# read a real draft ("delete the folder", sitting in a session that had just
+# offered to delete one) as an empty box — and an empty box is what licenses
+# pressing Enter, which would have submitted it.
+_NBSP = chr(0xa0)
+for _mark, _name in ((">", "ascii"), (chr(0x276F), "U+276F")):
+    check_reset(f"a draft behind the {_name} prompt marker is seen",
+                ac.composer_has_draft(
+                    "output\n" + _mark + _NBSP + "delete the folder") is True)
+    check_reset(f"an empty box with the {_name} marker is not a draft",
+                ac.composer_has_draft(
+                    "output\n" + _mark + _NBSP + "    ") is False)
+    # The same glyph plus an ORDINARY space is a chooser's selection marker,
+    # not a composer; reading it as one would hide an open chooser.
+    check_reset(f"the {_name} marker plus a plain space is not a composer",
+                ac.composer_has_draft(
+                    "output\n" + _mark + " 1. an option") is False)
+
 # Long option descriptions, padded to the terminal width the way UIA reports
 # them. Reproduces the live measurement that exposed the too-tight gap.
 _pad = " " * 60
