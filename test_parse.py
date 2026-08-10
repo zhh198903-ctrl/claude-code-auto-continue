@@ -947,6 +947,33 @@ check_reset("a chooser with a todo list under it is still recognised",
 check_reset("its own allowance is looser than the limit picker's",
             ac.CHOOSER_POST_MATCH_TAIL > ac.PROMPT_POST_MATCH_TAIL)
 
+# A REAL permission prompt, captured 2026-08-10 17:39 from a session whose
+# folder carried an "ask" rule. The invented fixture had guessed its second
+# option as "and don't ask again"; the real one reads "allow all edits during
+# this session", which is now a tell of its own.
+_perm_live = (
+    "Do you want to create perm_check.txt?\n"
+    "  " + chr(0x276F) + " 1" ". Yes\n"
+    "    2" ". Yes, allow all edits during this session (shift+tab)\n"
+    "    3" ". No\n"
+    "  Esc to cancel - Tab to amend")
+check_reset("the live permission prompt is recognised as one",
+            ac.parse_permission_prompt(_perm_live) is True)
+check_reset("and is kept OUT of the ordinary chooser switch",
+            ac.parse_chooser_prompt(_perm_live) is False)
+
+# The verb list used to be fixed, so this one would have been missed and
+# then answered by the switch someone leaves on believing tool approvals are
+# still theirs to give. Enter on it means yes, delete.
+_perm_delete = (
+    "Do you want to delete build.log?\n"
+    "  " + chr(0x276F) + " 1" ". Yes\n"
+    "    2" ". Yes, allow all edits during this session\n"
+    "    3" ". No")
+check_reset("a permission prompt with an unlisted verb is still caught",
+            ac.parse_permission_prompt(_perm_delete) is True
+            and ac.parse_chooser_prompt(_perm_delete) is False)
+
 
 # =============================================================================
 print()

@@ -876,7 +876,8 @@ CHOOSER_RE = re.compile(
 # stable across its variants: the question, and the two option wordings that
 # only ever appear on permission prompts.
 PERMISSION_RE = re.compile(
-    r"Do\s+you\s+want\s+to\s+(?:proceed|make|run|allow|create|edit|apply)"
+    r"Do\s+you\s+want\s+to\s+\w+"
+    r"|allow\s+all\s+\w+\s+during\s+this\s+session"
     r"|and\s+don['\u2019]t\s+ask\s+again"
     r"|tell\s+Claude\s+what\s+to\s+do\s+differently",
     re.IGNORECASE,
