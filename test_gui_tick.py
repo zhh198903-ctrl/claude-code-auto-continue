@@ -218,6 +218,44 @@ w = new_watcher()
 w._tick()
 check("E1 later window still processed", (6, ["continue"]) in SENT)
 
+# ...and a window that throws MIDWAY through processing, after the tick has
+# already committed to it, must not take the rest of the loop down either.
+# Only the Fable block used to be guarded; everything after it ran bare, so
+# one window's failure meant every window enumerated later went unwatched
+# for that pass — with a single generic 'tick error' line as the symptom.
+set_now(T0)
+
+
+class _BoomText(str):
+    """Reads fine once (so the window is adopted), then raises."""
+
+
+_reads = {"n": 0}
+
+
+def _flaky_read(w):
+    h = int(w.NativeWindowHandle)
+    if h == 8:
+        _reads["n"] += 1
+        raise RuntimeError("UIA read blew up mid-window")
+    return TEXTS.get(h, "")
+
+
+reset([(8, "bad"), (9, "good")], {9: RETRY_EXHAUSTED})
+_saved_read = gui.read_terminal_text
+gui.read_terminal_text = _flaky_read
+LOGS_E = []
+w = new_watcher()
+w.log.connect(lambda k, m: LOGS_E.append((k, m)))
+try:
+    w._tick()
+finally:
+    gui.read_terminal_text = _saved_read
+check("E2 a window that throws does not stop the ones after it",
+      (9, ["continue"]) in SENT)
+check("E3 and the failure is reported against the window that caused it",
+      any(k == "err" and "tick error on" in m for k, m in LOGS_E))
+
 # =============================================================================
 print("---- F: closed windows drop their state ----")
 set_now(T0)

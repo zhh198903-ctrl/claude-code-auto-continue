@@ -1168,10 +1168,19 @@ def next_reset_datetime(hour_12: int, minute: int, ampm: str,
     if target_naive <= now_naive:
         target_naive += timedelta(days=1)
     try:
-        target_local = tz.localize(target_naive)
+        # is_dst=True resolves the AMBIGUOUS hour — the one that repeats when
+        # clocks fall back — to its FIRST occurrence. pytz's default picks
+        # the second, which would park the window for an extra hour on a
+        # reset that had already happened. Erring early is the cheaper
+        # mistake: the fire path re-checks that the limit banner is still
+        # current before typing, so a too-early wake-up is skipped, while a
+        # too-late one is an hour of the session sitting idle. The flag is
+        # ignored for every unambiguous time, i.e. all but one hour a year.
+        target_local = tz.localize(target_naive, is_dst=True)
     except Exception:
         # Non-existent local time (spring-forward gap): shift an hour.
-        target_local = tz.localize(target_naive + timedelta(hours=1))
+        target_local = tz.localize(target_naive + timedelta(hours=1),
+                                   is_dst=True)
     return target_local.astimezone(pytz.UTC)
 
 
@@ -1266,7 +1275,29 @@ def send_text_lines(window_ctrl, lines, dry_run: bool = False) -> bool:
                 # Code's TUI needs a beat to render the resulting state
                 # before the next "continue" submission lands.
                 time.sleep(0.6)
-            auto.SendKeys(sendkeys_literal(line) + "{Enter}", interval=0.02)
+                # ...and re-check we still own the foreground. The check
+                # above covers the FIRST line only; a focus steal during
+                # that pause would put the rest of a multi-line sequence
+                # (e.g. /model then continue) into whatever took over.
+                # Stopping mid-sequence is recoverable — the caller retries
+                # — while typing into the wrong app is not.
+                if _get_foreground_hwnd() != target_hwnd:
+                    return False
+            try:
+                auto.SendKeys(sendkeys_literal(line) + "{Enter}",
+                              interval=0.02)
+            except Exception:
+                # A throw here used to escape into the watcher's per-window
+                # loop, which has no guard of its own outside the Fable
+                # block — so one window's failed send stopped every window
+                # after it from being looked at that tick, with a single
+                # generic 'tick error' line as the only symptom. Report the
+                # failure instead; callers already treat False as "retry
+                # next tick". (This happened once for real, with braces in
+                # free-typed text; sendkeys_literal escapes those now, but
+                # the containment must not depend on having predicted every
+                # input.)
+                return False
         return True
     finally:
         time.sleep(0.15)
@@ -1329,7 +1360,10 @@ def send_keys(window_ctrl, keyspec: str, dry_run: bool = False) -> bool:
                 break
         if _get_foreground_hwnd() != target_hwnd:
             return False
-        auto.SendKeys(str(keyspec), interval=0.02)
+        try:
+            auto.SendKeys(str(keyspec), interval=0.02)
+        except Exception:
+            return False        # same containment as send_text_lines
         return True
     finally:
         time.sleep(0.15)
