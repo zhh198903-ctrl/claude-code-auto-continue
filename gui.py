@@ -2661,6 +2661,7 @@ class Updater(QObject):
     progress = pyqtSignal(int)             # 0..100, or -1 = indeterminate
     download_failed = pyqtSignal(str)
     ready_to_install = pyqtSignal(str)     # path to the staged new exe
+    note = pyqtSignal(str)                 # source choice / fallback, for the log
 
     @pyqtSlot(bool)
     def check(self, manual: bool) -> None:
@@ -2690,9 +2691,15 @@ class Updater(QObject):
             # survives a failed attempt is still there next launch. On a
             # link where this asset takes tens of minutes, that is the
             # difference between eventually finishing and never finishing.
-            updater.download_asset(rel["asset_url"], dest,
-                                   progress_cb=cb, total_hint=size,
-                                   keep_partial=True)
+            # Two sources carry the same build: the GitHub release, and the
+            # download-site mirror. Whichever answers faster gets used, and a
+            # failure on one falls through to the other — this machine's link
+            # to GitHub drops often enough that a single source is a single
+            # point of failure. The choice and both measurements are logged.
+            updater.download_update(
+                rel.get("version") or "", rel["asset_url"], dest,
+                progress_cb=cb, total_hint=size,
+                log_cb=self.note.emit)
             if not updater.verify_sha256(dest, rel.get("sha256")):
                 try:
                     os.remove(dest)
@@ -3328,6 +3335,8 @@ class MainWindow(QMainWindow):
         self.updater.no_update.connect(self._on_no_update)
         self.updater.check_failed.connect(self._on_update_check_failed)
         self.updater.progress.connect(self._on_update_progress)
+        self.updater.note.connect(
+            lambda m: self._append_log("info", m))
         self.updater.download_failed.connect(self._on_update_download_failed)
         self.updater.ready_to_install.connect(self._on_update_ready)
         self.updater_thread.start()
@@ -4667,6 +4676,22 @@ ignored.</p>
 groups the parser indexes, and must not match empty text (which would fire on
 every window). Only patterns you actually changed are stored, so future
 builds' improved defaults still win for everything you left alone.</p>
+
+<h3>Updating</h3>
+<p><b>Check updates</b> looks at the GitHub release, and the download happens
+from whichever of <b>two sources</b> answers faster: the GitHub release
+itself, or the download-site mirror. Both are probed at once with a few
+seconds' budget, the quicker one gets the transfer, and if it fails the other
+is tried before the update is called off.</p>
+<p>This is not only about speed. Either source alone can carry an update, so
+a link that cannot reach GitHub &mdash; which shows up in this tool's own log
+on ordinary evenings &mdash; no longer means no updates. The mirror publishes
+the distribution zip rather than a bare exe, so a download from it is
+unpacked before staging; that is the only difference, and the same resume,
+size check and hash apply either way.</p>
+<p>Both measurements and the choice are written to the activity log, so when
+an update is slow you can see which source was picked and what each one was
+actually doing at the time.</p>
 
 <h3>Advanced&#8230; &#8594; Model recovery</h3>
 <p><b>Opt-in and off by default</b>, because it is the one feature that types

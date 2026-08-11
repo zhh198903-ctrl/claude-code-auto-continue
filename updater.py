@@ -26,6 +26,47 @@ from typing import Callable, Optional
 GITHUB_OWNER = "zhh198903-ctrl"
 GITHUB_REPO = "claude-code-auto-continue"
 ASSET_NAME = "Auto-Continue.exe"
+
+# Second source for the same build. GitHub is the release of record, but the
+# link to it from this machine is unreliable — "could not reach GitHub" shows
+# up in the activity log on ordinary evenings — and when it does resolve it is
+# often slower than the mirror. So both are probed and the quicker one wins,
+# which doubles as failover: either source alone can carry an update.
+#
+# The mirror publishes the DIST ZIP, not the bare exe, so a download from it
+# has to be unpacked. That is the only asymmetry; everything else (resume,
+# size check, hash) is shared.
+MIRROR_BASE = "http://106.14.76.130"
+MIRROR_ZIP_MEMBER = ASSET_NAME
+
+
+def mirror_zip_url(version: str) -> str:
+    """Where the mirror keeps the dist zip for `version` (e.g. "2.0.14")."""
+    return (f"{MIRROR_BASE}/Auto-Continue/{version}/"
+            f"Auto-Continue_dist_v{version.replace('.', '_')}.zip")
+
+
+def probe_speed(url: str, sample: int = 1 << 17, timeout: int = 8):
+    """Bytes-per-second for the first `sample` bytes, or None if unusable.
+
+    A short ranged read rather than a HEAD: latency alone says little about a
+    link that is fast to answer and slow to deliver, which is exactly the
+    failure this chooser exists to route around. None means "do not pick me"
+    — unreachable, refused, or serving nothing.
+    """
+    req = urllib.request.Request(url, headers={
+        "Range": f"bytes=0-{sample - 1}",
+        "User-Agent": "auto-continue-updater",
+    })
+    t0 = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout,
+                                    context=ssl.create_default_context()) as r:
+            got = len(r.read(sample))
+    except Exception:
+        return None
+    dt = max(time.monotonic() - t0, 1e-6)
+    return (got / dt) if got else None
 _USER_AGENT = "Auto-Continue-Updater"  # GitHub REST requires a User-Agent
 
 
@@ -266,6 +307,122 @@ def download_asset(url: str,
             except OSError:
                 pass
     raise last_err
+
+
+def choose_source(version: str, github_url: str, budget: float = 3.0):
+    """Pick the faster of GitHub and the mirror for `version`.
+
+    Both are probed at once and given the same short budget, because the
+    point is to spend a few seconds to save minutes, not to turn the choice
+    itself into the slow part. Whichever moved more bytes wins.
+
+    Returns (url, is_zip, note). `note` is a human-readable line for the
+    activity log — which source won and what each measured — because a
+    chooser nobody can see is a chooser nobody can debug, and the two links
+    behave very differently from different networks.
+    """
+    import concurrent.futures as _cf
+
+    mirror = mirror_zip_url(version)
+    results = {}
+    with _cf.ThreadPoolExecutor(max_workers=2) as ex:
+        futs = {ex.submit(probe_speed, u, 1 << 17, int(budget) or 1): name
+                for name, u in (("github", github_url), ("mirror", mirror))}
+        for fut in _cf.as_completed(futs, timeout=budget + 5):
+            try:
+                results[futs[fut]] = fut.result()
+            except Exception:
+                results[futs[fut]] = None
+
+    g, m = results.get("github"), results.get("mirror")
+
+    def _h(v):
+        return "unreachable" if not v else f"{v / 1024:.0f} KB/s"
+
+    note = f"update source: github {_h(g)}, mirror {_h(m)}"
+    # Ties and total failures both fall back to GitHub: it is the release of
+    # record, and the only one whose asset is the exe itself.
+    if m and (not g or m > g):
+        return mirror, True, note + " -> mirror (zip)"
+    return github_url, False, note + " -> github"
+
+
+def _extract_exe(zip_path: str, dest_path: str) -> str:
+    """Pull the exe out of a dist zip, atomically, into `dest_path`.
+
+    The mirror publishes the distribution zip rather than a bare exe, so this
+    is the one thing a mirror download needs that a GitHub one does not. It
+    writes through a .part and replaces, for the same reason the download
+    does: a half-extracted exe beside the real one is worse than none.
+    """
+    import zipfile
+
+    tmp = dest_path + ".part"
+    with zipfile.ZipFile(zip_path) as zf:
+        member = next(
+            (n for n in zf.namelist()
+             if n.rsplit("/", 1)[-1].lower() == MIRROR_ZIP_MEMBER.lower()),
+            None)
+        if member is None:
+            raise RuntimeError(
+                f"{os.path.basename(zip_path)} has no {MIRROR_ZIP_MEMBER}")
+        with zf.open(member) as src, open(tmp, "wb") as out:
+            while True:
+                buf = src.read(1 << 20)
+                if not buf:
+                    break
+                out.write(buf)
+    os.replace(tmp, dest_path)
+    return dest_path
+
+
+def download_update(version: str,
+                    github_url: str,
+                    dest_path: str,
+                    progress_cb=None,
+                    total_hint: int = 0,
+                    log_cb=None) -> str:
+    """Fetch the new exe from whichever source is quicker, and fall back.
+
+    Either source alone can carry an update, so a failure on one is not a
+    failed update — it is a reason to try the other. That matters here more
+    than it would elsewhere: "could not reach GitHub" is a routine line in
+    this tool's own log.
+    """
+    def _say(msg):
+        if log_cb:
+            try:
+                log_cb(msg)
+            except Exception:
+                pass
+
+    first_url, first_zip, note = choose_source(version, github_url)
+    _say(note)
+    mirror = mirror_zip_url(version)
+    order = [(first_url, first_zip)]
+    other = (github_url, False) if first_zip else (mirror, True)
+    if other[0] != first_url:
+        order.append(other)
+
+    last = None
+    for url, is_zip in order:
+        try:
+            if is_zip:
+                zpath = dest_path + ".zip"
+                download_asset(url, zpath, progress_cb=progress_cb,
+                               total_hint=0, keep_partial=True)
+                out = _extract_exe(zpath, dest_path)
+                try:
+                    os.remove(zpath)
+                except OSError:
+                    pass
+                return out
+            return download_asset(url, dest_path, progress_cb=progress_cb,
+                                  total_hint=total_hint, keep_partial=True)
+        except Exception as e:
+            last = e
+            _say(f"update source failed ({type(e).__name__}); trying the other")
+    raise last if last else RuntimeError("no update source available")
 
 
 def verify_sha256(path: str, expected: Optional[str]) -> bool:
