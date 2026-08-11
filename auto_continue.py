@@ -42,7 +42,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "2.0.12"
+APP_VERSION = "2.0.13"
 
 
 # ---------------------------------------------------------------------------
@@ -182,13 +182,11 @@ SERVER_ERROR_RE = re.compile(
 LIMIT_PROMPT_RE = re.compile(
     r"What\s+do\s+you\s+want\s+to\s+do\?"
     r"[\s\S]{0,300}?"
-    # The waiting option must be the SELECTED one, not merely present in the
-    # list. This used to match anywhere in the picker and then press Enter,
-    # which assumes the highlight sits on "stop and wait" — and when the
-    # picker offered paid extra usage above it, that blind Enter BOUGHT the
-    # upgrade. Enter is only safe here when the screen already shows the
-    # harmless option chosen; anything else is the user's decision to make.
-    r"(?:^|\n)[^\S\n]*[❯>▶→*]\s+(?:\d+[.)]\s*)?"
+    # Detection only. Nothing is ever typed in response to this picker: its
+    # other option is PAID extra usage, and Enter takes whatever is
+    # highlighted. Matching it only marks the window as waiting on a human,
+    # so the pattern stays broad — a stricter one would miss a picker and
+    # leave the tool silent about a window that has stopped.
     r"Stop\s+and\s+wait\s+for\s+limit\s+to\s+reset"
     r"[\s\S]{0,400}?"
     r"Enter\s+to\s+confirm",

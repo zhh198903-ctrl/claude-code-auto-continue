@@ -2059,24 +2059,29 @@ class Watcher(QObject):
                 if tail and parse_limit_prompt(
                         tail, self._patterns.get("limit_prompt"),
                         self._patterns.get("limit")):
-                    if (force_fire
-                            or st.prompt_last_sent_utc is None
-                            or now - st.prompt_last_sent_utc >= retry_interval):
-                        first = not st.prompt_active
-                        if first:
-                            self.log.emit(
-                                "warn",
-                                f"limit picker open on {title!r}; confirming "
-                                f"'Stop and wait for limit to reset'"
-                            )
-                            st.prompt_active = True
+                    # NOTHING is pressed here, deliberately. This chooser
+                    # offers paid extra usage next to "stop and wait", and
+                    # Enter takes whichever option is highlighted -- so a
+                    # keystroke sent on a guess can buy an upgrade. It did:
+                    # the old code checked only that the waiting option was
+                    # somewhere in the list, pressed Enter, and logged that it
+                    # had confirmed a choice it never actually read.
+                    #
+                    # Gating on "is the safe option selected?" was the first
+                    # fix and still meant deciding about money from a screen
+                    # scrape. The rule now is simpler and needs no reading at
+                    # all: this one is the user's. The banner above the picker
+                    # still carries the reset time, so the countdown is armed
+                    # from that -- what waits for a human is only the choice
+                    # that costs something.
+                    if not st.prompt_active:
+                        st.prompt_active = True
                         self.log.emit(
-                            "fire" if first else "info",
-                            f"{dr}pressing Enter (limit picker) → {title!r}"
+                            "warn",
+                            f"limit picker open on {title!r} — it offers PAID "
+                            f"extra usage, so nothing is pressed. Choose in "
+                            f"that window; auto-continue will not."
                         )
-                        ok = send_text_lines(w, [""], dry_run=self._dry_run)
-                        if ok:
-                            st.prompt_last_sent_utc = now
                     st.status = ST_PROMPT
                     continue
                 elif st.prompt_active or st.prompt_last_sent_utc is not None:
@@ -4446,13 +4451,12 @@ log shows exactly what would have happened, prefixed
 waits until it passes (plus the <b>Buffer</b>, 60s by default, because the
 limit often clears a little after the stated minute), then types
 <code>continue</code>. If the newer <i>"What do you want to do?"</i> chooser
-appears instead of the banner, it confirms <i>Stop and wait for limit to
-reset</i> with a bare Enter, which makes the banner appear, and the normal
-flow takes over from there. <b>Only when that option is the one already
-highlighted.</b> The same chooser also offers paid extra usage, and a bare
-Enter buys whatever is selected — so if the highlight sits anywhere else,
-nothing is pressed and the window waits for you. A stalled window costs you
-time; the wrong Enter costs money, and only one of those is recoverable.</li>
+appears, <b>nothing is pressed</b> — that chooser's other option is
+<i>paid extra usage</i>, and Enter takes whatever is highlighted, so
+answering it is a decision about money that no screen scrape should make.
+The window is marked <b>&#9166; Limit prompt</b> and waits for you. The
+countdown is unaffected: the reset time is read from the banner, not from
+the chooser.</li>
 <li><b>Network stalls.</b> Retry-exhausted banners (<i>attempt N/N</i>) and
 bare API connection errors get one <code>continue</code> every <b>Retry
 interval</b> (10 minutes by default) until the connection comes back.
