@@ -716,6 +716,40 @@ check("S2 every connected signal matches its slot: "
 check("S3 loops_spent still carries BOTH key and remaining count",
       _sigs.get("loops_spent") == 2 and _slots.get("_on_loops_spent") == 2)
 
+
+# ---------------------------------------------------------------------------
+# T: a limit banner read AFTER its reset already passed
+# ---------------------------------------------------------------------------
+# The banner carries only a time of day, so "the next 9:30pm" is tomorrow once
+# 9:30pm has gone. Reading one late — an unwatched window, or a pattern that
+# only began matching after an update — then parks the session for a full day
+# over a limit that lifted hours ago. Measured live on 2026-08-11: a 21:30
+# reset parsed at 21:51 was scheduled for 21:31 the NEXT day.
+_stale = gui.STALE_RESET_H
+check("T1 the staleness horizon clears the 5-hour window", _stale >= 6)
+
+# The rule itself, on explicit datetimes so no frozen clock is involved:
+# anything computed further out than the horizon is a banner whose moment has
+# gone, and anything inside it is a real wait.
+_base = datetime(2026, 8, 11, 14, 0, tzinfo=pytz.UTC)
+
+
+def _is_stale(hours_out):
+    return (_base + timedelta(hours=hours_out)) - _base > timedelta(
+        hours=gui.STALE_RESET_H)
+
+
+check("T2 a reset 23h out is treated as a banner already passed",
+      _is_stale(23))
+check("T3 a reset 2h out is a real wait, not stale", not _is_stale(2))
+check("T4 the boundary is exclusive, so 6h exactly still waits",
+      not _is_stale(gui.STALE_RESET_H))
+
+# And the guard has to be wired into the scheduling path, not just defined.
+_gsrc = open("gui.py", encoding="utf-8").read()
+check("T5 the scheduler consults the horizon before arming a countdown",
+      "STALE_RESET_H" in _gsrc.split("new_reset = next_reset_datetime")[1][:2000])
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

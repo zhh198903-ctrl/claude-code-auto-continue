@@ -373,6 +373,13 @@ DEFAULT_INTERVAL_S = 60
 DEFAULT_BUFFER_S = 60
 DEFAULT_RETRY_S = 600
 
+# A limit banner that reports a clock time always lifts within the day,
+# so a computed reset further out than this is not the future — it is a
+# banner we read after its moment had already gone by, wrapped to
+# tomorrow by the arithmetic. Six hours clears the 5-hour window with
+# room to spare.
+STALE_RESET_H = 6
+
 # A chooser gets ONE Enter. Its text stays in the scrollback after it is
 # answered, so "the pattern still matches" cannot be the exit condition —
 # that mistake once fired eight Enters at a single dialog. The answered
@@ -2282,6 +2289,33 @@ class Watcher(QObject):
                                 "err", f"reset calc failed for {title!r}: {e}"
                             )
                         if new_reset is not None:
+                            # A banner only gives a time of day, so "the next
+                            # 9:30pm" is tomorrow once 9:30pm has gone by. When
+                            # we read one LATE — the window was unwatched, or
+                            # the pattern only started matching after an update
+                            # — that arithmetic parks a session for a full day
+                            # over a limit that lifted hours ago. Measured: a
+                            # 21:30 reset, parsed at 21:51, scheduled for 21:31
+                            # TOMORROW.
+                            #
+                            # A limit that reports a clock time always lifts
+                            # within the day, so anything computed further out
+                            # than STALE_RESET_H means we are looking at a
+                            # banner whose moment has already passed. Resume
+                            # now instead. If that guess is wrong the session
+                            # simply reprints the banner and we reschedule from
+                            # it — one wasted 'continue' against a day of a
+                            # window sitting dead.
+                            if (new_reset - now
+                                    > timedelta(hours=STALE_RESET_H)):
+                                self.log.emit(
+                                    "warn",
+                                    f"limit on {title!r} says it resets at "
+                                    f"{hour_12}:{minute:02d}{ampm}, which "
+                                    f"already passed — treating it as lifted "
+                                    f"and resuming now instead of waiting for "
+                                    f"tomorrow")
+                                new_reset = now
                             old = st.reset_utc
                             st.reset_utc = new_reset
                             st.reset_key = parsed
@@ -4456,7 +4490,11 @@ appears, <b>nothing is pressed</b> — that chooser's other option is
 answering it is a decision about money that no screen scrape should make.
 The window is marked <b>&#9166; Limit prompt</b> and waits for you. The
 countdown is unaffected: the reset time is read from the banner, not from
-the chooser.</li>
+the chooser. A banner found <i>after</i> its stated time has already gone by
+— an unwatched window, or a version that could not yet read that wording —
+is treated as a limit that has lifted, and resumed straight away. Plain
+"next occurrence" arithmetic would otherwise read 9:30pm at 9:51pm as
+<i>tomorrow</i> and park the session for a day.</li>
 <li><b>Network stalls.</b> Retry-exhausted banners (<i>attempt N/N</i>) and
 bare API connection errors get one <code>continue</code> every <b>Retry
 interval</b> (10 minutes by default) until the connection comes back.
