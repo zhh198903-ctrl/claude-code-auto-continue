@@ -90,7 +90,7 @@ from auto_continue import (
     current_model, fable_refusal_distance, fable_refusal_id,
     chooser_signature, composer_has_draft,
     parse_chooser_prompt, parse_econnreset_stuck,
-    parse_fable_picker, parse_permission_prompt,
+    parse_fable_picker, parse_model_quota, parse_permission_prompt,
     parse_limit_message,
     parse_limit_prompt, parse_oauth_expired, parse_retry_exhausted,
     parse_server_error_stuck, parse_switch_model_prompt, read_terminal_text,
@@ -521,6 +521,24 @@ def _last_model_step(steps):
     return want
 
 
+def _fable_fallback_model(steps):
+    """Model name from the FIRST `/model X` line in a step script, if any.
+
+    The mirror of `_last_model_step`: a recovery script switches AWAY to the
+    fallback first and back to the target last, so the first step names the
+    model that is expected to still work. Read from the script rather than
+    hard-coded so a user who rewrote the script gets their own choice — and
+    so a script with no `/model` line at all yields None, which the caller
+    treats as "nowhere to go" rather than guessing.
+    """
+    for kind, arg in steps or ():
+        if kind == "send" and str(arg).strip().lower().startswith("/model"):
+            parts = str(arg).split()
+            if len(parts) > 1:
+                return parts[1]
+    return None
+
+
 def _fable_reset(st) -> None:
     """Return a window to 'no recovery in flight'. Deliberately leaves
     `fable_handled` / `fable_runs` alone — those track whether we already
@@ -658,6 +676,8 @@ class _WState:
     fable_drift_runs: int = 0                     # corrections since on-target
     fable_restore: Optional[list] = None          # one-off restore script
     fable_last_model: Optional[str] = None        # model seen last tick
+    quota_hold: bool = False                      # held off an empty quota
+    quota_at: Optional[datetime] = None           # when we moved
     fable_acted_at: Optional[datetime] = None     # last keystroke WE sent
     fable_user_optout: bool = False               # user took manual control
     fable_our_models: set = field(default_factory=set)  # models we typed
@@ -701,6 +721,9 @@ class Watcher(QObject):
 
         # Fable refusal-recovery config (opt-in per window; see AdvancedDialog).
         self._fable_enabled = False
+        # Opt-in: finish on the fallback when the target model's own
+        # allowance runs dry, instead of waiting days for it to reset.
+        self._fable_quota_switch = False
         self._fable_delay = 180
         self._fable_steps = _parse_recovery_steps(DEFAULT_FABLE_STEPS)
         self._fable_windows: set[str] = set()
@@ -857,6 +880,7 @@ class Watcher(QObject):
         # whole watch loop down.
         was_on = self._fable_enabled
         self._fable_enabled = bool(cfg.get("enabled", False))
+        self._fable_quota_switch = bool(cfg.get("quota_switch", False))
         try:
             self._fable_delay = max(1, int(cfg.get("delay", 180)))
         except (TypeError, ValueError):
@@ -1669,6 +1693,82 @@ class Watcher(QObject):
                                 tail, self._patterns.get("fable"))
                                 if tail else None)
                             fable_hit = dist is not None
+
+                            # --- per-model quota -------------------------
+                            # A different failure from a safeguard block, so
+                            # a different answer: nothing is wrong with the
+                            # conversation, one model simply has nothing left.
+                            # No /compact — throwing away the history would
+                            # cost real work and buy nothing, since the quota
+                            # is not what the history says.
+                            _quota_now = (
+                                self._fable_quota_switch and tail
+                                and parse_model_quota(
+                                    tail, self._patterns.get("model_quota")))
+                            if not _quota_now and st.quota_hold:
+                                # Either the allowance came back or the user
+                                # unticked the switch. Both release the latch —
+                                # it exists only to stop drift undoing OUR
+                                # detour — but they are different events and
+                                # saying the wrong one sends the reader looking
+                                # at the wrong thing.
+                                st.quota_hold = False
+                                st.quota_at = None
+                                self.log.emit(
+                                    "info",
+                                    (f"quota switching turned off; {title!r} "
+                                     f"is back under normal model handling")
+                                    if not self._fable_quota_switch else
+                                    (f"quota banner cleared on {title!r}; "
+                                     f"normal model handling resumes"))
+                            elif (_quota_now and not st.quota_hold
+                                    and not fable_hit):
+                                _fallback = _fable_fallback_model(steps)
+                                _cur = current_model(tail)
+                                if not _fallback:
+                                    self.log.emit(
+                                        "warn",
+                                        f"quota banner on {title!r} but the "
+                                        f"script names no fallback model; "
+                                        f"leaving it alone")
+                                elif _cur and _cur.lower().startswith(
+                                        _fallback.lower()):
+                                    # Already on the fallback — no keystroke
+                                    # needed, but the hold still goes on. Drift
+                                    # correction would otherwise read "on the
+                                    # wrong model" and steer it straight back
+                                    # into the model that has nothing left,
+                                    # which is the whole thing this prevents.
+                                    st.quota_hold = True
+                                    st.quota_at = now
+                                    self.log.emit(
+                                        "info",
+                                        f"{title!r} is out of quota and "
+                                        f"already on {_fallback!r}; holding "
+                                        f"it there until the quota resets")
+                                else:
+                                    st.quota_hold = True
+                                    st.quota_at = now
+                                    st.fable_step = 0
+                                    st.fable_step_at = now
+                                    st.fable_acted_at = now
+                                    st.status = ST_FABLE
+                                    st.fable_our_models.add(_fallback)
+                                    # Switch and pick the work back up. No
+                                    # <idle>/<compact>/<resume>: this is not a
+                                    # recovery cycle, it is a detour that lasts
+                                    # until the allowance returns.
+                                    st.fable_restore = [
+                                        ("confirm", None),
+                                        ("send", f"/model {_fallback}"),
+                                        ("confirm", None),
+                                        ("send", "continue"),
+                                    ]
+                                    self.log.emit(
+                                        "warn",
+                                        f"{title!r} is out of quota on "
+                                        f"{_cur or 'its model'}; finishing on "
+                                        f"{_fallback!r} until it resets")
                             if fable_hit:
                                 st.fable_clear_since = None   # streak of quiet ends
                             if fable_hit and st.fable_handled:
@@ -1867,6 +1967,17 @@ class Watcher(QObject):
                                 pass                 # can't tell; change nothing
                             elif st.fable_user_optout:
                                 pass                 # the user is driving this one
+                            elif st.quota_hold:
+                                # WE moved this window off the target model
+                                # because the target had nothing left. Steering
+                                # it back would put the session straight into
+                                # the model that cannot answer, undo the switch
+                                # that is currently doing the work, and do it
+                                # again every grace period until the cap ran
+                                # out. The window stays put until the quota
+                                # banner clears (below), which is the only
+                                # evidence the allowance actually returned.
+                                pass
                             elif self._fable_all_windows:
                                 # Drift enforcement needs an explicit per-window
                                 # opt-in. In all-windows mode it would switch every
@@ -3303,7 +3414,13 @@ class MainWindow(QMainWindow):
         if url:
             QDesktopServices.openUrl(QUrl(url))
 
-    @pyqtSlot(str)
+    # The decorator's signature must match the SIGNAL's, not a subset of it:
+    # PyQt truncates the emitted arguments to what the decorator declares, so
+    # @pyqtSlot(str) here dropped `left`, the call raised TypeError, and an
+    # unhandled exception inside a slot makes Qt call qFatal -- which is why
+    # the packaged exe died with 0xc0000409 in Qt6Core seconds after every
+    # after-finish send, taking the whole watchdog down with it.
+    @pyqtSlot(str, int)
     def _on_loops_spent(self, key: str, left: int) -> None:
         """Persist the remaining after-finish runs the moment one is spent.
 
@@ -4549,6 +4666,39 @@ is a countdown for a one-shot task; this one is an allowance per block, for a
 standing "if this window gets blocked, do that instead" instruction, and a
 window with no prompt configured relies on it to bound how often a bare
 <code>continue</code> is retried.</p>
+<h4>When the quota runs out, not the conversation</h4>
+<p><b>Switch models when the quota runs out</b> (off by default, next to the
+enable box) handles a different failure from a safeguard block. A safeguard
+block is about what the <i>conversation</i> contains, and only
+<code>/compact</code> clears it. A per-model allowance running dry is about
+the <i>account</i>: nothing is wrong with the session, one model simply has
+nothing left — and it may have nothing left for days.</p>
+<p>So the answer is different too. With this on, the window switches to the
+fallback model and types <code>continue</code>, and that is all: <b>no
+<code>/compact</code></b>, because discarding the history would throw away
+real work and the quota is not what the history says. The remaining tasks
+finish on the fallback instead of the window sitting idle until the
+allowance resets.</p>
+<p>While the banner is up, <b>the window is deliberately not steered back</b>
+to the target model — the usual drift correction is suspended for it. Putting
+it back would mean putting it on the model that cannot answer. Once the
+banner clears, the latch is released and normal handling resumes, which is
+also what happens the moment you untick the switch. The fallback is read from
+your script's <i>first</i> <code>/model</code> line, so it is whatever you
+chose; a script with no <code>/model</code> line means there is nowhere to
+go, and the window is left alone with a warning.</p>
+<p><b>The detection pattern is a best guess and you may need to fix it.</b>
+It lives on the <b>Triggers</b> tab as "Model quota exhausted". It was written
+from the shape of Claude Code's other banners rather than from a real sample,
+because the machine it was built on had a full allowance at the time. When
+you meet the real banner, paste it into the test box under that pattern and
+adjust until it matches — no new build required. The switch is off by default
+partly for this reason, and partly because it changes which model your
+session runs on.</p>
+<p>This is <i>not</i> the 5-hour limit. That one stops every model at once, so
+there is nothing to switch to; auto-continue waits for the reset and resumes
+by itself, as it always has.</p>
+
 <p><b>Scope.</b> "Apply to all watched windows" (the default) means recovery
 is <i>eligible</i> everywhere, but only the window actually showing a
 safeguard notice is ever touched. Untick it to restrict recovery to the
@@ -4718,6 +4868,19 @@ class AdvancedDialog(QDialog):
         self.enable_chk = QCheckBox("Enable Fable refusal-recovery")
         self.enable_chk.setChecked(bool(cfg.get("enabled", False)))
         form.addRow(self.enable_chk)
+
+        self.quota_chk = QCheckBox(
+            "Switch models when the quota runs out")
+        self.quota_chk.setChecked(bool(cfg.get("quota_switch", False)))
+        self.quota_chk.setToolTip(
+            "A per-model allowance running dry stops that model for days, "
+            "while the fallback still works. With this on, the remaining "
+            "work is finished on the fallback instead of waiting for the "
+            "reset — and the window is NOT steered back until the quota "
+            "returns. Off by default: it changes which model your session "
+            "runs on. Not the 5-hour limit, which stops every model and can "
+            "only be waited out.")
+        form.addRow(self.quota_chk)
 
         self.delay_spin = QSpinBox()
         self.delay_spin.setRange(1, 3600)
@@ -5198,6 +5361,7 @@ class AdvancedDialog(QDialog):
                     loops[k] = n
         return {
             "enabled": self.enable_chk.isChecked(),
+            "quota_switch": self.quota_chk.isChecked(),
             "all_windows": self.all_windows_chk.isChecked(),
             "delay": self.delay_spin.value(),
             "steps": self.steps_edit.toPlainText(),

@@ -1063,4 +1063,45 @@ check_reset("a non-existent local time (spring forward) still yields a time",
 
 
 
+# ---------------------------------------------------------------------------
+# Per-model quota banner
+# ---------------------------------------------------------------------------
+# Deliberately narrow: this pattern gates a feature that changes which model a
+# session runs on, so a false positive is expensive. Every string is split so
+# this file cannot trip the detector it is testing.
+print()
+print("---- per-model quota ----")
+
+_Q_YES = [
+    ("weekly, banner form",
+     "Fable 5 weekly " + "limit reached · " + "resets Monday 3pm"),
+    ("for-form with days",
+     "You have run out of " + "quota for Fable 5. It " + "resets in 3 days"),
+    ("model named after the word",
+     "Weekly " + "limit for Opus 5 · " + "resets Sep 3"),
+]
+_Q_NO = [
+    ("the 5-hour limit, which no switch can dodge",
+     "You" + "'ve hit your " + "limit · " + "resets 3pm (Asia/Shanghai)"),
+    ("ordinary chatter about a limit",
+     "we agreed the " + "limit was fine, no " + "reset needed"),
+    ("a model name with no limit at all",
+     "switching to Opus 5 now that the tests pass"),
+    ("limit and model too far apart to be one banner",
+     "Fable 5 is fast. " + ("filler " * 40) + " some " + "limit " + "resets"),
+]
+for label, txt in _Q_YES:
+    check_reset("quota banner recognised: " + label,
+                ac.parse_model_quota(txt))
+for label, txt in _Q_NO:
+    check_reset("NOT a quota banner: " + label,
+                not ac.parse_model_quota(txt))
+
+# Stale banners scrolled far up are history, like every other detector here.
+check_reset("a quota banner far above the tail is stale",
+            not ac.parse_model_quota(
+                "Fable 5 weekly " + "limit · " + "resets Monday"
+                + chr(10) + ("x" * 4000)))
+
+
 sys.exit(1 if failures else 0)

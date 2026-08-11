@@ -1896,6 +1896,125 @@ check("Z3 every long label wraps: " + (_unwrapped[0] if _unwrapped else "-"),
 _dlg.deleteLater()
 
 
+
+# ---------------------------------------------------------------------------
+# Q: a per-model quota running dry -> finish on the fallback
+# ---------------------------------------------------------------------------
+# A different failure from a safeguard block and a different answer: nothing
+# is wrong with the conversation, one model just has nothing left, possibly
+# for days. Verified here rather than live because the machine this was built
+# on had a full allowance -- the real banner is days away.
+
+# Split so this file cannot trip the detector it is testing.
+_QUOTA = ("Fable 5 weekly " + "limit reached \u00b7 " + "resets Monday 3pm")
+
+
+def _quota_watcher(scope=("claude",), quota=True):
+    w = gui.Watcher()
+    w._running = True
+    w.set_fable_config({
+        "enabled": True,
+        "quota_switch": quota,
+        "all_windows": scope is None,
+        "delay": 180,
+        "steps": gui.DEFAULT_FABLE_STEPS,
+        "windows": list(scope or []),
+    })
+    return w
+
+
+# The switch is off unless asked for: it changes which model a session runs on.
+_w = gui.Watcher()
+_w.set_fable_config({"enabled": True, "all_windows": True, "delay": 180,
+                     "steps": gui.DEFAULT_FABLE_STEPS, "windows": []})
+check("QS1 quota switching is OFF unless configured",
+      _w._fable_quota_switch is False)
+
+reset([(1, "claude")], {1: _QUOTA + "\n" + _BAR_FABLE})
+w = _quota_watcher(quota=False)
+w._states[1] = gui._WState(hwnd=1, title="claude")
+for _ in range(4):
+    advance(60)
+    w._tick()
+check("QS2 with the switch off, a quota banner is ignored", SENT == [])
+
+# On: switch to the fallback the SCRIPT names, then pick the work back up.
+reset([(1, "claude")], {1: _QUOTA + "\n" + _BAR_FABLE})
+w = _quota_watcher()
+w._states[1] = gui._WState(hwnd=1, title="claude")
+for _ in range(6):
+    advance(60)
+    w._tick()
+_typed = [ln for grp in texts_sent(1) for ln in grp]
+check("QS3 switches to the fallback named by the script",
+      any(t.strip() == "/model opus" for t in _typed))
+check("QS4 picks the work back up with continue",
+      any(t.strip() == "continue" for t in _typed))
+check("QS5 does NOT compact -- the quota is not what the history says",
+      not any("/compact" in t for t in _typed))
+check("QS6 latches so the state is visible", w._states[1].quota_hold)
+
+# The whole point: drift must not drag the window back onto the empty model.
+reset([(1, "claude")], {1: _QUOTA + "\n" + _BAR_OPUS})
+w = _quota_watcher()
+st = gui._WState(hwnd=1, title="claude")
+st.quota_hold = True
+w._states[1] = st
+for _ in range(8):
+    advance(600)
+    w._tick()
+check("QS7 a quota-switched window is not steered back to the empty model",
+      not any("/model fable" in t for grp in texts_sent(1) for t in grp))
+
+# ...and once the allowance returns, normal handling resumes.
+reset([(1, "claude")], {1: "all done here\n" + _BAR_OPUS})
+w = _quota_watcher()
+st = gui._WState(hwnd=1, title="claude")
+st.quota_hold = True
+w._states[1] = st
+advance(60)
+w._tick()
+check("QS8 the latch releases when the banner clears",
+      not w._states[1].quota_hold)
+
+# A script with no /model line names no fallback: there is nowhere to go, so
+# the window is left alone rather than switched somewhere invented.
+reset([(1, "claude")], {1: _QUOTA + "\n" + _BAR_FABLE})
+w = gui.Watcher()
+w._running = True
+w.set_fable_config({"enabled": True, "quota_switch": True,
+                    "all_windows": False, "delay": 180,
+                    "steps": "continue\n", "windows": ["claude"]})
+w._states[1] = gui._WState(hwnd=1, title="claude")
+for _ in range(4):
+    advance(60)
+    w._tick()
+check("QS9 no fallback in the script -> no keystroke", SENT == [])
+
+# Already on the fallback: nothing to do, and latching would suppress drift
+# for a switch that never happened.
+reset([(1, "claude")], {1: _QUOTA + "\n" + _BAR_OPUS})
+w = _quota_watcher()
+w._states[1] = gui._WState(hwnd=1, title="claude")
+for _ in range(4):
+    advance(60)
+    w._tick()
+check("QS10 already on the fallback -> no keystroke, but still held",
+      SENT == [] and w._states[1].quota_hold)
+
+# The dialog round-trips the setting; a stored config must survive OK.
+_dlg = gui.AdvancedDialog(
+    None,
+    {"enabled": True, "quota_switch": True, "all_windows": True,
+     "delay": 180, "steps": gui.DEFAULT_FABLE_STEPS, "windows": []},
+    {"claude": "claude"}, {})
+check("QS11 the dialog shows a stored quota switch",
+      _dlg.quota_chk.isChecked())
+check("QS12 and returns it unchanged",
+      _dlg.result_config().get("quota_switch") is True)
+_dlg.deleteLater()
+
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

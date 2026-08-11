@@ -667,6 +667,55 @@ finally:
 SENT.clear()
 
 
+
+# ---------------------------------------------------------------------------
+# S: @pyqtSlot signatures must match the signals wired to them
+# ---------------------------------------------------------------------------
+# A decorator that declares FEWER arguments than its signal does not fail
+# loudly. PyQt truncates the emitted arguments, the call raises TypeError
+# inside the slot, and Qt answers an unhandled slot exception with qFatal --
+# a hard process abort. That is what killed the packaged exe with 0xc0000409
+# in Qt6Core a few seconds after every after-finish send: @pyqtSlot(str) on
+# _on_loops_spent, fed by loops_spent = pyqtSignal(str, int). Nothing showed
+# up in the activity log, because the process died inside the slot, before
+# the slot's own log line. Three separate crashes before it was caught, and
+# each one left every watched window unwatched.
+import re as _re
+
+_src = open("gui.py", encoding="utf-8").read()
+_SIG = _re.compile(r"(\w+)\s*=\s*pyqtSignal\(([^)]*)\)")
+_SLOT = _re.compile(r"@pyqtSlot\(([^)]*)\)\s*(?:\n\s*#[^\n]*)*\n\s*def\s+(\w+)\(")
+_DEF = _re.compile(r"def\s+(\w+)\(self(?:,\s*([^)]*))?\)")
+_CONN = _re.compile(r"\.(\w+)\.connect\(self\.(?:worker\.)?(\w+)\)")
+
+
+def _count(s):
+    return len([x for x in s.split(",") if x.strip()])
+
+
+_sigs = {m.group(1): _count(m.group(2)) for m in _SIG.finditer(_src)}
+_slots = {m.group(2): _count(m.group(1)) for m in _SLOT.finditer(_src)}
+_defs = {m.group(1): _count(m.group(2) or "") for m in _DEF.finditer(_src)}
+
+check("S0 the scan actually found the slots (guards against a dead regex)",
+      len(_slots) > 20 and "_on_loops_spent" in _slots)
+
+_bad = [f"{n}: slot declares {c}, function takes {_defs[n]}"
+        for n, c in _slots.items() if n in _defs and _defs[n] != c]
+check("S1 every @pyqtSlot matches its function arity: "
+      + (_bad[0] if _bad else "-"), not _bad)
+
+_wired = [f"{sig}({_sigs[sig]}) -> {slot}({_slots[slot]})"
+          for sig, slot in
+          [(m.group(1), m.group(2)) for m in _CONN.finditer(_src)]
+          if sig in _sigs and slot in _slots
+          and _sigs[sig] != _slots[slot]]
+check("S2 every connected signal matches its slot: "
+      + (_wired[0] if _wired else "-"), not _wired)
+
+check("S3 loops_spent still carries BOTH key and remaining count",
+      _sigs.get("loops_spent") == 2 and _slots.get("_on_loops_spent") == 2)
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

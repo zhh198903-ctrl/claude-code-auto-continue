@@ -42,7 +42,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "2.0.10"
+APP_VERSION = "2.0.11"
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +769,56 @@ def parse_fable_picker(text: str, pattern=None) -> bool:
     return True
 
 
+# A per-model quota running dry is a DIFFERENT problem from the 5-hour limit,
+# and has a different answer. The 5-hour limit stops every model, so waiting
+# for the reset is the only move. A weekly per-model allowance stops one model
+# while the others still work — so the remaining tasks can simply be finished
+# somewhere else, and waiting days for the reset is pure waste.
+#
+# Written from the shape of Claude Code's other limit banners rather than from
+# a captured sample: the machine this was built on had its Fable allowance
+# refilled, so the real wording will not appear for days. That is exactly why
+# this pattern is EDITABLE in Advanced -> Triggers with a live test box — when
+# the real banner shows up, paste it in and adjust, no new build required.
+#
+# Deliberately narrow: it demands a model name AND a limit/quota word AND a
+# reset clause. A looser rule would fire on any terminal that merely discusses
+# a limit, and this one changes which model your session runs on.
+# The \s+ separators (rather than literal spaces) keep this source from
+# matching its own pattern when the watchdog reads a terminal showing it.
+MODEL_QUOTA_RE = re.compile(
+    r"(?:"
+    r"\b(?:fable|opus|sonnet|haiku)\b[\w\s.\-]{0,40}?"
+    r"(?:limit|quota)"
+    r"|(?:limit|quota)\s+for\s+[\w\s.\-]{0,20}?"
+    r"\b(?:fable|opus|sonnet|haiku)\b"
+    r")"
+    r"[\s\S]{0,200}?"
+    r"reset[s]?\b",
+    re.IGNORECASE,
+)
+
+# How far above the tail a quota banner may sit and still count as current.
+# Same reasoning as the safeguard notice: once a session has scrolled on, an
+# old banner is history, not a live block.
+QUOTA_POST_MATCH_TAIL = 3000
+
+
+def parse_model_quota(text: str, pattern=None) -> bool:
+    """True if a per-model quota banner is live at the tail of the buffer.
+
+    Tail-anchored and composer-aware for the same reasons as the other
+    detectors: a banner scrolled far up is stale, and text on the input line
+    is something the user typed, not something Claude Code printed.
+    """
+    rx = pattern or MODEL_QUOTA_RE
+    matches = [m for m in rx.finditer(text)
+               if not _is_composer_line(text, m.start())]
+    if not matches:
+        return False
+    return len(text) - matches[-1].end() <= QUOTA_POST_MATCH_TAIL
+
+
 def parse_switch_model_prompt(text: str, pattern=None) -> bool:
     """True if the 'Switch model?' Yes/No dialog is open at the tail of the
     buffer (a plain Enter confirms the pre-selected 'Yes, switch to …').
@@ -1094,6 +1144,17 @@ TRIGGER_SPECS = [
         "help": "Tells a permission request apart from an ordinary chooser. "
                 "It is EXCLUDED from “Answer choosers” and only answered "
                 "when the separate permission switch is on.",
+    },
+    {
+        "key": "model_quota",
+        "label": "Model quota exhausted",
+        "default": MODEL_QUOTA_RE.pattern,
+        "groups": 0,
+        "help": "A per-model allowance running dry (not the 5-hour limit). "
+                "Only acted on when “Switch models when the quota runs out” "
+                "is ticked. The shipped default is written from the shape of "
+                "the other banners, not from a captured sample — when you see "
+                "the real one, paste it into the test box below and adjust.",
     },
     {
         "key": "switch_model",
