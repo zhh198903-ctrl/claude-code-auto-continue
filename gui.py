@@ -4448,7 +4448,11 @@ limit often clears a little after the stated minute), then types
 <code>continue</code>. If the newer <i>"What do you want to do?"</i> chooser
 appears instead of the banner, it confirms <i>Stop and wait for limit to
 reset</i> with a bare Enter, which makes the banner appear, and the normal
-flow takes over from there.</li>
+flow takes over from there. <b>Only when that option is the one already
+highlighted.</b> The same chooser also offers paid extra usage, and a bare
+Enter buys whatever is selected — so if the highlight sits anywhere else,
+nothing is pressed and the window waits for you. A stalled window costs you
+time; the wrong Enter costs money, and only one of those is recoverable.</li>
 <li><b>Network stalls.</b> Retry-exhausted banners (<i>attempt N/N</i>) and
 bare API connection errors get one <code>continue</code> every <b>Retry
 interval</b> (10 minutes by default) until the connection comes back.

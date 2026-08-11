@@ -42,7 +42,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "2.0.11"
+APP_VERSION = "2.0.12"
 
 
 # ---------------------------------------------------------------------------
@@ -88,9 +88,16 @@ LIMIT_RE = re.compile(
     r"You['’]ve hit your (?:[\w-]+\s+){0,3}limit\s*[·•‧․∙⋅⸱\-–—]?\s*"
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)"
     r"[\s\S]{0,400}?"
+    r"(?:"
     r"/upgrade\b[^\n]{0,80}?"
     r"(?:/extra[-\s]?usage|/usage[-\s]?credits"
-    r"|increase\s+your\s+usage\s+limit|finish\s+what\s+you)",
+    r"|increase\s+your\s+usage\s+limit|finish\s+what\s+you)"
+    # Seen live 2026-08-11: the follow-up line offered API billing and carried
+    # no /upgrade at all, so demanding that word cost the window its entire
+    # resume. The picker was answered and then nothing happened — a banner
+    # that does not parse schedules no reset, and says nothing about it.
+    r"|/log\s*in\b[^\n]{0,80}?(?:usage.billed|API\s+usage)"
+    r")",
     re.IGNORECASE,
 )
 
@@ -175,6 +182,13 @@ SERVER_ERROR_RE = re.compile(
 LIMIT_PROMPT_RE = re.compile(
     r"What\s+do\s+you\s+want\s+to\s+do\?"
     r"[\s\S]{0,300}?"
+    # The waiting option must be the SELECTED one, not merely present in the
+    # list. This used to match anywhere in the picker and then press Enter,
+    # which assumes the highlight sits on "stop and wait" — and when the
+    # picker offered paid extra usage above it, that blind Enter BOUGHT the
+    # upgrade. Enter is only safe here when the screen already shows the
+    # harmless option chosen; anything else is the user's decision to make.
+    r"(?:^|\n)[^\S\n]*[❯>▶→*]\s+(?:\d+[.)]\s*)?"
     r"Stop\s+and\s+wait\s+for\s+limit\s+to\s+reset"
     r"[\s\S]{0,400}?"
     r"Enter\s+to\s+confirm",
