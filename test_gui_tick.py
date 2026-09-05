@@ -155,6 +155,72 @@ w._tick()
 check("A7 a new banner re-arms", st.reset_utc is not None)
 
 # =============================================================================
+# A due fire must not land mid-turn. The re-verify above only notices a manual
+# resume once its output has pushed the banner past MAX_POST_MATCH_TAIL, so a
+# session that resumed seconds ago still shows it — and the continue would be
+# queued by Claude Code to run when the turn ends, an unwanted extra turn.
+set_now(T0)
+reset([(1, "win")], {1: BANNER})
+w = new_watcher()
+LOGS_A = []
+w.log.connect(lambda k, m: LOGS_A.append((k, m)))
+w._tick()
+SENT.clear()
+TEXTS[1] = chr(10).join([BANNER, SPIN])  # resumed, banner still in range
+set_now(FIRE_UTC + timedelta(seconds=w._buffer + 5))
+w._tick()
+check("A8a a due fire is held back while the session is streaming", not SENT)
+check("A8b and the pending is kept, not cancelled",
+      w._states[1].reset_utc is not None)
+check("A8c and the hold is explained once",
+      sum(1 for _, m in LOGS_A if "mid-turn" in m) == 1)
+advance(60)
+w._tick()
+check("A8d still held, and not re-announced every tick",
+      not SENT and sum(1 for _, m in LOGS_A if "mid-turn" in m) == 1)
+TEXTS[1] = BANNER                         # the turn ended
+advance(60)
+w._tick()
+check("A8e fires as soon as the session goes quiet",
+      SENT == [(1, ["continue"])])
+SENT.clear()
+
+# The "held" news is announced once per hold, and a hold that ends some other
+# way than by firing (you continued manually, so the banner went) must not
+# leave the flag stuck — the NEXT genuine hold would then be silent.
+set_now(T0)
+reset([(1, "win")], {1: BANNER})
+w = new_watcher()
+LOGS_A2 = []
+w.log.connect(lambda k, m: LOGS_A2.append((k, m)))
+w._tick()
+TEXTS[1] = chr(10).join([BANNER, SPIN])      # streaming at fire time
+set_now(FIRE_UTC + timedelta(seconds=w._buffer + 5))
+w._tick()
+check("A9a first hold announced", any("mid-turn" in m for _, m in LOGS_A2))
+TEXTS[1] = "you continued it yourself, banner long gone"
+advance(60)
+w._tick()
+check("A9b the pending is released when the banner goes",
+      w._states[1].reset_utc is None)
+# A fresh limit arrives, comes due, and is again held mid-turn. It has to be
+# a DIFFERENT reset time: re-showing the same banner is deliberately ignored,
+# because fired_key remembers the one already dealt with.
+BANNER_LATER = ("You've hit your li" "mit · resets 9pm (Asia/Shanghai)"
+                + chr(10) + "/upgra" "de to increase your usage limit.")
+LOGS_A2.clear()
+TEXTS[1] = BANNER_LATER
+advance(60)
+w._tick()
+check("A9c a genuinely new limit re-arms", w._states[1].reset_utc is not None)
+TEXTS[1] = chr(10).join([BANNER_LATER, SPIN])
+set_now(w._states[1].reset_utc + timedelta(seconds=w._buffer + 5))
+w._tick()
+check("A9d a later hold is announced too, not swallowed by a stuck flag",
+      any("mid-turn" in m for _, m in LOGS_A2))
+SENT.clear()
+
+# =============================================================================
 print("---- B: retry-exhausted banner pokes until recovery ----")
 set_now(T0)
 reset([(2, "win")], {2: RETRY_EXHAUSTED})
@@ -173,6 +239,33 @@ TEXTS[2] = "recovered, back to work"
 w._tick()
 check("B4 recovery clears the retry state",
       w._states[2].retry_last_sent_utc is None and not SENT)
+
+# A screen that could not be READ is not a screen with no error on it. Both
+# arrive as an empty tail, and treating the unreadable one as recovery threw
+# away the retry throttle: the next pass that did read the error fired at
+# once, so a flaky read turned a 10-minute poke into a per-minute one.
+set_now(T0)
+reset([(2, "win")], {2: RETRY_EXHAUSTED})
+w = new_watcher()
+LOGS_B = []
+w.log.connect(lambda k, m: LOGS_B.append((k, m)))
+w._tick()
+check("B5 poking while the error is on screen", SENT == [(2, ["continue"])])
+SENT.clear()
+LOGS_B.clear()
+TEXTS[2] = ""                       # the read failed this pass
+advance(5)
+w._tick()
+check("B6 an unreadable screen is not reported as recovery",
+      not any("cleared" in m for _, m in LOGS_B))
+check("B7 and the window stays in the retry state",
+      w._states[2].retry_active)
+check("B8 and the retry throttle is not thrown away",
+      w._states[2].retry_last_sent_utc is not None)
+TEXTS[2] = RETRY_EXHAUSTED          # the next pass reads it fine
+advance(5)                          # still well inside the retry interval
+w._tick()
+check("B9 so the next readable pass does not fire early", not SENT)
 
 # =============================================================================
 print("---- C: bare connection errors and truncation, gated on running ----")
@@ -266,6 +359,90 @@ check("F1 state exists while the window does", 7 in w._states)
 reset([], {})
 w._tick()
 check("F2 state dropped once the window closes", 7 not in w._states)
+
+# The costly confusion: find_terminal_windows() is documented to return a
+# partial list (and an empty one when the root enumeration throws), so
+# "absent from this pass" cannot mean "closed". It used to, and one COM
+# hiccup then wiped every window's state — including the things that cannot
+# be recovered by looking at the screen again.
+_alive_real = gui._hwnd_alive
+LOGS_F = []
+
+
+def _ghost_watcher(hwnd=7):
+    set_now(T0)
+    reset([(hwnd, "win")], {hwnd: BANNER})
+    w = new_watcher()
+    LOGS_F.clear()
+    w.log.connect(lambda k, m: LOGS_F.append((k, m)))
+    w._tick()
+    return w
+
+
+try:
+    gui._hwnd_alive = lambda h: True          # the window is still open
+    w = _ghost_watcher()
+    st_before = w._states[7]
+    st_before.last_sent_utc = T0              # a cooldown only memory knows
+    st_before.fable_step = 3                  # a recovery already under way
+    reset([], {})                             # UIA hands back nothing
+    w._tick()
+    check("F3 a still-open window missed by one pass keeps its state",
+          7 in w._states)
+    check("F4 and keeps the in-flight recovery step",
+          getattr(w._states.get(7), "fable_step", None) == 3)
+    check("F5 and keeps the send cooldown",
+          getattr(w._states.get(7), "last_sent_utc", None) == T0)
+    check("F6 the hiccup is reported rather than passing silently",
+          any(k == "warn" and "missing from this pass" in m for k, m in LOGS_F))
+    LOGS_F.clear()
+    w._tick()
+    check("F7 and reported once, not once per tick",
+          not any("missing from this pass" in m for _, m in LOGS_F))
+
+    # A queued row command must survive the same hiccup: the window is still
+    # there to receive it.
+    w2 = _ghost_watcher(11)
+    w2._cmd_fire_now.add(11)
+    reset([], {})
+    w2._tick()
+    check("F8 a queued row command survives a missed pass",
+          11 in w2._cmd_fire_now or 11 in w2._states)
+
+    # And the real close still prunes, so a recycled handle starts clean.
+    gui._hwnd_alive = lambda h: False
+    w3 = _ghost_watcher(13)
+    reset([], {})
+    w3._tick()
+    check("F9 a genuinely closed window still drops its state",
+          13 not in w3._states)
+
+finally:
+    gui._hwnd_alive = _alive_real
+
+# Log lines name a window by title, and titles are neither unique nor stable:
+# two sessions on the same task write identical lines, and a session renames
+# itself as it works. Without an id, "was this window poked twice inside the
+# retry interval?" cannot be answered from the log at all -- separate windows
+# blur together and one window splits into several.
+set_now(T0)
+reset([(0x1234, "Claude Code"), (0x5678, "Claude Code")],
+      {0x1234: RETRY_EXHAUSTED, 0x5678: RETRY_EXHAUSTED})
+w = new_watcher()
+LOGS_W = []
+w.log.connect(lambda k, m: LOGS_W.append(m))
+w._tick()
+check("W1 same-titled windows are told apart in the log",
+      any("#1234" in m for m in LOGS_W) and any("#5678" in m for m in LOGS_W))
+check("W2 the id rides along with the human-readable title",
+      any("'Claude Code' #1234" in m for m in LOGS_W))
+# The id must follow the WINDOW, not the name it happens to be showing.
+reset([(0x1234, "a totally different task now")], {0x1234: RETRY_EXHAUSTED})
+LOGS_W.clear()
+advance(w._retry_interval + 5)
+w._tick()
+check("W3 the id survives the window renaming itself",
+      any("#1234" in m for m in LOGS_W))
 
 
 # =============================================================================

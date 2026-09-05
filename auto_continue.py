@@ -42,7 +42,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "2.0.15"
+APP_VERSION = "2.0.17"
 
 
 # ---------------------------------------------------------------------------
@@ -77,8 +77,9 @@ APP_VERSION = "2.0.15"
 # The DOTALL `[\s\S]{0,400}` lets the two lines be separated by terminal
 # padding/whitespace.
 #
-# The follow-up wording is a moving target — Anthropic has shipped
-# `/extra-usage`, then renamed it `/usage-credits`, with the tail either
+# The follow-up wording is a moving target — Anthropic ships `/usage-credits`
+# (it was `/extra-usage` before the rename; that spelling is gone from here
+# because Claude Code updates itself), with the tail either
 # "to finish what you're working on" or "to increase your usage limit". So
 # after "/upgrade" we accept ANY of the known continuations (either slash
 # command, or either stable tail phrase). The separator glyph between "limit"
@@ -90,7 +91,7 @@ LIMIT_RE = re.compile(
     r"[\s\S]{0,400}?"
     r"(?:"
     r"/upgrade\b[^\n]{0,80}?"
-    r"(?:/extra[-\s]?usage|/usage[-\s]?credits"
+    r"(?:/usage[-\s]?credits"
     r"|increase\s+your\s+usage\s+limit|finish\s+what\s+you)"
     # Seen live 2026-08-11: the follow-up line offered API billing and carried
     # no /upgrade at all, so demanding that word cost the window its entire
@@ -448,11 +449,12 @@ def parse_limit_message(
 # doesn't move: an elapsed clock followed by a middot, inside parentheses.
 # The status bar's own parenthesised times ("(4h 37m / 5h)") use a slash, not
 # a middot, and the finished-turn line ("Brewed for 3m 2s · …") has no
-# parentheses — neither can match. Second alternative is the older wording,
-# split so this source file cannot suppress a real banner when someone reads
-# it inside a watched terminal.
-RUNNING_RE = re.compile(
-    r"\((?:\s*\d+\s*[hms])+\s*·" r"|esc" r"\s+to\s+interrupt", re.I)
+# parentheses — neither can match. The older builds' wording was a second
+# alternative here until 2026-08-30, when sampling a live session showed the
+# clock form carrying every one of 34 streaming samples and the old one none;
+# Claude Code auto-updates, so the dead branch went rather than being kept
+# for builds nobody runs.
+RUNNING_RE = re.compile(r"\((?:\s*\d+\s*[hms])+\s*·")
 
 
 RUNNING_TAIL_CHARS = 2000
@@ -799,14 +801,22 @@ def parse_fable_picker(text: str, pattern=None) -> bool:
 # The \s+ separators (rather than literal spaces) keep this source from
 # matching its own pattern when the watchdog reads a terminal showing it.
 MODEL_QUOTA_RE = re.compile(
-    r"(?:"
-    r"\b(?:fable|opus|sonnet|haiku)\b[\w\s.\-]{0,40}?"
-    r"(?:limit|quota)"
-    r"|(?:limit|quota)\s+for\s+[\w\s.\-]{0,20}?"
-    r"\b(?:fable|opus|sonnet|haiku)\b"
-    r")"
-    r"[\s\S]{0,200}?"
-    r"reset[s]?\b",
+    # Anchored on the real banner, captured 2026-08-14:
+    #
+    #     You've reach·ed your <Model> limit. Run /usage-credits to continue
+    #     or switch models with /model.
+    #
+    # The first guess demanded a reset clause, because every other limit
+    # banner carries one. This one has no time in it at all — and that is the
+    # point: a per-model allowance is not a countdown, it is a wall until the
+    # week turns. What it does carry is the remedy in its own words, "switch
+    # models", which anchors this far better than a timestamp would and is
+    # exactly what keeps it clear of the 5-hour banner ("hit your session
+    # limit · resets …"), where switching models buys nothing.
+    # (De-fanged with · above so this source can't match itself on screen.)
+    r"reach(?:ed)?\s+your\s+[\w.\s\-]{0,24}?limit\b"
+    r"[\s\S]{0,160}?"
+    r"(?:switch\s+model|/model\b|usage[-\s]?credits)",
     re.IGNORECASE,
 )
 

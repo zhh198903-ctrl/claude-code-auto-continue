@@ -849,10 +849,11 @@ check("U1 no <esc> anywhere in the default script",
       all(k != "esc" for k, a in _steps))
 check("U1b the default finishes and compacts before switching back",
       _steps == [("confirm", None), ("send", "/model opus"),
-                 ("confirm", None), ("send", "continue"), ("idle", None),
+                 ("confirm", None), ("send", "/effort max"),
+                 ("send", "continue"), ("idle", None),
                  ("send", "/compact"), ("idle", None),
                  ("send", "/model fable"), ("confirm", None),
-                 ("resume", None)])
+                 ("effort", None), ("resume", None)])
 check("U2 <esc> is still available for people who opt in",
       gui._parse_recovery_steps("<esc>") == [("esc", None)])
 
@@ -1736,7 +1737,7 @@ w.log.connect(lambda k, m: LOGS_AD2.append((k, m)))
 
 w._tick()                                        # detect -> arm
 check("AE1 armed on the default script",
-      w._states[1].fable_step == 0 and len(w._fable_steps) == 10)
+      w._states[1].fable_step == 0 and len(w._fable_steps) == 12)
 
 # <confirm>: Claude Code offered no chooser this time, so it times out.
 advance(2 * 60 + 5)
@@ -1752,6 +1753,9 @@ check("AE3 confirms the switch dialog", texts_sent()[-1] == [""])
 TEXTS[1] = NOTICE + "\nswitched.\n" + _BAR_O
 advance(gui.FABLE_KEY_GAP_S + 1)
 w._tick()                                        # advance off <confirm>
+w._tick()                                        # /effort max on the fallback
+check("AE3b raises effort to max for the rescue run",
+      texts_sent()[-1] == ["/effort max"])
 w._tick()                                        # 'continue' on the fallback
 check("AE4 redoes the blocked work on the fallback",
       texts_sent()[-1] == ["continue"])
@@ -1792,13 +1796,15 @@ check("AE9 confirms the switch back", texts_sent()[-1] == [""])
 TEXTS[1] = "conversation compacted\n" + _BAR_F
 advance(gui.FABLE_KEY_GAP_S + 1)
 w._tick()
+w._tick()      # <effort>: this window has no configured level, so it skips
 w._tick()                                        # <resume>
 check("AE10 resumes on the target model",
       texts_sent()[-1] == ["continue"])
 check("AE11 the run is complete and latched",
       w._states[1].fable_step == -1 and w._states[1].fable_handled is True)
 check("AE12 and the whole cycle typed each step exactly once",
-      texts_sent() == [["/model opus"], [""], ["continue"], ["/compact"],
+      texts_sent() == [["/model opus"], [""], ["/effort max"],
+                       ["continue"], ["/compact"],
                        ["/model fable"], [""], ["continue"]])
 
 
@@ -1905,8 +1911,11 @@ _dlg.deleteLater()
 # for days. Verified here rather than live because the machine this was built
 # on had a full allowance -- the real banner is days away.
 
+# The real banner, captured from a live session on 2026-08-14 \u2014 the first
+# guess had a reset time in it, which this one does not carry at all.
 # Split so this file cannot trip the detector it is testing.
-_QUOTA = ("Fable 5 weekly " + "limit reached \u00b7 " + "resets Monday 3pm")
+_QUOTA = ("You" + "'ve reached your Fable 5 " + "limit. Run /usage-credits "
+          "to continue or switch models with /model.")
 
 
 def _quota_watcher(scope=("claude",), quota=True):
@@ -1950,6 +1959,8 @@ check("QS3 switches to the fallback named by the script",
       any(t.strip() == "/model opus" for t in _typed))
 check("QS4 picks the work back up with continue",
       any(t.strip() == "continue" for t in _typed))
+check("QS4b raises effort to max on the fallback",
+      any(t.strip() == "/effort max" for t in _typed))
 check("QS5 does NOT compact -- the quota is not what the history says",
       not any("/compact" in t for t in _typed))
 check("QS6 latches so the state is visible", w._states[1].quota_hold)
@@ -1975,6 +1986,34 @@ w._states[1] = st
 advance(60)
 w._tick()
 check("QS8 the latch releases when the banner clears",
+      not w._states[1].quota_hold)
+
+# ...but "no banner seen" must mean the screen was actually READ. A UIA miss
+# makes read_terminal_text return None and the tick turns that into an empty
+# tail, which reads exactly like a cleared banner — so the hold was dropped,
+# and the log said the allowance was back, on the strength of nothing.
+reset([(1, "claude")], {1: ""})
+w = _quota_watcher()
+st = gui._WState(hwnd=1, title="claude")
+st.quota_hold = True
+w._states[1] = st
+advance(60)
+w._tick()
+check("QS8a an unreadable screen does not release the latch",
+      w._states[1].quota_hold)
+
+# Unticking the switch is the user's own instruction: it needs no screen.
+reset([(1, "claude")], {1: ""})
+w = _quota_watcher()
+w.set_fable_config({"enabled": True, "quota_switch": False,
+                    "all_windows": False, "delay": 180,
+                    "steps": gui.DEFAULT_FABLE_STEPS, "windows": ["claude"]})
+st = gui._WState(hwnd=1, title="claude")
+st.quota_hold = True
+w._states[1] = st
+advance(60)
+w._tick()
+check("QS8b unticking the switch releases it without needing the screen",
       not w._states[1].quota_hold)
 
 # A script with no /model line names no fallback: there is nowhere to go, so
@@ -2014,6 +2053,34 @@ check("QS12 and returns it unchanged",
       _dlg.result_config().get("quota_switch") is True)
 _dlg.deleteLater()
 
+
+
+# ---------------------------------------------------------------------------
+# EF: effort is raised for the rescue and restored on the way home
+# ---------------------------------------------------------------------------
+# Max effort is right for a run that exists to get unstuck, but leaving it
+# there afterwards would be the tool quietly changing a setting the user
+# chose. <effort> types the window's OWN level, so what it restores has to
+# come from that window's configuration and not from a constant.
+reset([(1, "claude")], {1: NOTICE + chr(10) + _BAR_FABLE})
+w = new_watcher()
+w.set_effort_overrides({"claude": "high"})
+w._states[1] = gui._WState(hwnd=1, title="claude")
+_steps = gui._parse_recovery_steps(gui.DEFAULT_FABLE_STEPS)
+check("EF1 the default raises effort on the fallback",
+      ("send", "/effort max") in _steps)
+check("EF2 ...and restores the window's own on the way back",
+      ("effort", None) in _steps)
+check("EF3 the restore comes after the switch home, not before",
+      _steps.index(("effort", None))
+      > _steps.index(("send", "/model fable")))
+
+# The restore resolves against the per-window override.
+_st = gui._WState(hwnd=1, title="claude")
+check("EF4 a window with no configured level has nothing to restore",
+      w._effort_overrides.get("nosuch", "") == "")
+check("EF5 a configured window restores exactly that level",
+      w._effort_overrides.get("claude") == "high")
 
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")

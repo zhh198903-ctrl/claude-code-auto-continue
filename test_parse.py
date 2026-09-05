@@ -16,7 +16,9 @@ from datetime import datetime, timedelta
 import pytz
 
 # The Anthropic wordings of the follow-up line seen in the wild. UP3 is the
-# newest (2026-07): /extra-usage was renamed /usage-credits.
+# current one; /extra-usage was renamed /usage-credits, and since 2026-08-30
+# the old command is no longer an accepted alternative — UP still parses, but
+# on its shared "finish what you" tail rather than on the dead command name.
 UP = "/upgrade or /extra-usage to finish what you're working on."
 UP2 = "/upgrade to increase your usage limit."
 UP3 = "/upgrade or /usage-credits to finish what you're working on."
@@ -598,7 +600,7 @@ running_samples = [
     # Live spinner after the banner: recovered, do not poke.
     (f"{_ERR}\n> \n  ✽ Swirling… (2m 0s · ↓ 5.0k tokens)", False),
     (f"{_ERR}\n  ✻ Misting… (2m 3s · ↓ 2.8k tokens · thinking)", False),
-    # Older wording with no token counter.
+    # Spinner with no token counter — a shorter suffix, still the clock form.
     (f"{_ERR}\n  ✽ Working… (12s · " "esc to interrupt)", False),
     # Idle at the prompt: still stuck. The status bar's own parenthesised
     # times use a slash, not a middot, so they must not read as a spinner.
@@ -1073,22 +1075,28 @@ print()
 print("---- per-model quota ----")
 
 _Q_YES = [
-    ("weekly, banner form",
-     "Fable 5 weekly " + "limit reached · " + "resets Monday 3pm"),
-    ("for-form with days",
-     "You have run out of " + "quota for Fable 5. It " + "resets in 3 days"),
-    ("model named after the word",
-     "Weekly " + "limit for Opus 5 · " + "resets Sep 3"),
+    # The real thing, captured from a live session on 2026-08-14. Split so
+    # this file cannot trip the detector it is testing.
+    ("the real banner",
+     "You" + "'ve reached your Fable 5 " + "limit. Run /usage-credits to "
+     "continue or switch models with /model."),
+    ("shorter phrasing, same remedy",
+     "You have reached your Opus " + "limit — switch models with /model"),
+    ("credits-only wording",
+     "Reached your Sonnet 4.5 " + "limit. Run /usage-credits to continue."),
 ]
 _Q_NO = [
-    ("the 5-hour limit, which no switch can dodge",
-     "You" + "'ve hit your " + "limit · " + "resets 3pm (Asia/Shanghai)"),
-    ("ordinary chatter about a limit",
-     "we agreed the " + "limit was fine, no " + "reset needed"),
-    ("a model name with no limit at all",
+    # The 5-hour limit stops every model at once, so no switch helps and
+    # this must never be mistaken for it.
+    ("the 5-hour session limit",
+     "You" + "'ve hit your session " + "limit · " + "resets 3pm "
+     "(Asia/Shanghai)" + chr(10) + "/up" + "grade to increase your usage limit"),
+    ("ordinary chatter about limits and models",
+     "we hit the rate " + "limit yesterday, switch models if it recurs"),
+    ("a model named with no limit at all",
      "switching to Opus 5 now that the tests pass"),
-    ("limit and model too far apart to be one banner",
-     "Fable 5 is fast. " + ("filler " * 40) + " some " + "limit " + "resets"),
+    ("remedy present but no limit reached",
+     "you can switch models with /model at any time"),
 ]
 for label, txt in _Q_YES:
     check_reset("quota banner recognised: " + label,

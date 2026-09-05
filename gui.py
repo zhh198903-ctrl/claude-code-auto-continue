@@ -185,12 +185,14 @@ DEFAULT_FABLE_STEPS = (
     "<confirm>\n"
     "/model opus\n"
     "<confirm>\n"
+    "/effort max\n"
     "continue\n"
     "<idle>\n"
     "/compact\n"
     "<idle>\n"
     "/model fable\n"
     "<confirm>\n"
+    "<effort>\n"
     "<resume>"
 )
 
@@ -360,7 +362,26 @@ def migrate_after_finish_loops(stored, already_migrated: bool):
 #                old 30s default poked it ~180 times through a real
 #                90-minute outage, which helps nothing and buries the
 #                log; 600s is what a real deployment converged on.
+# The v2.0.6-2.0.15 default: the compact-based cycle, before effort was
+# raised for the rescue run. Registered so anyone still on the shipped script
+# is moved forward — a stored copy is indistinguishable from a customised one
+# unless it is named here, and an un-migrated user would simply never get the
+# new steps.
+LEGACY_FABLE_STEPS_V206 = (
+    "<confirm>" + chr(10) +
+    "/model opus" + chr(10) +
+    "<confirm>" + chr(10) +
+    "continue" + chr(10) +
+    "<idle>" + chr(10) +
+    "/compact" + chr(10) +
+    "<idle>" + chr(10) +
+    "/model fable" + chr(10) +
+    "<confirm>" + chr(10) +
+    "<resume>"
+)
+
 LEGACY_FABLE_SCRIPTS.update({
+    LEGACY_FABLE_STEPS_V206: "v2.0.6",
     LEGACY_FABLE_STEPS_V1016: "v1.0.16",
     LEGACY_FABLE_STEPS_V201: "v2.0.1",
     LEGACY_FABLE_STEPS_V201_NOCONT: "v2.0.1a",
@@ -585,6 +606,8 @@ def _parse_recovery_steps(text: str) -> list:
             steps.append(("enter", None))
         elif low == "<resume>":
             steps.append(("resume", None))
+        elif low == "<effort>":
+            steps.append(("effort", None))
         elif low == "<idle>":
             steps.append(("idle", None))
         elif low == "<wait>":
@@ -615,6 +638,42 @@ ST_PROMPT = "prompt"      # Limit picker open, confirming with Enter.
 ST_FABLE = "fable"        # Recovering from a Fable safeguard block.
 
 
+def _wid(hwnd: int) -> str:
+    """Four hex digits identifying a window in the log.
+
+    Log lines name a window by its TITLE, which is neither unique nor stable:
+    two sessions on the same task (or two on none, both "Claude Code") write
+    identical lines, and a session renames itself as it works. That makes a
+    question like "was this window poked twice inside the retry interval?"
+    unanswerable after the fact -- reading the log, separate windows blur into
+    one and one window splits into several. The handle is the identity the
+    watcher actually keys on, so a short slice of it restores the link.
+    Low digits: the high half of an HWND barely varies within a session.
+    """
+    return f"{int(hwnd) & 0xFFFF:04x}"
+
+
+def _hwnd_alive(hwnd: int) -> bool:
+    """True if the OS still knows this window handle.
+
+    This is what tells "the window closed" apart from "UIA did not hand it to
+    us this pass". Only the first justifies throwing away what the watcher
+    knows about a window; the second is a transient that
+    find_terminal_windows() is documented to produce.
+    """
+    import ctypes
+    try:
+        user32 = ctypes.windll.user32
+        user32.IsWindow.argtypes = [ctypes.c_void_p]
+        user32.IsWindow.restype = ctypes.c_int
+        return bool(user32.IsWindow(ctypes.c_void_p(int(hwnd))))
+    except Exception:
+        # Can't tell. A stale row costs a line in the table; dropping live
+        # state loses an in-flight recovery, so the lossy option is not the
+        # default.
+        return True
+
+
 @dataclass
 class _WState:
     """Internal per-window state, kept inside the watcher thread only."""
@@ -639,6 +698,9 @@ class _WState:
     # fields above.
     retry_last_sent_utc: Optional[datetime] = None
     retry_active: bool = False
+    # True while a due limit fire is being held back because the
+    # session is mid-turn; keeps that news to one log line.
+    fire_deferred: bool = False
     # Interactive limit-picker ("What do you want to do?") bookkeeping.
     prompt_last_sent_utc: Optional[datetime] = None
     prompt_active: bool = False
@@ -712,6 +774,9 @@ class Watcher(QObject):
     def __init__(self):
         super().__init__()
         self._states: dict[int, _WState] = {}
+        # Handles the OS still reports as open that a pass did not
+        # enumerate; kept so the warning fires on change, not every tick.
+        self._ghost_hwnds: set[int] = set()
         self._excluded_titles: set[str] = set()
         # Per-window effort override. Key is the *stable* part of the WT
         # title (leading spinner glyph stripped), value is one of
@@ -1150,6 +1215,10 @@ class Watcher(QObject):
                 st = self._states.setdefault(hwnd, _WState(hwnd=hwnd, title=title))
                 st.title = title
                 _label = title
+                # What log lines print for this window: the title people
+                # recognise, plus the id that survives a rename and tells two
+                # same-named sessions apart.
+                _wt = f"{title!r} #{_wid(hwnd)}"
 
                 # Excluded windows never get processed. Keyed via title_key so
                 # exclusion survives the WT spinner glyph / title churn.
@@ -1167,12 +1236,13 @@ class Watcher(QObject):
                     self._cmd_skip.discard(hwnd)
                     if st.reset_utc is not None:
                         self.log.emit("info",
-                                      f"skipped pending continue for {title!r}")
+                                      f"skipped pending continue for {_wt}")
                         # Remember the skipped key: the message is still visible
                         # in the scrollback and must not instantly re-arm in the
                         # detection step below — that would make Skip a no-op.
                         st.fired_key = st.reset_key or st.fired_key
                     st.reset_utc = None
+                    st.fire_deferred = False
                     st.reset_key = None
                     st.status = ST_IDLE
 
@@ -1198,7 +1268,7 @@ class Watcher(QObject):
                         others = [t for t in tabs if t != title]
                         self.log.emit(
                             "warn",
-                            f"{title!r} has {st.tab_count} tabs — only the "
+                            f"{_wt} has {st.tab_count} tabs — only the "
                             f"ACTIVE tab is watched; invisible: {others!r}. "
                             f"Open each Claude session in its own window "
                             f"(drag the tab out of the tab bar)."
@@ -1278,12 +1348,12 @@ class Watcher(QObject):
                                         "warn",
                                         f"Fable-recover finished on {ended_on!r} "
                                         f"but the script asked for {_vwant!r} → "
-                                        f"{title!r}; the session was NOT "
+                                        f"{_wt}; the session was NOT "
                                         f"switched back")
                                 elif stalled and not _running:
                                     self.log.emit(
                                         "warn",
-                                        f"Fable-recover ran on {title!r} but the "
+                                        f"Fable-recover ran on {_wt} but the "
                                         f"safeguard notice is still standing — "
                                         f"the block was NOT cleared"
                                         + (f" (on {ended_on})"
@@ -1291,7 +1361,7 @@ class Watcher(QObject):
                                 else:
                                     self.log.emit(
                                         "info",
-                                        f"Fable-recover done → {title!r}"
+                                        f"Fable-recover done → {_wt}"
                                         + (f" (on {ended_on})"
                                            if ended_on else ""))
                                 st.fable_verdict_at = None
@@ -1311,13 +1381,31 @@ class Watcher(QObject):
                                     >= timedelta(seconds=FABLE_STALE_RUN_S)):
                                 self.log.emit(
                                     "warn",
-                                    f"Fable-recover on {title!r}: run went stale; "
+                                    f"Fable-recover on {_wt}: run went stale; "
                                     f"abandoning rather than resuming mid-script")
                                 _fable_reset(st)
                                 st.fable_handled = True
                                 st.status = ST_FABLE
                                 continue
                             kind, arg = steps[st.fable_step]
+                            if kind == "effort":
+                                # Restore the level this window is configured
+                                # for, on the way back to the target model.
+                                # Its partner is the plain "/effort max" the
+                                # script types on the FALLBACK: a rescue run
+                                # is worth the best thinking available, but
+                                # leaving max in place afterwards would be
+                                # this tool quietly changing a setting the
+                                # user chose. Nothing configured means nothing
+                                # to restore, so the step is skipped rather
+                                # than guessing a level.
+                                _eff = self._effort_overrides.get(_key, "")
+                                if not _eff:
+                                    st.fable_step += 1
+                                    st.fable_step_at = now
+                                    st.status = ST_FABLE
+                                    continue
+                                kind, arg = "send", f"/effort {_eff}"
                             if kind == "resume":
                                 # By the time <resume> runs, /compact has already
                                 # replaced the history — the flagged context that
@@ -1336,7 +1424,7 @@ class Watcher(QObject):
                                 if st.fable_park:
                                     self.log.emit(
                                         "info",
-                                        f"{dr}Fable-recover: parking {title!r} — "
+                                        f"{dr}Fable-recover: parking {_wt} — "
                                         f"not typing the resume prompt again; "
                                         f"edit it by hand before re-running")
                                     kind = "park"    # → unknown-step: advance
@@ -1390,7 +1478,7 @@ class Watcher(QObject):
                                     if capped and st.fable_wait_acc < secs:
                                         self.log.emit(
                                             "warn",
-                                            f"Fable-recover on {title!r}: only "
+                                            f"Fable-recover on {_wt}: only "
                                             f"{int(st.fable_wait_acc)}s of {secs}s run "
                                             f"time banked after "
                                             f"{int((now - st.fable_wait_from).total_seconds())}s "
@@ -1449,7 +1537,7 @@ class Watcher(QObject):
                                     if walled and not settled:
                                         self.log.emit(
                                             "warn",
-                                            f"Fable-recover on {title!r}: still "
+                                            f"Fable-recover on {_wt}: still "
                                             f"not idle after "
                                             f"{int((now - st.fable_idle_from).total_seconds())}s"
                                             f" wall — moving on anyway")
@@ -1518,7 +1606,7 @@ class Watcher(QObject):
                                             st.fable_hold_logged = True
                                             self.log.emit(
                                                 "info",
-                                                f"{dr}Fable-recover: {title!r} — "
+                                                f"{dr}Fable-recover: {_wt} — "
                                                 f"letting the current turn "
                                                 f"finish before {arg!r}")
                                         st.status = ST_FABLE
@@ -1528,12 +1616,12 @@ class Watcher(QObject):
                                         self.log.emit(
                                             "info",
                                             f"{dr}Fable-recover: already on "
-                                            f"{_bar!r}, skipping {arg!r} → {title!r}")
+                                            f"{_bar!r}, skipping {arg!r} → {_wt}")
                                         advance = True
                                     else:
                                         self.log.emit(
                                             "fire",
-                                            f"{dr}Fable-recover → {title!r}: {arg!r}")
+                                            f"{dr}Fable-recover → {_wt}: {arg!r}")
                                         if send_text_lines(w, [arg],
                                                            dry_run=self._dry_run):
                                             advance = True
@@ -1564,7 +1652,7 @@ class Watcher(QObject):
                                     else:
                                         self.log.emit(
                                             "fire",
-                                            f"{dr}Fable-recover → {title!r}: ESC "
+                                            f"{dr}Fable-recover → {_wt}: ESC "
                                             f"(interrupt so the switch lands)")
                                         if send_keys(w, "{Esc}", dry_run=self._dry_run):
                                             advance = True
@@ -1613,7 +1701,7 @@ class Watcher(QObject):
                                         self.log.emit(
                                             "fire",
                                             f"{dr}Fable-recover: confirming Switch-model "
-                                            f"(Yes) → {title!r}")
+                                            f"(Yes) → {_wt}")
                                         if send_text_lines(w, [""],
                                                            dry_run=self._dry_run):
                                             st.fable_dlg_seen = True
@@ -1645,7 +1733,7 @@ class Watcher(QObject):
                                     if st.fable_tries >= FABLE_SEND_RETRIES:
                                         self.log.emit(
                                             "warn",
-                                            f"Fable-recover on {title!r}: could not "
+                                            f"Fable-recover on {_wt}: could not "
                                             f"send (window wouldn't come forward); "
                                             f"abandoning this recovery")
                                         _fable_reset(st)
@@ -1712,7 +1800,18 @@ class Watcher(QObject):
                                 self._fable_quota_switch and tail
                                 and parse_model_quota(
                                     tail, self._patterns.get("model_quota")))
-                            if not _quota_now and st.quota_hold:
+                            # Releasing on "no banner seen" alone treats a
+                            # failed read as evidence: read_terminal_text()
+                            # returns None on a UIA miss and the tick turns
+                            # that into an empty tail, which every detector
+                            # then reports as "nothing on screen". The hold is
+                            # dropped and the log announces the allowance came
+                            # back, having looked at nothing. Unticking the
+                            # switch is the user's own instruction and needs no
+                            # screen; the banner clearing has to be SEEN.
+                            if st.quota_hold and (
+                                    not self._fable_quota_switch
+                                    or (tail and not _quota_now)):
                                 # Either the allowance came back or the user
                                 # unticked the switch. Both release the latch —
                                 # it exists only to stop drift undoing OUR
@@ -1723,10 +1822,10 @@ class Watcher(QObject):
                                 st.quota_at = None
                                 self.log.emit(
                                     "info",
-                                    (f"quota switching turned off; {title!r} "
+                                    (f"quota switching turned off; {_wt} "
                                      f"is back under normal model handling")
                                     if not self._fable_quota_switch else
-                                    (f"quota banner cleared on {title!r}; "
+                                    (f"quota banner cleared on {_wt}; "
                                      f"normal model handling resumes"))
                             elif (_quota_now and not st.quota_hold
                                     and not fable_hit):
@@ -1735,7 +1834,7 @@ class Watcher(QObject):
                                 if not _fallback:
                                     self.log.emit(
                                         "warn",
-                                        f"quota banner on {title!r} but the "
+                                        f"quota banner on {_wt} but the "
                                         f"script names no fallback model; "
                                         f"leaving it alone")
                                 elif _cur and _cur.lower().startswith(
@@ -1750,7 +1849,7 @@ class Watcher(QObject):
                                     st.quota_at = now
                                     self.log.emit(
                                         "info",
-                                        f"{title!r} is out of quota and "
+                                        f"{_wt} is out of quota and "
                                         f"already on {_fallback!r}; holding "
                                         f"it there until the quota resets")
                                 else:
@@ -1769,11 +1868,17 @@ class Watcher(QObject):
                                         ("confirm", None),
                                         ("send", f"/model {_fallback}"),
                                         ("confirm", None),
+                                        # Same bargain as the safeguard
+                                        # recovery: the detour is worth the
+                                        # best thinking available, and the
+                                        # window's own level is restored by
+                                        # the <effort> step when it goes home.
+                                        ("send", "/effort max"),
                                         ("send", "continue"),
                                     ]
                                     self.log.emit(
                                         "warn",
-                                        f"{title!r} is out of quota on "
+                                        f"{_wt} is out of quota on "
                                         f"{_cur or 'its model'}; finishing on "
                                         f"{_fallback!r} until it resets")
                             if fable_hit:
@@ -1805,7 +1910,7 @@ class Watcher(QObject):
                                 if _nid and _known and _nid != _known:
                                     self.log.emit(
                                         "warn",
-                                        f"new Fable safeguard on {title!r} "
+                                        f"new Fable safeguard on {_wt} "
                                         f"({_nid}) while the previous notice was "
                                         f"still on screen")
                                     st.fable_handled = False
@@ -1815,7 +1920,7 @@ class Watcher(QObject):
                                         and dist + FABLE_FRESH_MARGIN < furthest):
                                     self.log.emit(
                                         "warn",
-                                        f"new Fable safeguard on {title!r} while "
+                                        f"new Fable safeguard on {_wt} while "
                                         f"the previous notice was still on screen")
                                     st.fable_handled = False
                                 else:
@@ -1863,7 +1968,7 @@ class Watcher(QObject):
                                     # this turn. Nothing left to do by machine.
                                     self.log.emit(
                                         "warn",
-                                        f"Fable safeguard on {title!r} again "
+                                        f"Fable safeguard on {_wt} again "
                                         f"after parking — leaving it alone; the "
                                         f"prompt needs a human edit")
                                     st.fable_handled = True
@@ -1871,7 +1976,7 @@ class Watcher(QObject):
                                     st.fable_runs += 1
                                     self.log.emit(
                                         "warn",
-                                        f"{dr}Fable safeguard on {title!r}: the "
+                                        f"{dr}Fable safeguard on {_wt}: the "
                                         f"resume prompt was blocked {_loops}x — "
                                         f"final run lets the fallback finish "
                                         f"and /compact, then parks on the "
@@ -1891,7 +1996,7 @@ class Watcher(QObject):
                                     st.fable_runs += 1
                                     self.log.emit(
                                         "fire",
-                                        f"{dr}Fable safeguard on {title!r}; running "
+                                        f"{dr}Fable safeguard on {_wt}; running "
                                         f"recovery ({len(steps)} steps)")
                                     _fable_reset(st)
                                     st.fable_step = 0
@@ -1951,7 +2056,7 @@ class Watcher(QObject):
                                 st.fable_user_optout = True
                                 self.log.emit(
                                     "warn",
-                                    f"{title!r} was switched by hand from "
+                                    f"{_wt} was switched by hand from "
                                     f"{st.fable_last_model!r} to {cur!r}; taking "
                                     f"that as your call — unticking it and no "
                                     f"longer steering it back")
@@ -2017,7 +2122,7 @@ class Watcher(QObject):
                                     st.fable_drift_runs += 1
                                     self.log.emit(
                                         "warn",
-                                        f"{dr}{title!r} is on {cur!r} but should be "
+                                        f"{dr}{_wt} is on {cur!r} but should be "
                                         f"on {want!r}; steering it back "
                                         f"({st.fable_drift_runs}/"
                                         f"{FABLE_DRIFT_MAX})")
@@ -2038,7 +2143,7 @@ class Watcher(QObject):
                 except Exception as e:
                     self.log.emit(
                         'err',
-                        f'Fable-recover error on {title!r}: '
+                        f'Fable-recover error on {_wt}: '
                         f'{type(e).__name__}: {e}; disabling it for this window')
                     _fable_reset(st)
                     st.fable_handled = True
@@ -2049,7 +2154,7 @@ class Watcher(QObject):
                     if not st.oauth_logged:
                         self.log.emit(
                             "warn",
-                            f"OAuth token expired on {title!r} — auto-continue "
+                            f"OAuth token expired on {_wt} — auto-continue "
                             f"can't fix this; run /login in that session"
                         )
                         st.oauth_logged = True
@@ -2085,7 +2190,7 @@ class Watcher(QObject):
                         st.prompt_active = True
                         self.log.emit(
                             "warn",
-                            f"limit picker open on {title!r} — it offers PAID "
+                            f"limit picker open on {_wt} — it offers PAID "
                             f"extra usage, so nothing is pressed. Choose in "
                             f"that window; auto-continue will not."
                         )
@@ -2163,7 +2268,7 @@ class Watcher(QObject):
                                 self.log.emit(
                                     "fire",
                                     f"{dr}answered the {_what} "
-                                    f"(Enter = option 1) → {title!r}")
+                                    f"(Enter = option 1) → {_wt}")
                                 # Questions come in runs: a form asks
                                 # several and then offers Submit as one more
                                 # chooser. At the poll interval that is a
@@ -2179,7 +2284,7 @@ class Watcher(QObject):
                                 self.log.emit(
                                     "warn",
                                     f"could not answer the {_what} on "
-                                    f"{title!r} — the window wouldn't come "
+                                    f"{_wt} — the window wouldn't come "
                                     f"forward; retrying while it is up")
                             st.status = ST_PROMPT
                             continue
@@ -2213,7 +2318,7 @@ class Watcher(QObject):
                         if first:
                             self.log.emit(
                                 "warn",
-                                f"{stuck_reason} on {title!r}; "
+                                f"{stuck_reason} on {_wt}; "
                                 f"sending 'continue' every "
                                 f"{self._retry_interval}s until recovery"
                             )
@@ -2223,7 +2328,7 @@ class Watcher(QObject):
                         # every retry_interval seconds.
                         self.log.emit(
                             "fire" if first else "info",
-                            f"{dr}resending 'continue' (retry path) → {title!r}"
+                            f"{dr}resending 'continue' (retry path) → {_wt}"
                         )
                         ok = send_continue(w, dry_run=self._dry_run)
                         if ok:
@@ -2237,12 +2342,13 @@ class Watcher(QObject):
                                     and now >= st.reset_utc + buffer):
                                 st.fired_key = st.reset_key
                                 st.reset_utc = None
+                                st.fire_deferred = False
                                 st.reset_key = None
                                 st.last_sent_utc = now
                         else:
                             self.log.emit(
                                 "warn",
-                                f"retry send failed for {title!r}; "
+                                f"retry send failed for {_wt}; "
                                 f"will try again in {self._interval}s"
                             )
                             st.status = ST_RETRY
@@ -2250,10 +2356,21 @@ class Watcher(QObject):
                         st.status = ST_RETRY
                     continue
                 else:
-                    if st.retry_active:
+                    # `stuck_reason` is None both when the screen was read and
+                    # held no error AND when it could not be read at all --
+                    # read_terminal_text() returns None on a UIA miss and the
+                    # tail becomes "". Only the first is recovery. Treating the
+                    # second as recovery also cleared retry_last_sent_utc, and
+                    # the next pass that DID read the error then fired at once
+                    # instead of waiting out the retry interval, so a flaky
+                    # read turned a 10-minute poke into a per-minute one --
+                    # queueing prompts that all land together when the session
+                    # finally answers, which is what the interval exists to
+                    # prevent.
+                    if st.retry_active and tail:
                         self.log.emit(
                             "info",
-                            f"network error cleared on {title!r}; "
+                            f"network error cleared on {_wt}; "
                             f"recovered"
                         )
                         st.retry_active = False
@@ -2286,7 +2403,7 @@ class Watcher(QObject):
                             )
                         except Exception as e:
                             self.log.emit(
-                                "err", f"reset calc failed for {title!r}: {e}"
+                                "err", f"reset calc failed for {_wt}: {e}"
                             )
                         if new_reset is not None:
                             # A banner only gives a time of day, so "the next
@@ -2310,7 +2427,7 @@ class Watcher(QObject):
                                     > timedelta(hours=STALE_RESET_H)):
                                 self.log.emit(
                                     "warn",
-                                    f"limit on {title!r} says it resets at "
+                                    f"limit on {_wt} says it resets at "
                                     f"{hour_12}:{minute:02d}{ampm}, which "
                                     f"already passed — treating it as lifted "
                                     f"and resuming now instead of waiting for "
@@ -2318,12 +2435,13 @@ class Watcher(QObject):
                                 new_reset = now
                             old = st.reset_utc
                             st.reset_utc = new_reset
+                            st.fire_deferred = False
                             st.reset_key = parsed
                             local = (new_reset + buffer).astimezone()
                             if old is None:
                                 self.log.emit(
                                     "info",
-                                    f"limit on {title!r} → resets "
+                                    f"limit on {_wt} → resets "
                                     f"{hour_12}:{minute:02d}{ampm} ({tz_name}); "
                                     f"will fire at "
                                     f"{local:%Y-%m-%d %H:%M:%S %Z}"
@@ -2332,7 +2450,7 @@ class Watcher(QObject):
                                 old_local = (old + buffer).astimezone()
                                 self.log.emit(
                                     "info",
-                                    f"limit on {title!r} reset shifted: "
+                                    f"limit on {_wt} reset shifted: "
                                     f"{old_local:%Y-%m-%d %H:%M:%S} → "
                                     f"{local:%Y-%m-%d %H:%M:%S}"
                                 )
@@ -2354,14 +2472,37 @@ class Watcher(QObject):
                                     tail, self._patterns.get("limit")) is None):
                             self.log.emit(
                                 "info",
-                                f"limit message gone on {title!r} before fire; "
+                                f"limit message gone on {_wt} before fire; "
                                 f"assuming handled manually"
                             )
                             st.fired_key = st.reset_key
                             st.reset_utc = None
+                            st.fire_deferred = False
                             st.reset_key = None
                             st.status = ST_IDLE
                             continue
+                        # Never type into a turn that is already streaming.
+                        # The re-verify above only catches a manual resume
+                        # once its output has pushed the banner more than
+                        # MAX_POST_MATCH_TAIL from the tail; a session that
+                        # resumed seconds ago still shows it, so without this
+                        # the fire lands mid-stream and Claude Code queues the
+                        # prompt to run when the turn ends — an unwanted extra
+                        # turn, the very thing the network path and the chooser
+                        # path each already refuse to cause. The pending is
+                        # kept, not cancelled: a later pass fires it once the
+                        # session is idle. A forced fire is the user's own
+                        # instruction and is left alone.
+                        if not force_fire and tail and session_running(tail):
+                            if not st.fire_deferred:
+                                st.fire_deferred = True
+                                self.log.emit(
+                                    "info",
+                                    f"limit on {_wt} is due but the "
+                                    f"session is mid-turn; holding the "
+                                    f"'continue' until it goes quiet")
+                            continue
+                        st.fire_deferred = False
                         st.status = ST_FIRING
                         model = self._model_overrides.get(title_key(title), "")
                         effort = self._effort_overrides.get(title_key(title), "")
@@ -2383,7 +2524,7 @@ class Watcher(QObject):
                         lines.append("continue")
                         self.log.emit(
                             "fire",
-                            f"{dr}sending {lines} to {title!r}"
+                            f"{dr}sending {lines} to {_wt}"
                             + (" (forced)" if force_fire else "")
                         )
                         ok = send_text_lines(w, lines, dry_run=self._dry_run)
@@ -2398,6 +2539,7 @@ class Watcher(QObject):
                             st.last_sent_utc = now
                             st.fired_key = st.reset_key
                             st.reset_utc = None
+                            st.fire_deferred = False
                             st.reset_key = None
                             st.status = ST_SENT
                             st.sent_flash_until = now + timedelta(seconds=5)
@@ -2406,13 +2548,14 @@ class Watcher(QObject):
                                 ("simulated (dry-run)" if self._dry_run else "sent")
                                 + (f" /model {model} +" if model else "")
                                 + (f" /effort {effort} +" if effort else "")
-                                + f" continue → {title!r}"
+                                + f" continue → {_wt}"
                             )
                         else:
                             self.log.emit("warn",
-                                          f"send failed for {title!r}; "
+                                          f"send failed for {_wt}; "
                                           f"will retry in {self._interval}s")
                             st.reset_utc = now  # immediate retry next tick
+                            st.fire_deferred = False
                             st.status = ST_PENDING
                     else:
                         st.status = ST_PENDING
@@ -2456,7 +2599,7 @@ class Watcher(QObject):
                             st.af_spent_logged = True
                             self.log.emit(
                                 "info",
-                                f"after-finish on {title!r}: no runs left "
+                                f"after-finish on {_wt}: no runs left "
                                 f"(Loops 0) — set Loops again to re-arm")
                     elif session_running(tail):
                         st.af_seen_running = True
@@ -2472,7 +2615,7 @@ class Watcher(QObject):
                                 >= timedelta(seconds=AFTER_FINISH_SETTLE_S)):
                             self.log.emit(
                                 "fire",
-                                f"{dr}after-finish → {title!r}: {af_cmd!r}")
+                                f"{dr}after-finish → {_wt}: {af_cmd!r}")
                             if send_text_lines(w, [af_cmd],
                                                dry_run=self._dry_run):
                                 # Re-arm only after it is seen running again:
@@ -2494,7 +2637,7 @@ class Watcher(QObject):
                             else:
                                 self.log.emit(
                                     "warn",
-                                    f"after-finish send failed for {title!r}; "
+                                    f"after-finish send failed for {_wt}; "
                                     f"will retry next tick")
 
             except Exception as _e:
@@ -2505,11 +2648,35 @@ class Watcher(QObject):
                 continue
         # Drop closed windows, and queued row commands aimed at them (a
         # stale hwnd could be recycled by Windows for an unrelated window).
+        # "Missed this pass" is NOT "closed": find_terminal_windows() returns
+        # a partial list when a child window's UIA read throws, and an EMPTY
+        # one when the root enumeration does — both promised in its docstring.
+        # Pruning on that alone let one COM hiccup delete every window's
+        # state, and the expensive half of that cannot be re-read from the
+        # screen: the step an in-flight recovery had reached, the quota hold
+        # that stops drift steering a window back onto an exhausted model, and
+        # the send cooldown. So ask the OS which handles are really gone.
+        ghosts = set()
         for hwnd in list(self._states):
-            if hwnd not in seen:
+            if hwnd in seen:
+                continue
+            if _hwnd_alive(hwnd):
+                ghosts.add(hwnd)
+            else:
                 del self._states[hwnd]
-        self._cmd_fire_now &= seen
-        self._cmd_skip &= seen
+        if ghosts != self._ghost_hwnds:
+            if ghosts:
+                self.log.emit(
+                    "warn",
+                    f"{len(ghosts)} open window(s) missing from this pass "
+                    f"(UIA enumeration hiccup) — keeping what is known about "
+                    f"them rather than starting them over")
+            self._ghost_hwnds = set(ghosts)
+        # A ghost's queued row command is kept for the same reason its state
+        # is: the window is still there to receive it.
+        keep = seen | ghosts
+        self._cmd_fire_now &= keep
+        self._cmd_skip &= keep
 
         # Snapshot for the GUI.
         self.snapshot.emit(self._make_snapshot())
@@ -4493,7 +4660,11 @@ log shows exactly what would have happened, prefixed
 <li><b>The 5-hour usage limit.</b> Reads the reset time from the banner,
 waits until it passes (plus the <b>Buffer</b>, 60s by default, because the
 limit often clears a little after the stated minute), then types
-<code>continue</code>. If the newer <i>"What do you want to do?"</i> chooser
+<code>continue</code> — but not into a turn that is already streaming. If you
+resumed the session yourself just before the reset, the due
+<code>continue</code> is held until the session goes quiet rather than being
+queued behind the running turn and starting an extra one; the pending is kept,
+not cancelled. If the newer <i>"What do you want to do?"</i> chooser
 appears, <b>nothing is pressed</b> — that chooser's other option is
 <i>paid extra usage</i>, and Enter takes whatever is highlighted, so
 answering it is a decision about money that no screen scrape should make.
@@ -4510,7 +4681,11 @@ interval</b> (10 minutes by default) until the connection comes back.
 Crucially, only while the session is <i>actually</i> stuck: once it is
 streaming again, the error still on screen is just scrollback, and poking it
 would queue prompts that all fire at once when the turn ends. HTTP 500/529
-errors are left alone — Claude Code retries those itself.</li>
+errors are left alone — Claude Code retries those itself. Recovery has to be
+<i>seen</i>, too: a pass that could not read the window at all looks the same
+as a window with no error on it, and treating that as recovery used to throw
+away the retry throttle, so the next pass that did read the error poked
+immediately instead of waiting out the interval.</li>
 <li><b>Truncated responses.</b> A reply cut off mid-stream is resumed with
 <code>continue</code>.</li>
 <li><b>Dead sessions.</b> An expired login cannot be fixed by typing, so it
@@ -4520,7 +4695,13 @@ default.</li>
 </ul>
 <p>Everything above is matched with regexes you can edit
 (<b>Advanced &#8594; Triggers</b>), because Anthropic re-words these banners
-without notice.</p>
+without notice. Those patterns track the wording of a <i>current</i> Claude
+Code, and only that: spellings retired by Anthropic — the pre-rename
+<code>/extra-usage</code>, the old "esc to interrupt" spinner — have been
+dropped rather than carried forever, since Claude Code updates itself and a
+pattern kept for builds nobody runs is dead weight that still has to be read
+and reasoned about. If you deliberately pin an old build and a banner stops
+being noticed, add its wording back under <b>Triggers</b>.</p>
 
 <h3>The table</h3>
 <p>One row per terminal window. The <b>Status</b> column is the quickest way
@@ -4745,27 +4926,32 @@ block is about what the <i>conversation</i> contains, and only
 the <i>account</i>: nothing is wrong with the session, one model simply has
 nothing left — and it may have nothing left for days.</p>
 <p>So the answer is different too. With this on, the window switches to the
-fallback model and types <code>continue</code>, and that is all: <b>no
-<code>/compact</code></b>, because discarding the history would throw away
-real work and the quota is not what the history says. The remaining tasks
+fallback model, raises effort to <b>max</b>, and types <code>continue</code>:
+<b>no <code>/compact</code></b>, because discarding the history would throw
+away real work and the quota is not what the history says. The remaining tasks
 finish on the fallback instead of the window sitting idle until the
 allowance resets.</p>
 <p>While the banner is up, <b>the window is deliberately not steered back</b>
 to the target model — the usual drift correction is suspended for it. Putting
 it back would mean putting it on the model that cannot answer. Once the
 banner clears, the latch is released and normal handling resumes, which is
-also what happens the moment you untick the switch. The fallback is read from
+also what happens the moment you untick the switch. "The banner cleared" has
+to be something actually <i>seen</i>: a window whose text could not be read
+that pass (Windows' UI Automation occasionally refuses) looks exactly like a
+window with no banner on it, so the latch is held until a pass genuinely
+reads the screen. Unticking the switch is your own instruction and releases
+it immediately, screen or no screen. The fallback is read from
 your script's <i>first</i> <code>/model</code> line, so it is whatever you
 chose; a script with no <code>/model</code> line means there is nowhere to
 go, and the window is left alone with a warning.</p>
-<p><b>The detection pattern is a best guess and you may need to fix it.</b>
-It lives on the <b>Triggers</b> tab as "Model quota exhausted". It was written
-from the shape of Claude Code's other banners rather than from a real sample,
-because the machine it was built on had a full allowance at the time. When
-you meet the real banner, paste it into the test box under that pattern and
-adjust until it matches — no new build required. The switch is off by default
-partly for this reason, and partly because it changes which model your
-session runs on.</p>
+<p>The detection pattern is on the <b>Triggers</b> tab as "Model quota
+exhausted", and is now written against the real banner:
+<i>"You&#8217;ve reached your &lt;Model&gt; limit. Run /usage-credits to
+continue or switch models with /model."</i> Note what it does <i>not</i>
+contain: a reset time. A per-model allowance is not a countdown, it is a wall
+until the week turns — which is why waiting it out is the wrong answer and
+switching is the right one. If Anthropic re-words it, paste the new text into
+the test box and adjust; no new build required.</p>
 <p>This is <i>not</i> the 5-hour limit. That one stops every model at once, so
 there is nothing to switch to; auto-continue waits for the reset and resumes
 by itself, as it always has.</p>
@@ -4809,6 +4995,12 @@ lands as a command instead of being queued. <b>Not</b> in the default script:
 the default never cuts a turn short. It is skipped on an idle session and
 never fires onto an open dialog.</li>
 <li><code>&lt;enter&gt;</code> — a bare Enter.</li>
+<li><code>&lt;effort&gt;</code> — restores this window's own <b>Effort</b>
+setting. Its partner is the plain <code>/effort max</code> the default script
+types on the fallback: a run that exists to get unstuck is worth the best
+thinking available, but leaving max in place afterwards would be this tool
+quietly changing a level you chose. A window with nothing configured has
+nothing to restore, so the step is skipped rather than guessing one.</li>
 <li><code>&lt;resume&gt;</code> — types the window's <b>After recovery</b>
 command (second column of the window list), or a plain <code>continue</code>
 when none is set, which picks the compacted summary back up. Types nothing on
@@ -4821,7 +5013,14 @@ and moved past rather than pinning the window forever.</p>
 <h3>Timings</h3>
 <ul>
 <li><b>Poll interval</b> (60s) — how often every window is read. Reading a
-window costs real time, and nothing here needs sub-minute latency.</li>
+window costs real time, and nothing here needs sub-minute latency. A pass
+occasionally comes back short: Windows' UI Automation can refuse a window,
+or the whole enumeration, for a moment. A window absent from one pass is
+therefore not treated as closed — the handle is checked with the OS first —
+because some of what is known about a window cannot be read off the screen a
+second time: how far an in-flight model recovery had got, the hold that
+keeps a session off a model whose allowance is gone, and how recently it was
+last typed into. When that happens the log says so once.</li>
 <li><b>Buffer</b> (60s) — extra margin past the stated reset time.</li>
 <li><b>Retry interval</b> (600s) — the gap between <code>continue</code>s
 while a session is network-stuck. Short values just bury the log: an outage
@@ -4853,7 +5052,14 @@ instead of double-typing into the same sessions.</li>
 <li>The minimize button hides to the tray; the X button quits.</li>
 <li>Everything in the log pane is also appended to
 <code>%LOCALAPPDATA%\\auto_continue\\activity.log</code> (rotated at about
-1 MB) for morning-after postmortems.</li>
+1 MB) for morning-after postmortems. Each line names the window as
+<code>'title' #id</code> — the id is a short slice of the window handle, and
+it is what makes the log answerable: titles are neither unique (two sessions
+on the same task write identical lines) nor stable (a session renames itself
+as it works), so without it a question like "was this window poked twice
+inside the retry interval?" cannot be settled after the fact. The id changes
+if the window is closed and reopened; it identifies a window, not a
+project.</li>
 <li>Settings are keyed by window <i>title</i>, so two windows with identical
 titles share one set of settings — worth knowing before ticking one of them
 for model recovery.</li>
