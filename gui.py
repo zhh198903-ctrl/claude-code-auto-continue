@@ -72,7 +72,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QAction, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-    QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView,
+    QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
     QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
@@ -653,6 +653,34 @@ def _wid(hwnd: int) -> str:
     return f"{int(hwnd) & 0xFFFF:04x}"
 
 
+_REDACT_KEEP = _re.compile(r"^(?:/[\w-]+(?:\s+[\w.-]+)?|continue|\(none\)|)$")
+
+
+def redact_log_line(line: str) -> str:
+    """Strip a log line of everything that says WHAT the machine is working on.
+
+    The activity log is safe to keep locally and unsafe to hand over as-is: a
+    Claude Code window is named after its conversation, so the titles alone
+    disclose the projects and tasks on this machine, and the after-finish and
+    resume prompts are the user's own words typed verbatim into the log.
+
+    What survives is what a diagnosis actually needs — the timestamp, the
+    level, the sentence, the window id, and literal slash commands, none of
+    which describe the work. A title that already carries an id collapses to
+    the id, because the id is the better identifier anyway: it is unique and
+    it survives a rename.
+    """
+    # 'some title' #1a2b  ->  #1a2b   (the id alone identifies it)
+    out = _re.sub(r"'[^']*'(\s+#[0-9a-f]{4})", lambda m: m.group(1), line)
+
+    # Every other quoted run is free text unless it is a bare command.
+    def _one(m):
+        inner = m.group(1)
+        return m.group(0) if _REDACT_KEEP.match(inner) else "'…'"
+
+    return _re.sub(r"'([^']*)'", _one, out)
+
+
 def _hwnd_alive(hwnd: int) -> bool:
     """True if the OS still knows this window handle.
 
@@ -701,6 +729,9 @@ class _WState:
     # True while a due limit fire is being held back because the
     # session is mid-turn; keeps that news to one log line.
     fire_deferred: bool = False
+    # True while the window is enumerated but its text cannot be read,
+    # so the log says so once per episode instead of every tick.
+    read_blind: bool = False
     # Interactive limit-picker ("What do you want to do?") bookkeeping.
     prompt_last_sent_utc: Optional[datetime] = None
     prompt_active: bool = False
@@ -1281,6 +1312,24 @@ class Watcher(QObject):
                 # shares the same view of the terminal.
                 text = read_terminal_text(w)
                 tail = text[-SCAN_TAIL_CHARS:] if text else ""
+                # Say which of the two silences this is. Every detector below
+                # reports "nothing on screen" for an unreadable window exactly
+                # as it does for a window with nothing on it, so a log without
+                # this line cannot answer the first question anyone asks after
+                # the fact -- was the allowance really back, had the network
+                # really recovered, or had the tool simply not looked? The
+                # behaviour no longer depends on the difference; the record
+                # should not either.
+                if not tail:
+                    if not st.read_blind:
+                        st.read_blind = True
+                        self.log.emit(
+                            "warn",
+                            f"could not read the screen of {_wt} this pass — "
+                            f"treating it as unknown, not as 'nothing there'")
+                elif st.read_blind:
+                    st.read_blind = False
+                    self.log.emit("info", f"screen of {_wt} readable again")
                 dr = "[dry-run] " if self._dry_run else ""
 
                 # Isolated: this is the only block driven by user-authored
@@ -3253,10 +3302,19 @@ class MainWindow(QMainWindow):
         btn_grid = QGridLayout()
         btn_grid.setSpacing(4)
         btn_grid.setContentsMargins(0, 0, 0, 0)
+        self.export_log_btn = QPushButton("Export log for feedback…")
+        self.export_log_btn.setToolTip(
+            "Save a copy of the activity log with the window titles and your "
+            "own prompts stripped out, so it can be sent to the author "
+            "without disclosing what this machine is working on. Shows you "
+            "exactly what it will write before writing it.")
+        self.export_log_btn.clicked.connect(self._export_log_for_feedback)
+
         btn_grid.addWidget(self.advanced_btn, 0, 0)
         btn_grid.addWidget(self.check_updates_btn, 0, 1)
         btn_grid.addWidget(self.help_btn, 1, 0)
         btn_grid.addWidget(self.reset_btn, 1, 1)
+        btn_grid.addWidget(self.export_log_btn, 2, 0, 1, 2)
         for b in (self.advanced_btn, self.check_updates_btn,
                   self.help_btn, self.reset_btn):
             b.setMinimumWidth(110)
@@ -3758,6 +3816,82 @@ class MainWindow(QMainWindow):
             f"settings reset to defaults (poll {DEFAULT_INTERVAL_S}s, buffer "
             f"{DEFAULT_BUFFER_S}s, retry {DEFAULT_RETRY_S}s; model recovery "
             f"off)")
+
+    def _collect_redacted_log(self) -> tuple:
+        """(text, n_lines) — the whole activity log, oldest first, redacted.
+
+        The rotated `.old` half is included: a report written the morning
+        after an incident is often already on the far side of a rotation.
+        """
+        parts = []
+        for path in ((self._log_path + ".old") if self._log_path else None,
+                     self._log_path):
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    parts.extend(fh.read().splitlines())
+            except OSError:
+                continue
+        lines = [redact_log_line(ln) for ln in parts if ln.strip()]
+        header = [
+            f"# Auto-Continue {APP_VERSION} activity log — redacted for sharing",
+            "# Window titles and typed prompts are removed; windows appear as",
+            "# #id only. Nothing here is terminal content: the log never held",
+            "# any. Check it over before sending it anywhere.",
+            "",
+        ]
+        return chr(10).join(header + lines), len(lines)
+
+    def _export_log_for_feedback(self) -> None:
+        """Show the redacted log, then save it only if the user says so.
+
+        A log is safe where it lives and unsafe once it travels: a Claude Code
+        window is named after its conversation, so the raw file names the
+        projects and tasks on this machine. Redacting is not enough on its own
+        — the user has to be able to SEE what is about to leave, which is why
+        this previews rather than writing straight to a file.
+        """
+        text, n = self._collect_redacted_log()
+        if not n:
+            QMessageBox.information(self, "Export log",
+                                    "The activity log is empty.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Export log for feedback — check before saving")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            f"{n} lines, titles and prompts removed. This is exactly what "
+            f"will be written:"))
+        view = QPlainTextEdit()
+        view.setReadOnly(True)
+        view.setPlainText(text)
+        view.setMinimumSize(760, 420)
+        lay.addWidget(view)
+        box = QDialogButtonBox()
+        save = box.addButton("Save…", QDialogButtonBox.ButtonRole.AcceptRole)
+        box.addButton(QDialogButtonBox.StandardButton.Cancel)
+        box.rejected.connect(dlg.reject)
+        save.clicked.connect(dlg.accept)
+        lay.addWidget(box)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        default = os.path.join(
+            os.path.expanduser("~"),
+            f"auto-continue-log-{datetime.now():%Y%m%d-%H%M}.txt")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save redacted log", default, "Text files (*.txt)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError as exc:
+            QMessageBox.warning(self, "Export log",
+                                f"Could not write the file: {exc}")
+            return
+        self._append_log("info", f"redacted log exported ({n} lines)")
+        QMessageBox.information(self, "Export log", f"Saved to: {path}")
 
     def _open_help(self) -> None:
         """Usage notes, kept inside the app so they are there when the session
@@ -5059,7 +5193,17 @@ on the same task write identical lines) nor stable (a session renames itself
 as it works), so without it a question like "was this window poked twice
 inside the retry interval?" cannot be settled after the fact. The id changes
 if the window is closed and reopened; it identifies a window, not a
-project.</li>
+project. A window the tool could not read that pass says so in its own line,
+rather than looking identical to a window with nothing on it — that
+difference is the first thing anyone needs when working out, after the fact,
+whether the allowance really came back or the tool simply never looked.</li>
+<li><b>Export log for feedback&#8230;</b> writes a copy of that log with the
+window titles and your own typed prompts removed — windows appear as
+<code>#id</code> only — and shows you the whole thing before it writes
+anything. The raw file is safe where it sits and not safe to hand over: a
+Claude Code window is named after its conversation, so the titles alone say
+what this machine is working on. Nothing in the log is terminal content; it
+never records what a session actually printed.</li>
 <li>Settings are keyed by window <i>title</i>, so two windows with identical
 titles share one set of settings — worth knowing before ticking one of them
 for model recovery.</li>

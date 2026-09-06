@@ -444,6 +444,59 @@ w._tick()
 check("W3 the id survives the window renaming itself",
       any("#1234" in m for m in LOGS_W))
 
+# A log is safe where it lives and unsafe once it travels: a Claude Code
+# window is named after its conversation, and the after-finish prompt is the
+# user's own words. Redaction has to drop those while keeping what a
+# diagnosis needs -- the id, the sentence, and literal slash commands.
+NL = chr(10)
+_r = gui.redact_log_line
+_secret = "the Q4 pricing model for client X"
+_cases = [
+    ("2026-01-01 00:00:00  [warn]  network retries exhausted on "
+     "'" + _secret + "' #0a40; sending 'continue' every 600s until recovery"),
+    ("2026-01-01 00:00:00  [fire]  after-finish → '" + _secret +
+     "' #0a40: '" + _secret + "'"),
+    ("2026-01-01 00:00:00  [fire]  Fable-recover → 'win' #1234: "
+     "'/effort high'"),
+    ("2026-01-01 00:00:00  [info]  after-finish on '" + _secret +
+     "': no runs left (Loops 0)"),
+]
+_out = [_r(c) for c in _cases]
+check("R1 nothing that names the work survives redaction",
+      not any(_secret in o for o in _out))
+check("R2 the window id survives, since that is what identifies it",
+      all("#0a40" in o for o in _out[:2]))
+check("R3 literal slash commands survive — they describe no work",
+      "/effort high" in _out[2])
+check("R4 'continue' survives too", "'continue'" in _out[0])
+check("R5 a pre-id line still loses its title",
+      "'…'" in _out[3] and _secret not in _out[3])
+check("R6 a line naming no window is left alone",
+      _r("2026-01-01 00:00:00  [info]  up to date (v2.0.17)")
+      == "2026-01-01 00:00:00  [info]  up to date (v2.0.17)")
+
+# An unreadable screen must SAY so. Every detector reports "nothing on
+# screen" for a window it could not read exactly as for an empty one, so a
+# log without this line cannot answer whether the tool looked at all.
+set_now(T0)
+reset([(21, "win")], {21: ""})
+w = new_watcher()
+LOGS_R = []
+w.log.connect(lambda k, m: LOGS_R.append((k, m)))
+w._tick()
+check("R7 an unreadable screen is reported",
+      any(k == "warn" and "could not read the screen" in m for k, m in LOGS_R))
+LOGS_R.clear()
+advance(60)
+w._tick()
+check("R8 and only once, not once per tick",
+      not any("could not read the screen" in m for _, m in LOGS_R))
+TEXTS[21] = "back on screen" + NL + "> "
+advance(60)
+w._tick()
+check("R9 recovery of the read is reported too",
+      any("readable again" in m for _, m in LOGS_R))
+
 
 # =============================================================================
 print("---- G: after-finish types the follow-up when a run completes ----")
