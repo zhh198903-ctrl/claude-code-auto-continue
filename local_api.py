@@ -233,6 +233,25 @@ class _Handler(BaseHTTPRequestHandler):
             return
         ctx = self.server.ctx
         parts = self._parts(self.path)
+        if parts == ["v1", "settings"]:
+            # The only route that changes what the user configured. Kept to a
+            # whitelist of two booleans and refused outright for anything else:
+            # a caller holding the token can already type into sessions, so
+            # this is not new power — but a checkbox changing underneath the
+            # person who ticked it is a surprise, and surprises are what the
+            # log line and the live checkbox update are for.
+            try:
+                data = self._body()
+            except Exception:
+                self._reply(400, {"ok": False, "reason": "bad_body"})
+                return
+            if (not isinstance(data, dict) or not data
+                    or set(data) - {"auto_permission", "auto_choose"}
+                    or any(not isinstance(v, bool) for v in data.values())):
+                self._reply(400, {"ok": False, "reason": "bad_body"})
+                return
+            self._reply(200, ctx["settings"](data))
+            return
         if not (len(parts) == 4 and parts[0] == "v1" and parts[1] == "windows"):
             self._reply(404, {"ok": False, "reason": "no_route"})
             return

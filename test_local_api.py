@@ -190,6 +190,34 @@ check("G6 scan needs the token too",
       call("/v1/windows/0x2b/scan", None, {})[0] == 401
       and len(scanned) == 1)
 
+print("---- K: the one route that changes the user's settings ----")
+# A caller with the token can already type anything into any session, so this
+# grants no new power. What it can do is surprise: a checkbox changing under
+# the person who ticked it. Hence a whitelist, strict types, and a refusal
+# rather than silently ignoring a key nobody recognises.
+applied = []
+ctx["settings"] = lambda d: (applied.append(dict(d)),
+                             {"ok": True, "permission_autoanswer": False,
+                              "chooser_autoanswer": False})[1]
+check("K1 a known boolean is applied",
+      call("/v1/settings", T, {"auto_permission": False})[1]["ok"] is True
+      and applied[-1] == {"auto_permission": False})
+check("K2 both keys together are fine",
+      call("/v1/settings", T, {"auto_permission": True,
+                               "auto_choose": False})[0] == 200)
+check("K3 an unknown key is refused, not ignored",
+      call("/v1/settings", T, {"auto_permission": False,
+                               "dry_run": True})[0] == 400
+      and len(applied) == 2)
+check("K4 a non-boolean is refused",
+      call("/v1/settings", T, {"auto_permission": "false"})[0] == 400
+      and len(applied) == 2)
+check("K5 an empty body changes nothing",
+      call("/v1/settings", T, {})[0] == 400 and len(applied) == 2)
+check("K6 it needs the token like everything else",
+      call("/v1/settings", None, {"auto_permission": False})[0] == 401
+      and len(applied) == 2)
+
 print("---- H: text is behind its own switch ----")
 text_on = {"on": False}
 ctx["text_enabled"] = lambda: text_on["on"]

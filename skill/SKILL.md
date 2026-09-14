@@ -71,6 +71,11 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
    `is due but the session is mid-turn; holding the 'continue' until it goes quiet`。
    这不是卡住，是刻意的。
 4. **切换模型的对话框** —— 属于「模型恢复」那套流程，不会被当成普通选择框顺手回车。
+5. **配套程序把自动回车关了** —— 日志 `api: settings auto_permission=off`
+   （或 `auto_choose=off`）。这是本机另一个程序（例如手机上远程批准的那种）
+   通过本地 API 关的，好让人来决定，Advanced 里的勾也跟着变了。之后的权限提示
+   不再自动放行是**预期行为**。`api: keys …` / `api: send …` 同理：那是配套程序
+   打的字，不是本工具自己发的。
 
 ## 排查：某个会话没被接上
 
@@ -81,7 +86,7 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
    开在了 Windows Terminal 的**标签页**里——只有**当前活动标签**会被读到，
    每个会话拖成独立窗口才都能被看住。
 2. **当时读得到屏幕吗** —— 附近有没有 `could not read the screen of #id`。
-3. **它是不是判断成「不该动」** —— 看有没有上面「故意不管」的四条。
+3. **它是不是判断成「不该动」** —— 看有没有上面「故意不管」的那几条。
 4. **发了但没送达吗** —— `retry send failed for …; will try again`
    说明按键没送出去（通常是发送瞬间焦点被别的窗口抢走），下一轮会自己重来。
 5. **是不是根本没到时间** —— `will fire at …` 那行写着预定时刻，

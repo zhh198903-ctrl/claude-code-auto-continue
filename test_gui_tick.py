@@ -1166,6 +1166,103 @@ check("Y9 a rescan picks up a renamed window straight away",
 check("Y10 and title_key follows it",
       row["title_key"] == "a completely new title")
 
+# =============================================================================
+print("---- Z2: the one API route that changes the user's settings ----")
+# test_local_api.py stops at the ctx boundary, so the half that actually
+# touches QSettings, the checkbox and the log had never run. That half is
+# where the surprise would live if it lived anywhere.
+import queue as _q3
+from PyQt6.QtCore import QSettings as _QS
+
+
+class _FakeSig:
+    def __init__(self): self.sent = []
+    def emit(self, *a): self.sent.append(a)
+
+
+_win = gui.MainWindow.__new__(gui.MainWindow)
+# A settings domain of its own: a test must never reach into the config a
+# running instance is using (this file learned that the hard way).
+_win.settings = _QS("auto_continue_selftest", "gui")
+_win.settings.clear()
+_win._auto_permission, _win._auto_choose = True, False
+_zlogs = []
+_win._append_log = lambda lvl, msg: _zlogs.append((lvl, msg))
+_win.sig_set_auto_answer = _FakeSig()
+
+_o = _q3.Queue(1)
+gui.MainWindow._api_apply_settings(_win, {"auto_permission": False}, _o)
+_res = _o.get_nowait()
+check("Z2a the caller is told the new state, not just 'ok'",
+      _res == {"ok": True, "permission_autoanswer": False,
+               "chooser_autoanswer": False})
+check("Z2b the flag the tick reads actually changed",
+      _win._auto_permission is False)
+check("Z2c and it is persisted, not just held in memory",
+      str(_win.settings.value("auto_permission")).lower() in ("false", "0"))
+check("Z2d the change is logged at fire level — same as a keystroke, "
+      "because it is the same kind of event",
+      _zlogs == [("fire", "api: settings auto_permission=off")])
+check("Z2e the watcher is told at once, not at the next dialog OK",
+      _win.sig_set_auto_answer.sent == [(False, False)])
+
+_zlogs.clear()
+_o = _q3.Queue(1)
+gui.MainWindow._api_apply_settings(_win, {"auto_permission": False}, _o)
+_o.get_nowait()
+check("Z2f setting it to what it already is says nothing — a client polling "
+      "this must not fill the log", _zlogs == [])
+_win.settings.clear()
+
+# The hop that crosses threads. Every check above calls the handler directly,
+# and test_local_api.py stubs the route — so the one piece that runs on a
+# DIFFERENT thread was never executed by any test, and it was broken: the
+# request hung for the full timeout on every call, caught only by driving a
+# real instance before release. This drives it from a genuine non-Qt thread,
+# the way an HTTP request does, and pumps the GUI event loop meanwhile.
+import threading as _thz
+from PyQt6.QtCore import QObject as _QObj, pyqtSignal as _pSig
+
+
+class _Host(_QObj):
+    sig_api_settings = _pSig(object, object)
+
+
+_host = _Host()
+_mw = gui.MainWindow.__new__(gui.MainWindow)
+_mw.settings = _QS("auto_continue_selftest", "gui")
+_mw.settings.clear()
+_mw._auto_permission, _mw._auto_choose = True, False
+_mw._append_log = lambda lvl, msg: None
+_mw.sig_set_auto_answer = _FakeSig()
+_mw.sig_api_settings = _host.sig_api_settings
+_host.sig_api_settings.connect(
+    lambda ch, o: gui.MainWindow._api_apply_settings(_mw, ch, o))
+
+_result = {}
+
+
+def _from_http_thread():
+    _result["r"] = gui.MainWindow._api_do_settings(
+        _mw, {"auto_permission": False})
+
+
+_t = _thz.Thread(target=_from_http_thread)
+_t0 = __import__("time").time()
+_t.start()
+while _t.is_alive() and __import__("time").time() - _t0 < 15:
+    _app.processEvents()          # the GUI thread doing its job
+    __import__("time").sleep(0.01)
+_t.join(1)
+_elapsed = __import__("time").time() - _t0
+check("Z2g a request from a non-Qt thread completes instead of hanging",
+      _result.get("r", {}).get("ok") is True)
+check(f"Z2h and does so promptly, not by riding out the timeout "
+      f"({_elapsed:.2f}s)", _elapsed < 3)
+check("Z2i and the change really landed",
+      _mw._auto_permission is False)
+_mw.settings.clear()
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

@@ -3323,6 +3323,10 @@ class MainWindow(QMainWindow):
     sig_api_focus = pyqtSignal(int, object)
     sig_api_text = pyqtSignal(int, int, object)
     sig_api_scan = pyqtSignal(int, object)
+    # Delivered to the GUI thread (settings touch widgets). Emitted from
+    # an HTTP thread, so Qt queues it — see _api_do_settings for why a
+    # timer cannot do this job.
+    sig_api_settings = pyqtSignal(object, object)
     sig_set_model_overrides = pyqtSignal(dict)
     sig_set_after_finish = pyqtSignal(dict)
     sig_set_after_finish_loops = pyqtSignal(dict)
@@ -3357,6 +3361,7 @@ class MainWindow(QMainWindow):
             # tool will answer permission prompts before they can.
             "auto_permission": lambda: bool(self._auto_permission),
             "auto_choose": lambda: bool(self._auto_choose),
+            "settings": self._api_do_settings,
         })
         self._api_last_send: dict = {}
         self._api_last_scan: dict = {}
@@ -3842,6 +3847,7 @@ class MainWindow(QMainWindow):
         self.sig_api_focus.connect(self.worker.api_focus)
         self.sig_api_text.connect(self.worker.api_text)
         self.sig_api_scan.connect(self.worker.api_scan)
+        self.sig_api_settings.connect(self._api_apply_settings)
         self.sig_set_effort_overrides.connect(self.worker.set_effort_overrides)
         self.sig_set_model_overrides.connect(self.worker.set_model_overrides)
         self.sig_set_after_finish.connect(self.worker.set_after_finish)
@@ -4382,6 +4388,63 @@ class MainWindow(QMainWindow):
                 self._local_api.broker.publish(event, data)
         except Exception:
             pass
+
+    def _api_do_settings(self, changes: dict) -> dict:
+        """Change an answering switch on a caller's behalf.
+
+        The only route that alters what the user configured. A caller holding
+        the token can already type anything into any session, so this grants
+        no new power — but a checkbox changing underneath the person who
+        ticked it is a surprise, and the two things that stop it being one are
+        here: a line in the log at the same level as a keystroke, and the GUI
+        following along so the dialog never disagrees with reality.
+
+        Marshalled onto the GUI thread because it touches widgets; the HTTP
+        thread only waits for the answer.
+        """
+        out = queue.Queue(1)
+        # A signal, not QTimer.singleShot. singleShot creates its timer in the
+        # CALLING thread, and this is called on an HTTP thread that has no Qt
+        # event loop — so the timer never fired, the handler never ran, and
+        # every request hung for the full timeout. Caught by driving a real
+        # instance before release (2026-09-14): the unit tests called the
+        # handler directly and stubbed the route, so the one hop that crosses
+        # threads was never executed by any of them. A signal emitted from a
+        # foreign thread is delivered queued to the receiver's own thread,
+        # which is exactly what send/keys/focus already rely on.
+        self.sig_api_settings.emit(dict(changes), out)
+        try:
+            return out.get(timeout=local_api.SEND_TIMEOUT_S)
+        except Exception:
+            return {"ok": False, "reason": "busy"}
+
+    def _api_apply_settings(self, changes: dict, out) -> None:
+        try:
+            for key, want in changes.items():
+                want = bool(want)
+                cur = (self._auto_permission if key == "auto_permission"
+                       else self._auto_choose)
+                if cur == want:
+                    continue
+                if key == "auto_permission":
+                    self._auto_permission = want
+                else:
+                    self._auto_choose = want
+                self.settings.setValue(key, want)
+                self._append_log(
+                    "fire",
+                    f"api: settings {key}={'on' if want else 'off'}")
+            self.sig_set_auto_answer.emit(self._auto_choose,
+                                          self._auto_permission)
+            out.put({"ok": True,
+                     "permission_autoanswer": bool(self._auto_permission),
+                     "chooser_autoanswer": bool(self._auto_choose)})
+        except Exception as exc:
+            try:
+                out.put({"ok": False,
+                         "reason": f"error: {type(exc).__name__}"})
+            except Exception:
+                pass
 
     def _api_text_enabled(self) -> bool:
         """Separate from the main switch, and off unless asked for.
@@ -5575,6 +5638,15 @@ being typed somewhere else.</p>
 ESC, say), bring a window forward, and subscribe to a live event stream that
 carries every pass, every log line and every time this tool types something
 of its own.</p>
+<p>A caller can also <b>turn the two answering switches on this tab off, or
+back on</b>, and only those two. A companion program offering approval from a phone or a watch
+is racing this tool: it answers a permission prompt within a pass, so a person
+deciding remotely can find the prompt already gone. Rather than leave that to
+be discovered, such a program can switch the automatic answer off. When it
+does, the checkbox here changes with it and the log says
+<code>api: settings auto_permission=off</code> at <b>fire</b> level — the same
+level as a keystroke, because it is the same kind of event: something outside
+this window changed what happens in your sessions.</p>
 <p><b>Reading what is on screen is a separate switch, and it is off.</b> The
 other capabilities are about a window's <i>status</i> — which one is waiting,
 which is mid-turn. Session contents are the conversation itself: the code,
