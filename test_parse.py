@@ -226,6 +226,17 @@ for i, (text, expected) in enumerate(retry_samples):
 
 # ---------- parse_econnreset_stuck ----------
 econn_samples = [
+    # Reported live 2026-09-13 by a user whose session sat at its prompt
+    # behind two of these while nothing poked it: no errno, no parentheses,
+    # so none of the wordings below matched and the tool saw a healthy idle
+    # window. Same stuck-until-continue state as the rest.
+    ("  API Err" "or: No resp" "onse from API\n"
+     "  Crunched for 15m 33s · done 12:48\n> \n", True),
+    # ...but not once the session has started streaming again after it, and
+    # not when the text is only sitting in the user's own input box.
+    ("  API Err" "or: No resp" "onse from API\n"
+     "  ✽ Composing… (12s · ↓ 92 tokens)\n", False),
+    (">\xa0API Err" "or: No resp" "onse from API\n", False),
     # Exact form seen in the screenshot.
     ("⎿  · 电域模块 (S参数/RX Filter/CTLE/RX FFE/DFE) 直连光信号源...\n"
      "  API Error: Unable to conn" "ect to API (ECONNRESET)\n"
@@ -464,6 +475,45 @@ for i, (text, expected) in enumerate(switch_model_samples):
     if not ok:
         failures += 1
 
+
+# ---------- classify_prompt ----------
+# The local API reports WHICH kind of waiting a window is in, because the
+# answers differ: an ordinary chooser and a permission prompt both take Enter,
+# the limit picker's other option costs money and must never be auto-answered,
+# and the switch-model dialog belongs to the recovery script. Classifying by
+# "is it a chooser" alone would flatten all four into one and lose exactly the
+# distinction that decides what is safe to do about it.
+_CN = chr(0x276F)
+_CV = chr(0x2502)
+_CQ = "Claude has written up a plan. Would you like to proceed?"
+_C_plain = f"{_CQ}{chr(10)}{_CN} 1" ". Yes{chr(10)}  2" ". No"
+_C_plain = _CQ + chr(10) + _CN + " 1" ". Yes" + chr(10) + "  2" ". No"
+_C_boxed = ("Ready?" + chr(10) + _CV + " " + _CQ + chr(10)
+            + _CV + " " + _CN + " 1" ". Yes" + chr(10) + _CV + "   2" ". No")
+_P_q = "Do you want to make this edit to parser.py?"
+_C_perm = (_P_q + chr(10) + _CN + " 1" ". Yes" + chr(10)
+           + "  2" ". Yes, and don" + chr(0x2019) + "t ask again this session"
+           + chr(10) + "  3" ". No, tell Claude what to do differently")
+
+_r = ac.classify_prompt(_C_plain)
+check_reset("classify: a plain chooser is 'chooser'",
+            _r and _r["kind"] == "chooser")
+check_reset("classify: it carries the QUESTION, not the option row",
+            _r and _r["text"] == _CQ)
+_r = ac.classify_prompt(_C_boxed)
+check_reset("classify: a boxed chooser reads the same, box rule stripped",
+            _r and _r["kind"] == "chooser" and _r["text"] == _CQ)
+_r = ac.classify_prompt(_C_perm)
+check_reset("classify: a permission prompt is not just 'chooser'",
+            _r and _r["kind"] == "permission" and _r["text"] == _P_q)
+check_reset("classify: an idle screen is not waiting on anything",
+            ac.classify_prompt("some output" + chr(10) + "> ") is None)
+check_reset("classify: an unreadable screen is None, not an error",
+            ac.classify_prompt("") is None)
+check_reset("classify: the text is capped so a watch face can show it",
+            len((ac.classify_prompt(
+                "x" * 400 + chr(10) + _CN + " 1" ". Yes" + chr(10)
+                + "  2" ". No") or {}).get("text", "")) <= ac.PROMPT_TEXT_MAX)
 
 # ---------- parse_limit_prompt ----------
 # The interactive limit picker. NOTE: key phrases below are built via string

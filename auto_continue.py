@@ -42,7 +42,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "2.0.18"
+APP_VERSION = "2.1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +137,12 @@ ECONNRESET_RE = re.compile(
     r"Unable\s+to\s+connect\s+to\s+API\s*"
     r"\(\s*(?:E[A-Z0-9_]{2,}|UND_ERR_[A-Z_]+)\s*\)"
     r"|fetch\s+failed"
+    # Reported live 2026-09-13: a session sat at its prompt behind two of
+    # these and nothing ever poked it, because none of the wordings above
+    # matched. This one carries no errno and no parentheses — the request
+    # simply never came back — but it leaves the session in exactly the same
+    # place, waiting for a 'continue' that only a human was going to type.
+    r"|No\s+response\s+from\s+API"
     r")",
     re.IGNORECASE,
 )
@@ -1052,6 +1058,72 @@ def chooser_signature(text: str, pattern=None):
         return None
     return hashlib.sha1(
         m.group(0).encode("utf-8", "replace")).hexdigest()[:12]
+
+
+PROMPT_TEXT_MAX = 200
+
+
+def _prompt_line(text: str, m) -> str:
+    """The line a human would read to know what is being asked.
+
+    For a chooser the match starts at the "> 1." row, but the QUESTION sits on
+    the line above it — that is the part worth showing on a watch face. Fall
+    back to the matched line when there is nothing above, so this never comes
+    back empty just because the prompt was drawn at the top of the viewport.
+    """
+    start = text.rfind("\n", 0, m.start()) + 1
+    above_end = start - 1
+    if above_end > 0:
+        above_start = text.rfind("\n", 0, above_end) + 1
+        above = text[above_start:above_end].strip()
+        # Strip the box drawing a TUI wraps its prompts in; what is left is
+        # either the question or nothing worth showing.
+        above = above.strip("│┃|╎ \t")
+        if len(above) > 3 and not above.strip("─━═╌ \t") == "":
+            return above[:PROMPT_TEXT_MAX]
+    line_end = text.find("\n", m.start())
+    line = text[start:line_end if line_end != -1 else len(text)]
+    return line.strip().strip("│┃|╎ \t")[:PROMPT_TEXT_MAX]
+
+
+def classify_prompt(text: str, chooser_pattern=None, permission_pattern=None,
+                    limit_pattern=None, limit_banner_pattern=None,
+                    switch_pattern=None):
+    """What this window is waiting on, or None if it is not waiting.
+
+    A companion program showing "this session needs you" has to say WHICH kind
+    of waiting it is, because the answers differ: a permission prompt and an
+    ordinary chooser both take Enter, the limit picker's other option costs
+    money and must never be answered automatically, and the switch-model
+    dialog belongs to the recovery script rather than to whoever is watching.
+
+    Order is most-specific-first on purpose. The limit picker and the
+    switch-model dialog are both choosers as far as CHOOSER_RE is concerned,
+    so classifying by "is it a chooser" first would label every one of them
+    the same and lose exactly the distinction that decides what is safe.
+    """
+    if not text:
+        return None
+    if parse_limit_prompt(text, limit_pattern, limit_banner_pattern):
+        kind = "limit_picker"
+        rx = LIMIT_PROMPT_RE
+    elif parse_switch_model_prompt(text, switch_pattern):
+        kind = "switch_model"
+        rx = switch_pattern or SWITCH_MODEL_RE
+    elif parse_permission_prompt(text, chooser_pattern, permission_pattern):
+        kind = "permission"
+        rx = None
+    elif parse_chooser_prompt(text, chooser_pattern, permission_pattern):
+        kind = "chooser"
+        rx = None
+    else:
+        return None
+    if rx is None:
+        m = _chooser_match(text, chooser_pattern)
+    else:
+        ms = list(rx.finditer(text))
+        m = ms[-1] if ms else None
+    return {"kind": kind, "text": _prompt_line(text, m) if m else ""}
 
 
 def composer_has_draft(text: str) -> bool:

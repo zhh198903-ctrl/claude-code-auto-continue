@@ -237,8 +237,38 @@ check("B3 re-poke after the retry interval", SENT == [(2, ["continue"])])
 SENT.clear()
 TEXTS[2] = "recovered, back to work"
 w._tick()
-check("B4 recovery clears the retry state",
-      w._states[2].retry_last_sent_utc is None and not SENT)
+check("B4 recovery ends the outage and types nothing more",
+      not w._states[2].retry_active and not SENT)
+# The send stamp deliberately SURVIVES recovery. It used to be cleared here,
+# and that is what let a window which keeps failing and recovering be poked
+# far more often than the interval allows: every recovery re-armed an
+# immediate poke. Measured overnight on 2026-09-14 — one window took 83
+# 'continue's in 8.4 hours, 71 of the 82 gaps under the configured 600s.
+check("B4a but the send stamp survives it, so the interval is a real floor",
+      w._states[2].retry_last_sent_utc is not None)
+
+# The property that matters: fail, recover, fail again inside the interval,
+# and the second failure must NOT be poked yet.
+TEXTS[2] = RETRY_EXHAUSTED
+advance(5)                       # well inside w._retry_interval, whatever it is
+w._tick()
+check("B4b a failure returning inside the interval waits its turn",
+      not SENT)
+advance(w._retry_interval)
+w._tick()
+check("B4c and is poked once the interval has actually passed",
+      SENT == [(2, ["continue"])])
+SENT.clear()
+# ...while a window quiet for hours is not made to wait at all: its stamp is
+# old, so a genuinely new outage fires at once.
+TEXTS[2] = "all quiet"
+w._tick()
+advance(6 * 3600)
+TEXTS[2] = RETRY_EXHAUSTED
+w._tick()
+check("B4d a new outage hours later still fires immediately",
+      SENT == [(2, ["continue"])])
+SENT.clear()
 
 # A screen that could not be READ is not a screen with no error on it. Both
 # arrive as an empty tail, and treating the unreadable one as recovery threw
@@ -979,6 +1009,162 @@ check("T4 the boundary is exclusive, so 6h exactly still waits",
 _gsrc = open("gui.py", encoding="utf-8").read()
 check("T5 the scheduler consults the horizon before arming a countdown",
       "STALE_RESET_H" in _gsrc.split("new_reset = next_reset_datetime")[1][:2000])
+
+# =============================================================================
+print("---- V: the local API hands typing to the watcher ----")
+# The HTTP side is covered in test_local_api.py. What matters here is the far
+# end: an external caller must go through the same window lookup and the same
+# dry-run promise as the tool's own sends, because it reaches the terminal by
+# exactly the same route.
+import queue as _q                                          # noqa: E402
+
+set_now(T0)
+reset([(31, "win")], {31: IDLE})
+w = new_watcher()
+LOGS_V = []
+w.log.connect(lambda k, m: LOGS_V.append((k, m)))
+SENT.clear()
+
+_out = _q.Queue(1)
+w.api_send(31, ["hello"], _out)
+check("V1 an external send reaches the window",
+      _out.get_nowait() == {"ok": True} and SENT == [(31, ["hello"])])
+check("V2 and is logged as coming from outside, at fire level",
+      any(k == "fire" and "api: send" in m for k, m in LOGS_V))
+
+SENT.clear()
+_out = _q.Queue(1)
+w.api_send(999, ["hello"], _out)
+check("V3 an hwnd that is not there says so and types nothing",
+      _out.get_nowait() == {"ok": False, "reason": "no_window"} and not SENT)
+
+# Dry-run is a promise that nothing gets typed. It has to hold for callers
+# too, or the checkbox means less than it says.
+SENT.clear()
+LOGS_V.clear()
+w.set_dry_run(True)
+_out = _q.Queue(1)
+w.api_send(31, ["hello"], _out)
+res = _out.get_nowait()
+check("V4 dry-run types nothing for an external caller either",
+      res.get("ok") and res.get("dry_run") and not SENT)
+check("V5 and still says a caller asked",
+      any("api: send" in m for _, m in LOGS_V))
+w.set_dry_run(False)
+
+# A send that the foreground check refuses must be reported, not swallowed.
+SENT.clear()
+_real_send = gui.send_text_lines
+gui.send_text_lines = lambda *a, **k: False
+try:
+    _out = _q.Queue(1)
+    w.api_send(31, ["hello"], _out)
+    check("V6 a refused send is reported as foreground, not as success",
+          _out.get_nowait() == {"ok": False, "reason": "foreground"})
+finally:
+    gui.send_text_lines = _real_send
+
+# =============================================================================
+print("---- X: the snapshot says what a window is waiting on ----")
+# A companion program showing "this session needs you" reads this field. It
+# follows the same rule as `running`: only a readable pass may change it, or a
+# UIA hiccup would report every waiting window as no longer waiting — which is
+# the one moment someone is actually waiting to be told.
+_XN = chr(0x276F)
+_XQ = "Claude has written up a plan. Would you like to proceed?"
+CHOOSE = _XQ + chr(10) + _XN + " 1" ". Yes" + chr(10) + "  2" ". No"
+
+set_now(T0)
+reset([(41, "win")], {41: CHOOSE})
+w = new_watcher()
+w._tick()
+row = w._make_snapshot()[0]
+check("X1 a waiting window reports what kind of waiting",
+      row["prompt"] and row["prompt"]["kind"] == "chooser")
+check("X2 and carries the question, not the option row",
+      row["prompt"]["text"] == _XQ)
+check("X3 with the time it was first seen",
+      row["prompt"]["seen_at"] is not None)
+_first_seen = row["prompt"]["seen_at"]
+
+# The same prompt still there a minute later is not a NEW prompt: re-stamping
+# it every pass would make "waiting 4 minutes" impossible to show.
+advance(60)
+w._tick()
+check("X4 seen_at marks when it appeared, not when it was last looked at",
+      w._make_snapshot()[0]["prompt"]["seen_at"] == _first_seen)
+
+# An unreadable pass must not report the prompt as gone.
+TEXTS[41] = ""
+advance(60)
+w._tick()
+check("X5 an unreadable pass keeps the last known answer",
+      w._make_snapshot()[0]["prompt"] is not None)
+
+# ...but a readable pass showing no prompt does clear it.
+TEXTS[41] = "all done here" + chr(10) + "> "
+advance(60)
+w._tick()
+check("X6 a readable pass with nothing waiting clears it",
+      w._make_snapshot()[0]["prompt"] is None)
+
+# =============================================================================
+print("---- Y: the on-demand rescan reads, and only reads ----")
+# A caller polling this every few seconds must never be able to make the tool
+# type. Deciding to send belongs to the tick alone; this refreshes what is
+# KNOWN about a window and returns it.
+import queue as _q2
+
+set_now(T0)
+reset([(51, "win")], {51: IDLE})
+w = new_watcher()
+w._tick()
+SENT.clear()
+TEXTS[51] = CHOOSE                      # a prompt appears between passes
+out = _q2.Queue(1)
+w.api_scan(51, out)
+res = out.get_nowait()
+check("Y1 a rescan sees a prompt the last pass could not have",
+      res["ok"] and res["window"]["prompt"]["kind"] == "chooser")
+check("Y2 and types nothing while doing it", not SENT)
+check("Y3 the refreshed row is the same shape the snapshot serves",
+      set(res["window"]) == set(w._make_snapshot()[0]))
+check("Y4 and the snapshot now agrees with it",
+      w._make_snapshot()[0]["prompt"] is not None)
+
+out = _q2.Queue(1)
+w.api_scan(999, out)
+check("Y5 an hwnd that is not there says so",
+      out.get_nowait() == {"ok": False, "reason": "no_window"})
+
+TEXTS[51] = ""
+out = _q2.Queue(1)
+w.api_scan(51, out)
+check("Y6 an unreadable screen is read_blind, not an empty screen",
+      out.get_nowait() == {"ok": False, "reason": "read_blind"})
+check("Y7 and the previous answer still stands",
+      w._make_snapshot()[0]["prompt"] is not None)
+
+# Dry-run is a promise about keystrokes; reading is not a keystroke.
+TEXTS[51] = CHOOSE
+w.set_dry_run(True)
+out = _q2.Queue(1)
+w.api_scan(51, out)
+check("Y8 dry-run does not suppress a read", out.get_nowait()["ok"])
+w.set_dry_run(False)
+
+# Claude Code renames its window to a summary of the conversation as soon as
+# the first message lands. A caller matching sessions to windows by name would
+# be told the old title until the next full pass — a minute of looking at the
+# wrong window — so the rescan re-reads it.
+WINDOWS[0].Name = "✳ a completely new title"
+out = _q2.Queue(1)
+w.api_scan(51, out)
+row = out.get_nowait()["window"]
+check("Y9 a rescan picks up a renamed window straight away",
+      row["title"] == "✳ a completely new title")
+check("Y10 and title_key follows it",
+      row["title_key"] == "a completely new title")
 
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")

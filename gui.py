@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import html
 import os
+import queue
 import re as _re
 import sys
 import time
@@ -90,6 +91,7 @@ from auto_continue import (
     current_model, fable_refusal_distance, fable_refusal_id,
     chooser_signature, composer_has_draft,
     parse_chooser_prompt, parse_econnreset_stuck,
+    classify_prompt,
     parse_fable_picker, parse_model_quota, parse_permission_prompt,
     parse_limit_message,
     parse_limit_prompt, parse_oauth_expired, parse_retry_exhausted,
@@ -97,6 +99,7 @@ from auto_continue import (
     send_continue, send_keys, send_text_lines, session_running,
 )
 import updater
+import local_api
 
 
 # Effort levels offered in the per-window dropdown, matching Claude Code's
@@ -732,6 +735,15 @@ class _WState:
     # True while the window is enumerated but its text cannot be read,
     # so the log says so once per episode instead of every tick.
     read_blind: bool = False
+    # Whether the last readable pass saw a turn streaming. Kept on the
+    # state so the snapshot can report it without re-reading a screen.
+    running: bool = False
+    # What this window is waiting on, for the local API: a dict with a
+    # kind and the question, or None. Same rule as `running` -- only a
+    # readable pass may change it, so an unreadable one leaves the last
+    # known answer standing instead of reporting 'not waiting'.
+    prompt: Optional[dict] = None
+    prompt_at: Optional[datetime] = None
     # Interactive limit-picker ("What do you want to do?") bookkeeping.
     prompt_last_sent_utc: Optional[datetime] = None
     prompt_active: bool = False
@@ -804,6 +816,7 @@ class Watcher(QObject):
 
     def __init__(self):
         super().__init__()
+        self._in_tick = False
         self._states: dict[int, _WState] = {}
         # Handles the OS still reports as open that a pass did not
         # enumerate; kept so the warning fires on change, not every tick.
@@ -1213,6 +1226,17 @@ class Watcher(QObject):
         self._tick_safely()
 
     def _tick(self) -> None:
+        # Read by the local API from its own thread so it can answer
+        # "busy" immediately. Qt would queue an external send behind the
+        # whole pass anyway, and a caller wanting an answer now would
+        # otherwise sit through a full UIA sweep before hearing one.
+        self._in_tick = True
+        try:
+            self._tick_body()
+        finally:
+            self._in_tick = False
+
+    def _tick_body(self) -> None:
         now = datetime.now(pytz.UTC)
         cooldown = timedelta(minutes=15)
         buffer = timedelta(seconds=self._buffer)
@@ -1330,6 +1354,13 @@ class Watcher(QObject):
                 elif st.read_blind:
                     st.read_blind = False
                     self.log.emit("info", f"screen of {_wt} readable again")
+                # Only a readable pass can say anything about this; an
+                # unreadable one leaves the previous answer standing rather
+                # than reporting a streaming turn as finished.
+                if tail:
+                    # Same routine the on-demand rescan runs, so the two
+                    # can never disagree about what a screen means.
+                    self._read_derived(st, tail, now)
                 dr = "[dry-run] " if self._dry_run else ""
 
                 # Isolated: this is the only block driven by user-authored
@@ -2423,7 +2454,18 @@ class Watcher(QObject):
                             f"recovered"
                         )
                         st.retry_active = False
-                        st.retry_last_sent_utc = None
+                        # Deliberately NOT clearing retry_last_sent_utc. It is
+                        # the floor on how often this window gets typed into,
+                        # and wiping it on every recovery made that floor mean
+                        # nothing for a window that keeps failing and coming
+                        # back: each recovery re-armed an immediate poke.
+                        # Measured on this machine overnight on 2026-09-14 —
+                        # one window took 83 'continue's in 8.4 hours, 71 of
+                        # the 82 gaps under the configured 600s, median 240s.
+                        # Every single cycle was defensible on its own; the
+                        # sum of them was not. Keeping the stamp costs nothing
+                        # real: a window quiet for hours has an old stamp, so
+                        # a genuinely new outage still fires at once.
                         if st.status == ST_RETRY:
                             st.status = ST_IDLE
 
@@ -2730,21 +2772,253 @@ class Watcher(QObject):
         # Snapshot for the GUI.
         self.snapshot.emit(self._make_snapshot())
 
+    @pyqtSlot(int, object, object)
+    def api_send(self, hwnd: int, lines: list, out) -> None:
+        """Type on behalf of an external caller, ON THE WATCHER THREAD.
+
+        UI Automation is only initialised here, so the HTTP thread cannot do
+        this itself -- it hands the job over and waits. Running on this thread
+        also makes the serialisation free: Qt delivers this between passes,
+        never during one, so an external send can never interleave with the
+        keystrokes the tool is sending on its own account.
+
+        The result goes back through `out` rather than a return value, since
+        a queued slot invocation has nowhere to return to.
+        """
+        try:
+            if self._dry_run:
+                # Dry-run is a promise that nothing gets typed. It has to hold
+                # for callers too, or the checkbox means less than it says.
+                self.log.emit("fire", f"[dry-run] api: send hwnd={hwnd:#x} "
+                                      f"lines={len(lines)}")
+                out.put({"ok": True, "dry_run": True})
+                return
+            target = None
+            for w in find_terminal_windows():
+                try:
+                    if int(w.NativeWindowHandle or 0) == int(hwnd):
+                        target = w
+                        break
+                except Exception:
+                    continue
+            if target is None:
+                out.put({"ok": False, "reason": "no_window"})
+                return
+            # send_text_lines verifies the foreground actually landed on the
+            # target and refuses to type otherwise; a False here means nothing
+            # was typed, which is the answer the caller needs.
+            ok = send_text_lines(target, list(lines))
+            self.log.emit("fire", f"api: send hwnd={hwnd:#x} "
+                                  f"lines={len(lines)}"
+                                  + ("" if ok else " (refused)"))
+            out.put({"ok": True} if ok
+                    else {"ok": False, "reason": "foreground"})
+        except Exception as exc:
+            # Never let a caller take the watcher down with a bad request.
+            try:
+                out.put({"ok": False, "reason": f"error: {type(exc).__name__}"})
+            except Exception:
+                pass
+
+    def _api_find(self, hwnd: int):
+        """The one window with this handle, or None. On the watcher thread."""
+        for w in find_terminal_windows():
+            try:
+                if int(w.NativeWindowHandle or 0) == int(hwnd):
+                    return w
+            except Exception:
+                continue
+        return None
+
+    @pyqtSlot(int, str, object)
+    def api_keys(self, hwnd: int, keyspec: str, out) -> None:
+        """Send a raw keystroke on behalf of a caller, on the watcher thread.
+
+        Same promises as api_send: dry-run types nothing, a missing window is
+        reported rather than guessed at, and the foreground check inside
+        send_keys is what decides whether anything is typed at all.
+        """
+        try:
+            if self._dry_run:
+                self.log.emit("fire", f"[dry-run] api: keys hwnd={hwnd:#x} "
+                                      f"{keyspec!r}")
+                out.put({"ok": True, "dry_run": True})
+                return
+            target = self._api_find(hwnd)
+            if target is None:
+                out.put({"ok": False, "reason": "no_window"})
+                return
+            ok = send_keys(target, keyspec)
+            self.log.emit("fire", f"api: keys hwnd={hwnd:#x} {keyspec!r}"
+                                  + ("" if ok else " (refused)"))
+            out.put({"ok": True} if ok
+                    else {"ok": False, "reason": "foreground"})
+        except Exception as exc:
+            try:
+                out.put({"ok": False, "reason": f"error: {type(exc).__name__}"})
+            except Exception:
+                pass
+
+    @pyqtSlot(int, object)
+    def api_focus(self, hwnd: int, out) -> None:
+        """Bring a window forward without typing anything into it.
+
+        Unlike send/keys this changes nothing inside the session, so dry-run
+        does not suppress it: dry-run is a promise about keystrokes, and
+        pretending a window was not raised would be a different lie.
+        """
+        try:
+            target = self._api_find(hwnd)
+            if target is None:
+                out.put({"ok": False, "reason": "no_window"})
+                return
+            import ctypes
+            user32 = ctypes.windll.user32
+            user32.ShowWindow(int(hwnd), 9)     # SW_RESTORE
+            user32.SetForegroundWindow(int(hwnd))
+            user32.BringWindowToTop(int(hwnd))
+            # Windows refuses a foreground grab from a background process in
+            # some states and says nothing; report what actually happened
+            # rather than what was asked for.
+            ok = (int(user32.GetForegroundWindow() or 0) == int(hwnd))
+            self.log.emit("fire", f"api: focus hwnd={hwnd:#x}"
+                                  + ("" if ok else " (refused)"))
+            out.put({"ok": True} if ok
+                    else {"ok": False, "reason": "foreground"})
+        except Exception as exc:
+            try:
+                out.put({"ok": False, "reason": f"error: {type(exc).__name__}"})
+            except Exception:
+                pass
+
+    @pyqtSlot(int, int, object)
+    def api_text(self, hwnd: int, tail: int, out) -> None:
+        """Hand back what a session has on screen.
+
+        Gated by its own setting in the GUI — this is the session's contents,
+        not its status. Reading is done here because UI Automation only works
+        on this thread, and an unreadable window says so rather than coming
+        back as an empty screen, which is a different thing entirely.
+        """
+        try:
+            target = self._api_find(hwnd)
+            if target is None:
+                out.put({"ok": False, "reason": "no_window"})
+                return
+            text = read_terminal_text(target)
+            if not text:
+                out.put({"ok": False, "reason": "read_blind"})
+                return
+            out.put({"hwnd": hwnd, "text": text[-int(tail):]})
+        except Exception as exc:
+            try:
+                out.put({"ok": False, "reason": f"error: {type(exc).__name__}"})
+            except Exception:
+                pass
+
+    def _snapshot_row(self, st) -> dict:
+        """One window's row. Shared with the on-demand rescan, deliberately:
+        two places building "the same" row is how they stop being the same."""
+        return {
+            "hwnd": st.hwnd,
+            "title": st.title,
+            "status": st.status,
+            "reset_utc": st.reset_utc,
+            "last_sent_utc": st.last_sent_utc,
+            "retry_last_sent_utc": st.retry_last_sent_utc,
+            "tabs": st.tab_count,
+            "excluded": title_key(st.title) in self._excluded_titles,
+            "model": self._model_overrides.get(title_key(st.title), ""),
+            "effort": self._effort_overrides.get(title_key(st.title), ""),
+            # Added for the local API. title_key is what every per-window
+            # setting is keyed by, so a caller showing a window list needs the
+            # same identity the tool uses; running says whether typing now
+            # would land mid-turn; prompt says what it is waiting on.
+            "title_key": title_key(st.title),
+            "running": bool(st.running),
+            "prompt": (dict(st.prompt,
+                            seen_at=st.prompt_at.isoformat()
+                            if st.prompt_at else None)
+                       if st.prompt else None),
+        }
+
+    def _read_derived(self, st, tail: str, now) -> None:
+        """Re-derive the read-only facts about a window from its screen.
+
+        Shared by the tick and the on-demand rescan so the two cannot disagree
+        about what a screen means. Only the things that are READ live here —
+        deciding to type is the tick's business alone.
+        """
+        st.running = bool(session_running(tail))
+        _p = classify_prompt(
+            tail,
+            self._patterns.get('chooser'),
+            self._patterns.get('permission'),
+            self._patterns.get('limit_prompt'),
+            self._patterns.get('limit'),
+            self._patterns.get('switch_model'))
+        # seen_at marks when THIS prompt appeared, not when it was last seen:
+        # a watch showing "waiting 4 min" needs the former, and re-stamping it
+        # every pass would make every prompt look brand new forever.
+        if _p != st.prompt:
+            st.prompt_at = now if _p else None
+        st.prompt = _p
+
+    @pyqtSlot(int, object)
+    def api_scan(self, hwnd: int, out) -> None:
+        """Read one window NOW, instead of waiting for the next pass.
+
+        A 60-second pass is right for the job this tool exists to do; it is
+        useless for "a prompt appeared, tell me within seconds". Dropping the
+        global interval to match would spend UIA reads on every window all day
+        to serve the few seconds when one of them is actually waiting.
+
+        It READS and never acts. A caller polling this every few seconds must
+        not be able to make the tool type anything — deciding to send is the
+        tick's alone, so `status` is left exactly as the tick last set it.
+        """
+        try:
+            target = self._api_find(hwnd)
+            if target is None:
+                out.put({"ok": False, "reason": "no_window"})
+                return
+            st = self._states.get(int(hwnd))
+            if st is None:
+                # Known to the OS but not yet to the watcher: the first pass
+                # after it opened has not run. Nothing to update or return.
+                out.put({"ok": False, "reason": "no_window"})
+                return
+            # The title too, not just the screen. Claude Code renames its
+            # window to a summary of the conversation as soon as the first
+            # message lands, and a caller matching sessions to windows by name
+            # would otherwise be told the old one until the next full pass —
+            # up to a minute of looking at the wrong window. Reading it costs
+            # nothing here: the window object is already in hand.
+            try:
+                _t = target.Name
+                if _t:
+                    st.title = _t
+            except Exception:
+                pass        # a UIA hiccup on the title is not worth failing for
+            text = read_terminal_text(target)
+            tail = text[-SCAN_TAIL_CHARS:] if text else ""
+            if not tail:
+                # The previous values stand — an unreadable screen is not a
+                # screen with nothing on it.
+                out.put({"ok": False, "reason": "read_blind"})
+                return
+            self._read_derived(st, tail, datetime.now(pytz.UTC))
+            out.put({"ok": True, "window": self._snapshot_row(st)})
+        except Exception as exc:
+            try:
+                out.put({"ok": False, "reason": f"error: {type(exc).__name__}"})
+            except Exception:
+                pass
+
     def _make_snapshot(self) -> list:
         out = []
         for st in self._states.values():
-            out.append({
-                "hwnd": st.hwnd,
-                "title": st.title,
-                "status": st.status,
-                "reset_utc": st.reset_utc,
-                "last_sent_utc": st.last_sent_utc,
-                "retry_last_sent_utc": st.retry_last_sent_utc,
-                "tabs": st.tab_count,
-                "excluded": title_key(st.title) in self._excluded_titles,
-                "model": self._model_overrides.get(title_key(st.title), ""),
-                "effort": self._effort_overrides.get(title_key(st.title), ""),
-            })
+            out.append(self._snapshot_row(st))
         # Stable ordering: retry (network down) / limit picker are the most
         # urgent, then rate-limit pending, then idle, then excluded.
         order = {ST_RETRY: 0, ST_PROMPT: 1, ST_FABLE: 2, ST_FIRING: 3,
@@ -3042,6 +3316,13 @@ class MainWindow(QMainWindow):
     sig_unexclude = pyqtSignal(str)
     sig_clear_cooldown = pyqtSignal(int)
     sig_set_effort_overrides = pyqtSignal(dict)
+    # (hwnd, lines, result-queue) — the local API hands typing over to
+    # the watcher thread, which is the only one with UIA initialised.
+    sig_api_send = pyqtSignal(int, object, object)
+    sig_api_keys = pyqtSignal(int, str, object)
+    sig_api_focus = pyqtSignal(int, object)
+    sig_api_text = pyqtSignal(int, int, object)
+    sig_api_scan = pyqtSignal(int, object)
     sig_set_model_overrides = pyqtSignal(dict)
     sig_set_after_finish = pyqtSignal(dict)
     sig_set_after_finish_loops = pyqtSignal(dict)
@@ -3059,6 +3340,26 @@ class MainWindow(QMainWindow):
 
         self.settings = QSettings("auto_continue", "gui")
         self._latest_snapshot: list = []
+        # Local API: the object exists even when the listener is switched off,
+        # so _api_apply() can be called unconditionally from either direction.
+        self._local_api = local_api.LocalApi({
+            "version": APP_VERSION,
+            "token": "",                    # filled in by _api_apply
+            "enabled": self._api_enabled,
+            "text_enabled": self._api_text_enabled,
+            "snapshot": self._api_snapshot,
+            "send": self._api_do_send,
+            "keys": self._api_do_keys,
+            "focus": self._api_do_focus,
+            "text": self._api_do_text,
+            "scan": self._api_do_scan,
+            # Reported so a companion program can tell its user that this
+            # tool will answer permission prompts before they can.
+            "auto_permission": lambda: bool(self._auto_permission),
+            "auto_choose": lambda: bool(self._auto_choose),
+        })
+        self._api_last_send: dict = {}
+        self._api_last_scan: dict = {}
         # Must exist before _load_settings runs, because _load_settings
         # toggles widgets that fire valueChanged → _save_settings, which
         # reads this attribute. Empty list is the right default.
@@ -3139,6 +3440,15 @@ class MainWindow(QMainWindow):
         self._tick_timer.setInterval(1000)
         self._tick_timer.timeout.connect(self._refresh_countdowns)
         self._tick_timer.start()
+
+        # The listener gets knocked on once a minute. Cheap (a loopback
+        # connect), and it is the only thing that can tell a serving API from
+        # one that merely thinks it is serving.
+        self._api_dead_since = None
+        self._api_health_timer = QTimer(self)
+        self._api_health_timer.setInterval(60000)
+        self._api_health_timer.timeout.connect(self._api_health)
+        self._api_health_timer.start()
 
         # Auto-check for updates once per launch (silent unless a newer
         # version exists). Delayed ~5s so startup/worker init isn't blocked;
@@ -3527,6 +3837,11 @@ class MainWindow(QMainWindow):
         self.sig_exclude.connect(self.worker.cmd_exclude)
         self.sig_unexclude.connect(self.worker.cmd_unexclude)
         self.sig_clear_cooldown.connect(self.worker.cmd_clear_cooldown)
+        self.sig_api_send.connect(self.worker.api_send)
+        self.sig_api_keys.connect(self.worker.api_keys)
+        self.sig_api_focus.connect(self.worker.api_focus)
+        self.sig_api_text.connect(self.worker.api_text)
+        self.sig_api_scan.connect(self.worker.api_scan)
         self.sig_set_effort_overrides.connect(self.worker.set_effort_overrides)
         self.sig_set_model_overrides.connect(self.worker.set_model_overrides)
         self.sig_set_after_finish.connect(self.worker.set_after_finish)
@@ -3545,6 +3860,9 @@ class MainWindow(QMainWindow):
         self.worker.running_changed.connect(self._on_running_changed)
 
         self.worker_thread.start()
+        # Only now: the API hands sends to the watcher, so there has to be a
+        # watcher to hand them to before anything can connect.
+        self._api_apply()
 
     # ---- Updater plumbing -----------------------------------------------
 
@@ -3893,6 +4211,215 @@ class MainWindow(QMainWindow):
         self._append_log("info", f"redacted log exported ({n} lines)")
         QMessageBox.information(self, "Export log", f"Saved to: {path}")
 
+    # ---- local API ------------------------------------------------------
+
+    def _api_enabled(self) -> bool:
+        return bool(self.settings.value("local_api/enabled", True, type=bool))
+
+    def _api_port(self) -> int:
+        try:
+            return int(self.settings.value("local_api/port",
+                                           local_api.DEFAULT_PORT))
+        except (TypeError, ValueError):
+            return local_api.DEFAULT_PORT
+
+    def _api_token(self) -> str:
+        """The token, minted once and kept. Rotating it on every start would
+        break any client already holding one, for no gain — it never leaves
+        this machine."""
+        tok = self.settings.value("local_api/token", "", type=str)
+        if not tok:
+            tok = local_api.new_token()
+            self.settings.setValue("local_api/token", tok)
+        return tok
+
+    def _api_snapshot(self) -> dict:
+        """Whatever the last pass saw. Deliberately not a fresh UIA sweep:
+        that would run on the HTTP thread, where UIA is not initialised, and
+        it would let any caller slow the watcher down by polling."""
+        rows = []
+        for r in (self._latest_snapshot or []):
+            row = dict(r)
+            for k in ("reset_utc", "last_sent_utc", "retry_last_sent_utc"):
+                v = row.get(k)
+                row[k] = v.isoformat() if hasattr(v, "isoformat") else None
+            rows.append(row)
+        return {"ts": int(time.time() * 1000), "windows": rows}
+
+    def _api_handoff(self, emit, rate_limited: bool = True,
+                     hwnd: int = 0) -> dict:
+        """Put an action on the watcher thread and wait for its answer.
+
+        Every external action goes through here so they all get the same
+        three refusals — no watcher, too soon, mid-pass — rather than each
+        endpoint inventing its own idea of when it is safe to act.
+        """
+        if self.worker is None:
+            return {"ok": False, "reason": "disabled"}
+        now = time.time()
+        if rate_limited:
+            if now - self._api_last_send.get(int(hwnd), 0.0) < \
+                    local_api.MIN_SEND_GAP_S:
+                return {"ok": False, "reason": "rate_limited"}
+        if getattr(self.worker, "_in_tick", False):
+            # Say so rather than queue it: the contract leaves it to the caller
+            # whether a keystroke several seconds late is still wanted.
+            return {"ok": False, "reason": "busy"}
+        if rate_limited:
+            self._api_last_send[int(hwnd)] = now
+        out = queue.Queue(1)
+        emit(out)
+        try:
+            return out.get(timeout=local_api.SEND_TIMEOUT_S)
+        except Exception:
+            return {"ok": False, "reason": "busy"}
+
+    def _api_do_send(self, hwnd: int, lines: list) -> dict:
+        return self._api_handoff(
+            lambda out: self.sig_api_send.emit(int(hwnd), list(lines), out),
+            hwnd=hwnd)
+
+    def _api_do_keys(self, hwnd: int, keyspec: str) -> dict:
+        return self._api_handoff(
+            lambda out: self.sig_api_keys.emit(int(hwnd), str(keyspec), out),
+            hwnd=hwnd)
+
+    def _api_do_focus(self, hwnd: int) -> dict:
+        # Not rate-limited: raising a window twice in a row is harmless and a
+        # UI that follows the user's attention may legitimately ask often.
+        return self._api_handoff(
+            lambda out: self.sig_api_focus.emit(int(hwnd), out),
+            rate_limited=False)
+
+    def _api_do_scan(self, hwnd: int) -> dict:
+        """On-demand rescan. Its own rate limit, and no log line.
+
+        Not routed through _api_handoff's send throttle: that one exists to
+        stop a caller typing twice, and this types nothing. It gets a limit of
+        its own because each call is still a real UIA read — and no log line,
+        because a client polling every few seconds would otherwise bury the
+        log that everything else here depends on being readable.
+        """
+        now = time.time()
+        if now - self._api_last_scan.get(int(hwnd), 0.0) < \
+                local_api.MIN_SCAN_GAP_S:
+            return {"ok": False, "reason": "rate_limited"}
+        self._api_last_scan[int(hwnd)] = now
+        return self._api_handoff(
+            lambda out: self.sig_api_scan.emit(int(hwnd), out),
+            rate_limited=False)
+
+    def _api_do_text(self, hwnd: int, tail: int) -> dict:
+        # Reading changes nothing, so no rate limit — but it still crosses to
+        # the watcher, because UIA only works there.
+        return self._api_handoff(
+            lambda out: self.sig_api_text.emit(int(hwnd), int(tail), out),
+            rate_limited=False)
+
+    def _api_health(self) -> None:
+        """Knock on the listener; if nobody answers, bring it back and say so.
+
+        Added after the API stopped serving on 2026-09-13 while the app went
+        on believing it was up: `running` is a flag this code sets, not a fact
+        about the socket, so nothing noticed, nothing restarted it, and the
+        discovery file stayed on disk telling clients to keep trying a port
+        that answered nothing. Checking a flag you set yourself is not a check.
+        """
+        if not self._api_enabled():
+            return
+        if not self._local_api.running or self._local_api.alive():
+            self._api_dead_since = None
+            # A live socket nobody can find is a dead service as far as a
+            # client is concerned: the port and token are discovered through
+            # that file, so losing it is indistinguishable from the API being
+            # gone. It went missing for real on 2026-09-13 — deleted by
+            # something else entirely — while the port served on happily and
+            # nothing here noticed, because the only thing being checked was
+            # the socket.
+            if self._local_api.running and not os.path.exists(
+                    local_api.discovery_path()):
+                try:
+                    local_api.write_discovery(
+                        self._api_port(), self._api_token(), APP_VERSION)
+                    self._append_log(
+                        "warn",
+                        "local API token file had gone missing — written "
+                        "again so clients can find the port")
+                except OSError as exc:
+                    self._append_log(
+                        "warn", f"local API token file could not be "
+                                f"rewritten: {exc}")
+            return
+        self._append_log(
+            "warn",
+            "local API stopped answering on port "
+            f"{self._local_api.port} — restarting it")
+        try:
+            self._local_api.stop()
+        except Exception:
+            pass
+        self._api_apply()
+        if not (self._local_api.running and self._local_api.alive()):
+            # Say it once, not every minute: a line a minute would bury the
+            # log that the rest of this tool depends on being readable.
+            if not self._api_dead_since:
+                self._api_dead_since = datetime.now()
+                self._append_log(
+                    "err",
+                    "local API could not be restarted; companion programs "
+                    "cannot reach it until this is sorted out")
+
+    def _api_publish(self, event: str, data) -> None:
+        """Fan an event out to SSE subscribers, never letting that fail here.
+
+        This is called from the log and snapshot paths, which must keep
+        working whether or not anyone is listening and whether or not the
+        broker is in a good mood — a watchdog that stops watching because its
+        event stream broke would have its priorities backwards.
+        """
+        try:
+            if self._local_api.running:
+                self._local_api.broker.publish(event, data)
+        except Exception:
+            pass
+
+    def _api_text_enabled(self) -> bool:
+        """Separate from the main switch, and off unless asked for.
+
+        Window status is one thing; the contents of a session is another. The
+        user turned the API on knowing it could type — that is not the same as
+        agreeing to hand over what is on screen.
+        """
+        return bool(self.settings.value("local_api/text", False, type=bool))
+
+    def _api_apply(self) -> None:
+        """Bring the listener into line with the setting, in either direction."""
+        want = self._api_enabled()
+        if want and not self._local_api.running:
+            # The handler reads the token straight out of this dict, so it has
+            # to be there before the socket accepts anything.
+            self._local_api.ctx["token"] = self._api_token()
+            ok, err = self._local_api.start(self._api_port())
+            if ok:
+                path = local_api.write_discovery(
+                    self._api_port(), self._api_token(), APP_VERSION)
+                self._append_log(
+                    "info",
+                    f"local API listening on 127.0.0.1:{self._api_port()} — "
+                    f"token in {path}")
+            else:
+                # A port already taken must not stop the watchdog: watching
+                # windows is the job, the API is an extra.
+                self._append_log(
+                    "warn",
+                    f"local API could not start on port {self._api_port()}: "
+                    f"{err}; window watching is unaffected")
+        elif not want and self._local_api.running:
+            self._local_api.stop()
+            local_api.clear_discovery()
+            self._append_log(
+                "info", "local API stopped and its token file removed")
+
     def _open_help(self) -> None:
         """Usage notes, kept inside the app so they are there when the session
         is stuck at 3am and nobody is going to go read a README."""
@@ -3958,6 +4485,27 @@ class MainWindow(QMainWindow):
                     + ", permission requests "
                     + ("ON" if self._auto_permission else "OFF"))
             self._trigger_patterns = dlg.result_patterns()
+            # The API switch is applied here rather than live on the checkbox:
+            # OK means OK, and a user who ticks then cancels should not have
+            # opened a port in the meantime.
+            _api = dlg.result_api()
+            _api_changed = (_api["enabled"] != self._api_enabled()
+                            or _api["port"] != self._api_port())
+            if _api["text"] != self._api_text_enabled():
+                # Worth its own line in the log: it changes what leaves this
+                # machine's sessions, not just whether the port is open.
+                self._append_log(
+                    "info",
+                    "local API: reading session contents is now "
+                    + ("ALLOWED" if _api["text"] else "off"))
+            self.settings.setValue("local_api/enabled", _api["enabled"])
+            self.settings.setValue("local_api/text", _api["text"])
+            self.settings.setValue("local_api/port", _api["port"])
+            if _api_changed:
+                # A port change has to go down before it can come back up on
+                # the new number; _api_apply only ever moves one direction.
+                self._stop_local_api()
+                self._api_apply()
             self.sig_set_fable_config.emit(dict(self._fable_cfg))
             self.sig_set_trigger_patterns.emit(
                 dict(self._trigger_patterns))
@@ -4264,6 +4812,10 @@ class MainWindow(QMainWindow):
     @pyqtSlot(list)
     def _on_snapshot(self, rows: list) -> None:
         self._latest_snapshot = rows
+        # Subscribers hear about every pass, including the ones that change
+        # nothing visible: a client rendering a live view wants the timestamp
+        # moving, and "nothing changed" is itself the answer it is waiting for.
+        self._api_publish("snapshot", self._api_snapshot())
         # Skip the full table rebuild when nothing user-visible changed —
         # rebuilding destroys the cell widgets, which closes any model/
         # effort dropdown the user has open and resets row selection.
@@ -4288,6 +4840,11 @@ class MainWindow(QMainWindow):
             del self._log_buffer[: len(self._log_buffer) - 500]
         self._render_log_line(ts, level, message)
         self._write_log_file(ts, level, message)
+        # `fire` is split out from `log` because it is the event a companion
+        # program actually acts on — this tool just typed something, so the
+        # window it was watching is about to change underneath it.
+        self._api_publish("fire" if level == "fire" else "log",
+                          {"level": level, "msg": message})
         # Tray notification on fire so the user notices even when minimized.
         if level == "fire" and self.tray is not None:
             self.tray.showMessage(
@@ -4718,6 +5275,20 @@ class MainWindow(QMainWindow):
 
     # ---- Lifecycle -------------------------------------------------------
 
+    def _stop_local_api(self) -> None:
+        """Close the socket and take the token file down with it.
+
+        A discovery file outliving the process points a client at a port that
+        is not listening — it would read as a broken server rather than a
+        closed one, and it would leave a live token on disk for a service that
+        is not there to honour it.
+        """
+        try:
+            self._local_api.stop()
+            local_api.clear_discovery()
+        except Exception:
+            pass
+
     def _shutdown_thread(self, thread: QThread) -> None:
         """quit() + generous wait; terminate as a last resort. Destroying a
         QThread object that is still running is qFatal (crash on quit) — a
@@ -4734,6 +5305,7 @@ class MainWindow(QMainWindow):
         # X button = full quit (per user preference). Tray-only background
         # mode is reached via the minimize button instead.
         self._save_settings()
+        self._stop_local_api()
         # Release the wake-lock so the system can sleep normally after we
         # quit. SetThreadExecutionState requests are process-scoped — the
         # OS clears them on process exit too, but doing it explicitly here
@@ -4974,6 +5546,41 @@ which is opt-in for exactly that reason.</p>
 (“Any chooser” and “Tool-permission prompt”); the permission pattern is what
 keeps the two switches apart, so a chooser matching it is never answered by
 the first switch.</p>
+
+<h3>Advanced&#8230; &#8594; Local API</h3>
+<p>Another program on this machine can ask this one for the window table, and
+ask it to type a line into a window. It exists because driving a Claude Code
+window means enumerating it, checking the foreground really landed on it,
+typing, and putting the previous window back — and two programs doing that at
+once fight over the foreground and double-type into sessions. So this stays
+the only driver and anything else goes through it.</p>
+<p><b>It is on by default.</b> The listener is bound to <code>127.0.0.1</code>,
+so nothing off this machine can reach it, and every request has to carry a
+token. The token lives in
+<code>%APPDATA%\\Auto-Continue\\local_api.json</code>, which is how a
+companion program finds both it and the port.</p>
+<p>What that means plainly: <b>while this is on, any program running as you
+that can read that file can type into your sessions</b> — the same keystrokes
+you could type yourself. That is the point of it, and it is also the reason
+the switch is worth knowing about. Unticking it closes the port and deletes
+the token file; a program that was using it simply stops being able to
+connect. Every line typed on someone else's behalf is written to the log as
+<code>api: send</code> at <b>fire</b> level, so the table and the log still
+show who typed what.</p>
+<p>The tool's own rules still apply to callers: <b>dry-run</b> types nothing
+for them either, a window that is mid-turn is refused rather than queued, and
+a send whose foreground check fails is reported back as refused instead of
+being typed somewhere else.</p>
+<p>A caller can ask for the window list, send a line, send a keystroke (an
+ESC, say), bring a window forward, and subscribe to a live event stream that
+carries every pass, every log line and every time this tool types something
+of its own.</p>
+<p><b>Reading what is on screen is a separate switch, and it is off.</b> The
+other capabilities are about a window's <i>status</i> — which one is waiting,
+which is mid-turn. Session contents are the conversation itself: the code,
+the file paths, whatever is up. Agreeing that a companion program may see the
+table and press Enter is not the same as agreeing it may read the work, so
+that one is asked for on its own and turning it on is written to the log.</p>
 
 <h3>Advanced&#8230; &#8594; Triggers</h3>
 <p>Every detection pattern, editable and case-insensitive. Anthropic re-words
@@ -5261,6 +5868,10 @@ class AdvancedDialog(QDialog):
         tabs.addTab(trig_tab, "Triggers")
         self._build_triggers_tab(trig_tab, patterns or {})
 
+        api_tab = QWidget()
+        tabs.addTab(api_tab, "Local API")
+        self._build_api_tab(api_tab)
+
         fable_tab = QWidget()
         tabs.addTab(fable_tab, "Fable recovery")
         root = QVBoxLayout(fable_tab)
@@ -5448,6 +6059,81 @@ class AdvancedDialog(QDialog):
         btns.rejected.connect(self.reject)
         outer.addWidget(btns)
 
+    def _build_api_tab(self, tab) -> None:
+        """The switch for the local HTTP API.
+
+        Reads and writes QSettings directly through the parent rather than
+        joining the cfg/patterns/auto dicts the other tabs are handed: this
+        setting belongs to the window, not to the watcher, and nothing in the
+        tick needs to know about it.
+        """
+        root = QVBoxLayout(tab)
+        # The dialog is also built parentless in tests, and a settings store is
+        # a process-wide thing anyway — reaching through the parent for it was
+        # a coupling with nothing to gain.
+        st = getattr(self.parent(), "settings", None) or QSettings(
+            "auto_continue", "gui")
+        intro = QLabel(
+            "A companion program on this machine can read the window table "
+            "and ask for a line to be typed, instead of driving the terminals "
+            "itself — two programs doing that at once fight over the "
+            "foreground. Local only (127.0.0.1) and every request carries a "
+            "token. See <b>Help</b>.")
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        # Short on purpose: a QCheckBox does not word-wrap, so its full label
+        # becomes the dialog's minimum width and quietly overrides resize().
+        # The explanation lives in the wrapped label above it.
+        self.api_chk = QCheckBox("Allow local programs (token required)")
+        self.api_chk.setChecked(bool(st.value(
+            "local_api/enabled", True, type=bool)))
+        root.addWidget(self.api_chk)
+
+        warn = QLabel(
+            "⚠ While this is on, any program running as you that can read the "
+            "token file can type into your sessions. Turning it off closes "
+            "the port and deletes the token file.")
+        warn.setWordWrap(True)
+        warn.setStyleSheet("font-weight: bold;")
+        root.addWidget(warn)
+
+        # Separate switch, off by default. Listing windows and typing into
+        # them is one capability; handing over what a session has on screen —
+        # the conversation, the code, whatever is up — is a different one, and
+        # agreeing to the first is not agreeing to the second.
+        self.api_text_chk = QCheckBox("Also allow reading session contents")
+        self.api_text_chk.setChecked(bool(st.value(
+            "local_api/text", False, type=bool)))
+        root.addWidget(self.api_text_chk)
+
+        twarn = QLabel(
+            "Off by default. With it on, a caller can fetch the text on screen "
+            "in any watched window — not just its status.")
+        twarn.setWordWrap(True)
+        root.addWidget(twarn)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Port"))
+        self.api_port = QSpinBox()
+        self.api_port.setRange(1024, 65535)
+        self.api_port.setValue(int(st.value(
+            "local_api/port", local_api.DEFAULT_PORT)))
+        row.addWidget(self.api_port)
+        row.addStretch(1)
+        root.addLayout(row)
+
+        # The symbolic form, not the expanded one: a real path has no
+        # spaces to wrap at, so it would set the minimum width all by
+        # itself -- the same trap the checkbox above avoids.
+        path = QLabel(r"Token file: <code>%APPDATA%\Auto-Continue"
+                      r"\local_api.json</code>")
+        path.setWordWrap(True)
+        path.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        root.addWidget(path)
+        root.addStretch(1)
+
     def _build_answer_tab(self, tab, auto: dict) -> None:
         root = QVBoxLayout(tab)
         intro = QLabel(
@@ -5488,6 +6174,11 @@ class AdvancedDialog(QDialog):
     def result_auto(self) -> dict:
         return {"choose": self.auto_choose_chk.isChecked(),
                 "permission": self.auto_perm_chk.isChecked()}
+
+    def result_api(self) -> dict:
+        return {"enabled": self.api_chk.isChecked(),
+                "text": self.api_text_chk.isChecked(),
+                "port": int(self.api_port.value())}
 
     # ---- Triggers tab ----------------------------------------------------
 
