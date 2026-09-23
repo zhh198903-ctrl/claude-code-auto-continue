@@ -97,6 +97,7 @@ from auto_continue import (
     parse_limit_prompt, parse_oauth_expired, parse_retry_exhausted,
     parse_server_error_stuck, parse_switch_model_prompt, read_terminal_text,
     send_continue, send_keys, send_text_lines, session_running,
+    summarize_keyspec,
 )
 import updater
 import local_api
@@ -794,6 +795,7 @@ class _WState:
     fable_user_optout: bool = False               # user took manual control
     fable_our_models: set = field(default_factory=set)  # models we typed
     fable_scope_key: Optional[str] = None         # key we matched scope on
+    scope_warned: bool = False                    # 'not in scope' said once
 
 
 class Watcher(QObject):
@@ -811,7 +813,13 @@ class Watcher(QObject):
     # owns persistence, so the remaining count survives a restart — which is
     # the whole point of counting down rather than up.
     loops_spent = pyqtSignal(str, int)
-    log = pyqtSignal(str, str)  # (level, message). level ∈ {info,warn,err,fire}
+    # (level, message). level ∈ {info,warn,err,fire,fire-quiet}. "fire-quiet"
+    # is a fire in every respect that records what happened — log file, log
+    # view, API event — and differs only in not popping a tray balloon. It
+    # exists because a long outage resends on a timer, and a balloon every
+    # retry interval is noise; demoting the LEVEL instead would have the log
+    # under-report how many times this tool typed.
+    log = pyqtSignal(str, str)
     running_changed = pyqtSignal(bool)
 
     def __init__(self):
@@ -1049,6 +1057,19 @@ class Watcher(QObject):
                 st.fable_user_optout = False
         self._fable_windows = new_scope
         self._fable_optout = set() if widened else new_out
+        # On, but aimed at nothing: every window fails the scope test, so the
+        # feature can never act — yet every checkbox the user looks at says it
+        # is on. Found live on 2026-09-23 (enabled + quota switching, no
+        # window ticked, "all windows" off). Said whenever this configuration
+        # is applied, which is startup and each OK of the dialog — rare
+        # enough not to nag, often enough not to be missed.
+        if (self._fable_enabled and not self._fable_all_windows
+                and not self._fable_windows):
+            self.log.emit(
+                "warn",
+                "model recovery is ON but applies to no window — neither "
+                "'All windows' nor any single window is ticked, so it will "
+                "never act (Advanced… → Model recovery)")
         # A live edit can shorten the step script while a recovery is mid-run
         # (index would point past the end), and switching the feature OFF must
         # not leave a half-finished run armed to resume — hours later, into a
@@ -1394,6 +1415,36 @@ class Watcher(QObject):
                     # the tool had just promised to leave alone.
                     if st.fable_user_optout:
                         _fable_ok = False
+                    # Out of scope is a legitimate choice, but a silent one
+                    # was indistinguishable from a broken tool. Seen live on
+                    # 2026-09-23: recovery and quota switching both ON, the
+                    # window list empty and "all windows" off — so a Fable
+                    # quota banner sat on screen, was recognised, and nothing
+                    # happened with not one line to say why. Say it once per
+                    # episode. Opted-out windows stay quiet: the user took
+                    # them over on purpose and needs no reminder.
+                    if (self._fable_enabled and not _fable_ok
+                            and not st.fable_user_optout and tail):
+                        _why = None
+                        if self._fable_quota_switch and parse_model_quota(
+                                tail, self._patterns.get("model_quota")):
+                            _why = "is out of quota on its model"
+                        elif fable_refusal_distance(
+                                tail, self._patterns.get("fable")) is not None:
+                            _why = "is blocked by a safeguard notice"
+                        if _why and not st.scope_warned:
+                            st.scope_warned = True
+                            self.log.emit(
+                                "warn",
+                                f"{_wt} {_why}, but model recovery is not "
+                                f"set up for this window — not switching. "
+                                f"Advanced… → Model recovery: tick this "
+                                f"window, or 'All windows'")
+                        elif not _why:
+                            # Re-armed only on a pass that actually READ the
+                            # screen (tail is non-empty here), so a UIA miss
+                            # cannot make the same episode announce twice.
+                            st.scope_warned = False
                     if self._fable_enabled and _fable_ok:
                         # A finished run whose verdict has come due. Judged here,
                         # a tick or more after the last step, so the screen has
@@ -2128,10 +2179,20 @@ class Watcher(QObject):
                                 >= timedelta(seconds=FABLE_USER_SWITCH_QUIET_S))
                             ours = any(m and m.lower() in (cur or "").lower()
                                        for m in st.fable_our_models)
+                            # ...unless an empty quota explains it. Switching
+                            # away from a model that has nothing left is not
+                            # "stop managing this window", it is the only sane
+                            # move — and the quota branch above has already
+                            # latched quota_hold for it this very pass. Taking
+                            # it as an opt-out removed the window from scope for
+                            # good; that is how the live scope was emptied on
+                            # 2026-08-14, the night the first quota banner was
+                            # captured, leaving the feature dead for a month.
                             if (cur and st.fable_last_model
                                     and cur != st.fable_last_model
                                     and not on_target and quiet
                                     and not fable_hit and not ours
+                                    and not st.quota_hold
                                     and not st.fable_user_optout):
                                 st.fable_user_optout = True
                                 self.log.emit(
@@ -2403,11 +2464,19 @@ class Watcher(QObject):
                                 f"{self._retry_interval}s until recovery"
                             )
                             st.retry_active = True
-                        # 'fire' (tray balloon) only for the FIRST resend of an
-                        # outage — a long outage would otherwise pop a balloon
-                        # every retry_interval seconds.
+                        # Every resend is a keystroke and is logged as one.
+                        # Only the BALLOON is held back after the first: a
+                        # long outage resends on a timer and would otherwise
+                        # pop one every retry_interval seconds. Until
+                        # 2026-09-19 the repeats were logged at 'info', which
+                        # cost more than the noise it saved — the log
+                        # under-counted what had been typed (the exact
+                        # reading that found the 83-continue defect), and the
+                        # API published them as plain log lines, so a
+                        # companion program watching 'fire' never learned the
+                        # window was about to change under it.
                         self.log.emit(
-                            "fire" if first else "info",
+                            "fire" if first else "fire-quiet",
                             f"{dr}resending 'continue' (retry path) → {_wt}"
                         )
                         ok = send_continue(w, dry_run=self._dry_run)
@@ -2757,11 +2826,16 @@ class Watcher(QObject):
                 del self._states[hwnd]
         if ghosts != self._ghost_hwnds:
             if ghosts:
+                # Name them. A bare count cannot answer the one question the
+                # line raises — is it always the SAME window? (2026-09-23 had
+                # five of these by mid-morning, each "1 window", and no way to
+                # tell whether one session was being skipped repeatedly.)
+                _ids = " ".join(f"#{_wid(h)}" for h in sorted(ghosts))
                 self.log.emit(
                     "warn",
                     f"{len(ghosts)} open window(s) missing from this pass "
-                    f"(UIA enumeration hiccup) — keeping what is known about "
-                    f"them rather than starting them over")
+                    f"({_ids}; UIA enumeration hiccup) — keeping what is "
+                    f"known about them rather than starting them over")
             self._ghost_hwnds = set(ghosts)
         # A ghost's queued row command is kept for the same reason its state
         # is: the window is still there to receive it.
@@ -2841,7 +2915,7 @@ class Watcher(QObject):
         try:
             if self._dry_run:
                 self.log.emit("fire", f"[dry-run] api: keys hwnd={hwnd:#x} "
-                                      f"{keyspec!r}")
+                                      f"{summarize_keyspec(keyspec)}")
                 out.put({"ok": True, "dry_run": True})
                 return
             target = self._api_find(hwnd)
@@ -2849,7 +2923,11 @@ class Watcher(QObject):
                 out.put({"ok": False, "reason": "no_window"})
                 return
             ok = send_keys(target, keyspec)
-            self.log.emit("fire", f"api: keys hwnd={hwnd:#x} {keyspec!r}"
+            # Summarised, not quoted: a caller may type a whole sentence
+            # through this route, and the log is not where someone's prompt
+            # belongs. /send already logs a count for the same reason.
+            self.log.emit("fire", f"api: keys hwnd={hwnd:#x} "
+                                  f"{summarize_keyspec(keyspec)}"
                                   + ("" if ok else " (refused)"))
             out.put({"ok": True} if ok
                     else {"ok": False, "reason": "foreground"})
@@ -4895,6 +4973,12 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str, str)
     def _append_log(self, level: str, message: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
+        # "fire-quiet" is a fire that skips the balloon; nothing downstream of
+        # here should be able to tell the difference, so normalise it now and
+        # keep the one difference in the one place it belongs.
+        quiet = level == "fire-quiet"
+        if quiet:
+            level = "fire"
         # Keep a parallel buffer (capped to match the QPlainTextEdit's
         # 500-block limit) so a theme flip can re-render past lines in
         # the new color set.
@@ -4909,7 +4993,7 @@ class MainWindow(QMainWindow):
         self._api_publish("fire" if level == "fire" else "log",
                           {"level": level, "msg": message})
         # Tray notification on fire so the user notices even when minimized.
-        if level == "fire" and self.tray is not None:
+        if level == "fire" and not quiet and self.tray is not None:
             self.tray.showMessage(
                 "Auto-Continue", message,
                 QSystemTrayIcon.MessageIcon.Information, 4000,
@@ -5638,6 +5722,12 @@ being typed somewhere else.</p>
 ESC, say), bring a window forward, and subscribe to a live event stream that
 carries every pass, every log line and every time this tool types something
 of its own.</p>
+<p><b>What a caller types is counted, not quoted.</b> Every one of those
+actions is written to the log as a keystroke — but the log records what was
+done, not what was said, so a send appears as <code>lines=1</code> and a
+keystroke spec as <code>&lt;24 chars&gt;{{Enter}}</code>: key names stay
+readable, because "did it press Enter?" is the question a log answers, while
+the words themselves are the session's business and not this log's.</p>
 <p>A caller can also <b>turn the two answering switches on this tab off, or
 back on</b>, and only those two. A companion program offering approval from a phone or a watch
 is racing this tool: it answers a permission prompt within a pass, so a person
@@ -5757,6 +5847,25 @@ it immediately, screen or no screen. The fallback is read from
 your script's <i>first</i> <code>/model</code> line, so it is whatever you
 chose; a script with no <code>/model</code> line means there is nowhere to
 go, and the window is left alone with a warning.</p>
+<p><b>It only acts on windows in model recovery's scope</b> — the windows
+ticked in the list, or all of them with <b>All windows</b>. Turning the
+switch on does not widen that. A window outside the scope that shows a quota
+banner (or a safeguard notice) is left exactly as it is, and the log says so
+once per episode: <code>… is out of quota on its model, but model recovery is
+not set up for this window — not switching</code>. And if model recovery is on
+while <i>no</i> window is ticked and <b>All windows</b> is off, it can never
+act at all; the log says that as well, whenever the settings are applied.
+Both lines exist because the alternative was found in use: every switch
+showing ON, a real quota banner on screen, and nothing happening with nothing
+to say why.</p>
+<p><b>Switching it yourself when the quota runs out does not untick the
+window.</b> Normally a model change this tool did not type is read as you
+taking that window over, and it is unticked. But with the quota banner up,
+moving to another model is simply the only thing to do — so it is treated like
+the tool's own detour instead: the window is held there, and goes back to the
+target model once the banner clears. (Earlier builds unticked it, and a window
+unticked that way stays unticked; if that emptied the list, the log line above
+is how you will now find out.)</p>
 <p>The detection pattern is on the <b>Triggers</b> tab as "Model quota
 exhausted", and is now written against the real banner:
 <i>"You&#8217;ve reached your &lt;Model&gt; limit. Run /usage-credits to

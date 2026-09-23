@@ -34,6 +34,9 @@ tail -40 "$LOCALAPPDATA/auto_continue/activity.log"
 - **`#093c` 是窗口 id**（2.0.17 起）。标题会随对话改名、也可能重名，
   **认 id 不认标题**。同一个 id 就是同一个窗口；窗口关掉重开会换 id。
 - 级别：`info` 记录 / `warn` 需要注意 / `fire` 真的发出了按键 / `err` 出错。
+  **数「打了多少字」就数 `fire` 行**：一次故障里反复重发，每一次都记 `fire`
+  （2.1.2 起；之前第二次往后记成 `info`，数出来会偏少）。托盘气泡只在第一次弹，
+  但日志和接口事件一次不少。
 
 ### 两种「沉默」必须分清（2.0.18 起日志会直说）
 
@@ -75,7 +78,9 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
    （或 `auto_choose=off`）。这是本机另一个程序（例如手机上远程批准的那种）
    通过本地 API 关的，好让人来决定，Advanced 里的勾也跟着变了。之后的权限提示
    不再自动放行是**预期行为**。`api: keys …` / `api: send …` 同理：那是配套程序
-   打的字，不是本工具自己发的。
+   打的字，不是本工具自己发的。这两行只记**动作**不记内容 ——
+   `lines=1`、`<24 chars>{Enter}`（2.1.2 起；键名保留，打的字只剩字数）。
+   想知道对方到底打了什么，去问那个程序，日志里没有。
 
 ## 排查：某个会话没被接上
 
@@ -86,10 +91,25 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
    开在了 Windows Terminal 的**标签页**里——只有**当前活动标签**会被读到，
    每个会话拖成独立窗口才都能被看住。
 2. **当时读得到屏幕吗** —— 附近有没有 `could not read the screen of #id`。
+   偶发一两轮是 UIA 打嗝，会自己好（好了会写 `screen of #id readable again`）。
+   另一种是整个窗口这一轮没枚举到：`N open window(s) missing from this pass (#id …)`
+   —— 状态会保留，不会重来；2.1.2 起括号里写明是哪几个窗口，
+   **同一个 id 反复出现**才值得查，零星几次是正常的。
+   **一直不好、再也没恢复**，多半是这个窗口的会话进程已经被杀掉了，
+   而终端窗口壳子还留着（典型：某个脚本 `taskkill /PID <claude> /T /F` 之后没关窗口）。
+   这种窗口 Win32 看还在、UIA 也枚举得到，但 ConPTY 已死，文本读取永远 E_FAIL ——
+   **它不会自己恢复，关掉这个窗口即可**。在它关掉之前，这个"窗口"一直占着一格覆盖数，
+   而里面根本没有会话。
 3. **它是不是判断成「不该动」** —— 看有没有上面「故意不管」的那几条。
 4. **发了但没送达吗** —— `retry send failed for …; will try again`
    说明按键没送出去（通常是发送瞬间焦点被别的窗口抢走），下一轮会自己重来。
-5. **是不是根本没到时间** —— `will fire at …` 那行写着预定时刻，
+5. **模型额度用完（`You've reached your Fable limit …`）却没切模型** ——
+   「额度用完就切模型」只对**模型恢复作用范围内**的窗口生效：Advanced… → 模型恢复
+   里勾选的窗口，或勾 **All windows**。开关都开着但一个窗口都没选，它就永远不动。
+   2.1.2 起日志会直说：`… is out of quota on its model, but model recovery is not set
+   up for this window — not switching`；开着却没选窗口时会写
+   `model recovery is ON but applies to no window`。
+6. **是不是根本没到时间** —— `will fire at …` 那行写着预定时刻，
    实际触发会晚一个轮询周期以内（默认 60 秒），这是正常的。
 
 ## 常用设置（Advanced…）

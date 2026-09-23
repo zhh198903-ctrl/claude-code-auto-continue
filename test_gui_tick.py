@@ -270,6 +270,32 @@ check("B4d a new outage hours later still fires immediately",
       SENT == [(2, ["continue"])])
 SENT.clear()
 
+# Every resend is a keystroke and must be RECORDED as one. Repeats used to be
+# logged at 'info' so the tray balloon would not pop every retry interval —
+# but that made the log under-count what had been typed (counting 'fire' lines
+# is exactly how the 83-continue defect was found) and published them over the
+# API as ordinary log lines, so a companion program watching 'fire' to know a
+# window is about to change under it heard nothing. The balloon, not the
+# level, is what gets held back now: level 'fire-quiet'.
+set_now(T0)
+reset([(2, "win")], {2: RETRY_EXHAUSTED})
+w = new_watcher()
+LOGS_B5 = []
+w.log.connect(lambda k, m: LOGS_B5.append((k, m)))
+w._tick()                                        # first resend of the outage
+advance(w._retry_interval + 1)
+w._tick()                                        # second resend, same outage
+_resends = [k for k, m in LOGS_B5 if "resending 'continue'" in m]
+check("B5a both resends of one outage are logged", len(_resends) == 2)
+check("B5b the first is a plain fire (balloon and all)",
+      _resends[0] == "fire")
+check("B5c the repeat is still a fire, only quieter — not demoted to info",
+      _resends[1] == "fire-quiet")
+check("B5d no keystroke of an outage is logged below fire level",
+      not any(k in ("info", "warn") and "resending 'continue'" in m
+              for k, m in LOGS_B5))
+SENT.clear()
+
 # A screen that could not be READ is not a screen with no error on it. Both
 # arrive as an empty tail, and treating the unreadable one as recovery threw
 # away the retry throttle: the next pass that did read the error fired at
@@ -425,6 +451,9 @@ try:
           getattr(w._states.get(7), "last_sent_utc", None) == T0)
     check("F6 the hiccup is reported rather than passing silently",
           any(k == "warn" and "missing from this pass" in m for k, m in LOGS_F))
+    check("F6b and names WHICH window, so a repeat offender can be spotted",
+          any("missing from this pass" in m and f"#{gui._wid(7)}" in m
+              for _, m in LOGS_F))
     LOGS_F.clear()
     w._tick()
     check("F7 and reported once, not once per tick",
@@ -1064,6 +1093,35 @@ try:
 finally:
     gui.send_text_lines = _real_send
 
+# A caller may type WORDS through /keys, not just key names — a companion
+# program did exactly that on 2026-09-21 and the log kept the whole prompt.
+# The log says what this tool did; it is not a place for someone's prompt.
+SENT.clear()
+LOGS_V.clear()
+_secret_keys = "转写这段音频{Enter}"
+_out = _q.Queue(1)
+w.api_keys(31, _secret_keys, _out)
+_keylines = [m for k, m in LOGS_V if "api: keys" in m]
+check("V7 an external keystroke is still logged at fire level",
+      len(_keylines) == 1 and any(k == "fire" and "api: keys" in m
+                                  for k, m in LOGS_V))
+check("V8 but the typed words are NOT in the log line",
+      "转写" not in _keylines[0] and "音频" not in _keylines[0])
+check("V9 — a count stands in for them",
+      "<6 chars>" in _keylines[0])
+check("V10 while the key name survives, which is the part worth reading",
+      "{Enter}" in _keylines[0])
+
+# The same promise under dry-run, which logs on a different line of code.
+LOGS_V.clear()
+w.set_dry_run(True)
+_out = _q.Queue(1)
+w.api_keys(31, _secret_keys, _out)
+_dry = [m for k, m in LOGS_V if "api: keys" in m]
+check("V11 dry-run's own log line keeps the words out too",
+      len(_dry) == 1 and "音频" not in _dry[0] and "<6 chars>" in _dry[0])
+w.set_dry_run(False)
+
 # =============================================================================
 print("---- X: the snapshot says what a window is waiting on ----")
 # A companion program showing "this session needs you" reads this field. It
@@ -1262,6 +1320,43 @@ check(f"Z2h and does so promptly, not by riding out the timeout "
 check("Z2i and the change really landed",
       _mw._auto_permission is False)
 _mw.settings.clear()
+
+# =============================================================================
+print("---- Z3: a quiet fire is still a fire everywhere it is recorded ----")
+# The GUI half of B5. 'fire-quiet' must differ from 'fire' in exactly one
+# way — no tray balloon — and be indistinguishable from it in the log file,
+# the log view and the API event stream. Anything else and the level is back
+# to carrying two meanings at once.
+
+
+class _FakeTray:
+    def __init__(self): self.shown = []
+    def showMessage(self, *a): self.shown.append(a)
+
+
+_q4 = gui.MainWindow.__new__(gui.MainWindow)
+_q4.tray = _FakeTray()
+_q4._log_buffer = []
+_written, _published, _rendered = [], [], []
+_q4._write_log_file = lambda ts, lvl, msg: _written.append((lvl, msg))
+_q4._api_publish = lambda kind, payload: _published.append((kind, payload))
+_q4._render_log_line = lambda ts, lvl, msg: _rendered.append((lvl, msg))
+
+gui.MainWindow._append_log(_q4, "fire", "loud one")
+gui.MainWindow._append_log(_q4, "fire-quiet", "quiet one")
+
+check("Z3a the quiet fire is written to the log FILE as a fire",
+      _written == [("fire", "loud one"), ("fire", "quiet one")])
+check("Z3b and shown in the log view as a fire, so 'fire-quiet' never "
+      "reaches a reader as a level of its own",
+      _rendered == [("fire", "loud one"), ("fire", "quiet one")])
+check("Z3c and published on the API as a fire event — a companion program "
+      "watching 'fire' must hear every keystroke",
+      [k for k, _ in _published] == ["fire", "fire"])
+check("Z3d the kept buffer agrees too, so a theme flip cannot reveal it",
+      [lvl for _, lvl, _ in _q4._log_buffer] == ["fire", "fire"])
+check("Z3e and the ONLY difference is the balloon",
+      len(_q4.tray.shown) == 1 and _q4.tray.shown[0][1] == "loud one")
 
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")

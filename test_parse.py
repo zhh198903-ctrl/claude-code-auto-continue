@@ -1161,5 +1161,31 @@ check_reset("a quota banner far above the tail is stale",
                 "Fable 5 weekly " + "limit · " + "resets Monday"
                 + chr(10) + ("x" * 4000)))
 
+print("---- key specs are summarised, never quoted ----")
+# The log records what this tool did, not what a session holds. /keys can
+# carry a whole sentence — seen live on 2026-09-21, a companion program typed
+# a prompt through it and every word landed in activity.log. Key NAMES are
+# what a reader needs; the prose never was.
+check_reset("KS1 a pure key token survives intact — the useful part",
+      ac.summarize_keyspec("{Enter}") == "{Enter}")
+check_reset("KS2 several tokens stay readable",
+      ac.summarize_keyspec("{Esc}{Esc}") == "{Esc}{Esc}")
+check_reset("KS3 typed words become a count, not the words",
+      ac.summarize_keyspec("hello") == "<5 chars>")
+check_reset("KS4 a sentence with a key keeps the key and drops the sentence",
+      ac.summarize_keyspec("hi there{Enter}") == "<8 chars>{Enter}")
+check_reset("KS5 one character reads as one char",
+      ac.summarize_keyspec("a{Ctrl}") == "<1 char>{Ctrl}")
+check_reset("KS6 empty stays empty", ac.summarize_keyspec("") == "")
+check_reset("KS7 None does not explode", ac.summarize_keyspec(None) == "")
+_secret = " 这个音频里的人说了什么？只回复转写出来的原文。"
+check_reset("KS8 the real leaked prompt leaves no trace of itself",
+      "音频" not in ac.summarize_keyspec(_secret)
+      and ac.summarize_keyspec(_secret) == "<24 chars>")
+check_reset("KS9 a brace-looking run that is not a token is still counted, "
+      "not echoed",
+      ac.summarize_keyspec("{this is not a key name at all}")
+      == "<31 chars>")   # 29 inside + 2 braces; a name that long is not a key
+
 
 sys.exit(1 if failures else 0)

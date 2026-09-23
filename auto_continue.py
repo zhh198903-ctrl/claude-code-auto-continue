@@ -42,7 +42,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 
 
 # ---------------------------------------------------------------------------
@@ -1515,6 +1515,37 @@ def sendkeys_literal(text) -> str:
     out = []
     for ch in str(text):
         out.append("{{}" if ch == "{" else "{}}" if ch == "}" else ch)
+    return "".join(out)
+
+
+_KEY_TOKEN_RE = re.compile(r"\{[^{}]{1,24}\}")
+
+
+def summarize_keyspec(keyspec: str) -> str:
+    """A key spec with its literal text replaced by a character count.
+
+    The log records what this tool DID, never what a session contains — and a
+    key spec breaks that rule the moment a caller uses it to type words. The
+    API's own sibling route already logs `lines=N` rather than the lines, and
+    this brings /keys in line: '{Tab}' stays '{Tab}', while a typed sentence
+    becomes '<24 chars>'. Key names are what a reader needs anyway ("did it
+    press Enter?"); the prose was never the useful part.
+
+    Seen live on 2026-09-21: a companion program typed a whole prompt through
+    /keys and the activity log kept every word of it.
+    """
+    def _chars(n):
+        return f"<{n} char>" if n == 1 else f"<{n} chars>"
+
+    spec = str(keyspec or "")
+    out, pos = [], 0
+    for m in _KEY_TOKEN_RE.finditer(spec):
+        if m.start() > pos:
+            out.append(_chars(m.start() - pos))
+        out.append(m.group(0))
+        pos = m.end()
+    if pos < len(spec):
+        out.append(_chars(len(spec) - pos))
     return "".join(out)
 
 

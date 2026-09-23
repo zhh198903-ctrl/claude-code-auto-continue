@@ -2082,6 +2082,176 @@ check("EF4 a window with no configured level has nothing to restore",
 check("EF5 a configured window restores exactly that level",
       w._effort_overrides.get("claude") == "high")
 
+# ---------------------------------------------------------------------------
+# QZ: on, but aimed at nothing -- must not be silent
+# ---------------------------------------------------------------------------
+# Found live on 2026-09-23: recovery ON, quota switching ON, "all windows" OFF
+# and no window ticked. A real quota banner (this exact wording, with no model
+# version in it) sat on screen, was recognised -- and nothing happened, with
+# not one log line to say why. The user reasonably read that as the tool being
+# broken. Out of scope is a legitimate choice; being silent about it is not.
+_QUOTA_LIVE = ("You" + "'ve reached your Fable " + "limit. Run /usage-credits "
+               "to continue or switch models with /model.")
+check("QZ0 the live wording (no version number) is recognised at all",
+      bool(ac.parse_model_quota(_QUOTA_LIVE + "\n" + _BAR_FABLE)))
+
+
+def _scoped_watcher(logs, scope, all_windows, quota=True, optout=()):
+    w = gui.Watcher()
+    w._running = True
+    w.log.connect(lambda k, m: logs.append((k, m)))
+    w.set_fable_config({
+        "enabled": True, "quota_switch": quota, "all_windows": all_windows,
+        "delay": 180, "steps": gui.DEFAULT_FABLE_STEPS,
+        "windows": list(scope), "optout": list(optout)})
+    return w
+
+
+_lz = []
+_scoped_watcher(_lz, scope=(), all_windows=False)
+check("QZ1 'on but no window selected' is said when the config is applied",
+      any(k == "warn" and "applies to no window" in m for k, m in _lz))
+
+_lz = []
+_scoped_watcher(_lz, scope=("claude",), all_windows=False)
+check("QZ2 a config that does name a window says nothing of the sort",
+      not any("applies to no window" in m for _, m in _lz))
+_lz = []
+_scoped_watcher(_lz, scope=(), all_windows=True)
+check("QZ3 nor does 'all windows'",
+      not any("applies to no window" in m for _, m in _lz))
+
+# How the live config actually got that way (activity.log, 2026-08-08 and
+# 2026-08-14): each ticked window was unticked automatically when the user
+# switched its model by hand, and the second untick emptied the list. The
+# dialog refuses to SAVE an empty scope, but this path never goes through the
+# dialog -- it re-applies the config directly. That re-apply must now say it.
+_lz = []
+w = _scoped_watcher(_lz, scope=("ssprq-tdecq-optimization",),
+                    all_windows=False)
+check("QZ13a one ticked window: nothing to warn about",
+      not any("applies to no window" in m for _, m in _lz))
+w.set_fable_config({
+    "enabled": True, "quota_switch": True, "all_windows": False,
+    "delay": 180, "steps": gui.DEFAULT_FABLE_STEPS, "windows": [],
+    "optout": ["ssprq-tdecq-optimization"]})
+check("QZ13b the automatic untick of the LAST window is followed by the "
+      "warning, not by a month of silence",
+      any(k == "warn" and "applies to no window" in m for k, m in _lz))
+
+# A hand switch FORCED by an empty quota is not the user taking the window
+# over. The rule "a switch we did not type = the user's call, untick it" had no
+# notion of the quota banner, so switching away from a model that had nothing
+# left -- the only sensible thing to do -- quietly removed the window from
+# scope for good. The live scope was emptied on 2026-08-14 00:27 by exactly
+# this shape: the same night the first real quota banner was captured.
+reset([(1, "claude")], {1: "working away" + chr(10) + _BAR_FABLE})
+_lz = []
+w = _scoped_watcher(_lz, scope=("claude",), all_windows=False)
+unticked = []
+w.fable_untick.connect(lambda k: unticked.append(k))
+w._tick()                                        # tracked on target
+advance(gui.FABLE_USER_SWITCH_QUIET_S + 10)
+TEXTS[1] = _QUOTA_LIVE + chr(10) + _BAR_OPUS        # user reacted before we did
+SENT.clear()
+w._tick()
+check("QZ14a a switch forced by an empty quota does not untick the window",
+      not w._states[1].fable_user_optout and unticked == [])
+check("QZ14b it is held on the fallback like our own detour",
+      w._states[1].quota_hold)
+check("QZ14c and nothing is typed -- the user already did the right thing",
+      texts_sent() == [])
+# The quota comes back: the window is still ours, so it goes home.
+TEXTS[1] = "working again" + chr(10) + _BAR_OPUS
+w._tick()                                        # releases the hold
+for _ in range(3):
+    advance(gui.FABLE_DRIFT_GRACE_S + 5)
+    w._tick()
+check("QZ14d once the banner clears it is steered back to the target model",
+      any("/model fable" in str(t) for t in texts_sent()))
+# Without a quota banner the old rule still stands: that IS the user's call.
+reset([(1, "claude")], {1: "working away" + chr(10) + _BAR_FABLE})
+_lz = []
+w = _scoped_watcher(_lz, scope=("claude",), all_windows=False)
+unticked = []
+w.fable_untick.connect(lambda k: unticked.append(k))
+w._tick()
+advance(gui.FABLE_USER_SWITCH_QUIET_S + 10)
+TEXTS[1] = "working away" + chr(10) + _BAR_OPUS
+w._tick()
+check("QZ14e a switch with no quota banner is still taken as the user's call",
+      w._states[1].fable_user_optout and unticked == [gui.title_key("claude")])
+
+# The window itself: recognised, not acted on, and explained -- once.
+reset([(1, "claude")], {1: _QUOTA_LIVE + "\n" + _BAR_FABLE})
+_lz = []
+w = _scoped_watcher(_lz, scope=(), all_windows=False)
+w._states[1] = gui._WState(hwnd=1, title="claude")
+for _ in range(5):
+    advance(60)
+    w._tick()
+_said = [m for k, m in _lz if "not set up for this window" in m]
+check("QZ4 an out-of-scope window is still not switched", SENT == [])
+check("QZ5 but the log says why, naming the window and the fix",
+      len(_said) >= 1 and "out of quota" in _said[0]
+      and "All windows" in _said[0])
+check("QZ6 once per episode, not every pass", len(_said) == 1)
+
+# An unreadable pass is not 'the banner went away' -- it must not re-arm.
+TEXTS[1] = ""
+advance(60)
+w._tick()
+TEXTS[1] = _QUOTA_LIVE + "\n" + _BAR_FABLE
+advance(60)
+w._tick()
+check("QZ7 a UIA miss in the middle does not make it announce again",
+      sum(1 for _, m in _lz if "not set up for this window" in m) == 1)
+
+# A genuinely new episode, after the banner was SEEN to clear, is told again.
+TEXTS[1] = "all quiet now\n" + _BAR_FABLE
+advance(60)
+w._tick()
+TEXTS[1] = _QUOTA_LIVE + "\n" + _BAR_FABLE
+advance(60)
+w._tick()
+check("QZ8 a new episode after a seen clear is announced again",
+      sum(1 for _, m in _lz if "not set up for this window" in m) == 2)
+
+# The user's own instructions stay quiet.
+reset([(1, "claude")], {1: _QUOTA_LIVE + "\n" + _BAR_FABLE})
+_lz = []
+w = _scoped_watcher(_lz, scope=(), all_windows=False, quota=False)
+w._states[1] = gui._WState(hwnd=1, title="claude")
+for _ in range(3):
+    advance(60)
+    w._tick()
+check("QZ9 with quota switching OFF there is nothing to explain",
+      not any("not set up for this window" in m for _, m in _lz))
+
+reset([(1, "claude")], {1: _QUOTA_LIVE + "\n" + _BAR_FABLE})
+_lz = []
+w = _scoped_watcher(_lz, scope=(), all_windows=True, optout=("claude",))
+w._states[1] = gui._WState(hwnd=1, title="claude")
+for _ in range(3):
+    advance(60)
+    w._tick()
+check("QZ10 a window the user opted out of is left alone AND quiet",
+      SENT == [] and not any("not set up" in m for _, m in _lz))
+
+# And in scope, the existing behaviour is untouched: it switches, no warning.
+reset([(1, "claude")], {1: _QUOTA_LIVE + "\n" + _BAR_FABLE})
+_lz = []
+w = _scoped_watcher(_lz, scope=("claude",), all_windows=False)
+w._states[1] = gui._WState(hwnd=1, title="claude")
+for _ in range(6):
+    advance(60)
+    w._tick()
+_typed = [ln for grp in texts_sent(1) for ln in grp]
+check("QZ11 in scope, the live wording triggers the switch to the fallback",
+      any(t.strip() == "/model opus" for t in _typed))
+check("QZ12 and no 'not set up' line is written for it",
+      not any("not set up for this window" in m for _, m in _lz))
+
 print()
 print("RESULT:", "ALL OK" if not failures else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)
