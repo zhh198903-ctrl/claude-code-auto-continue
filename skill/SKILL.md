@@ -54,6 +54,10 @@ Windows 的 UI Automation 偶尔会拒绝一个窗口，这时它**什么都没�
 | 日志里长这样 | 它做了什么 |
 |---|---|
 | `network retries exhausted` / `network API error` / `response truncated mid-stream` | 每隔重试间隔发一次 `continue`，直到会话重新开始输出 |
+| （屏幕上）`No response from the API after 6m · retrying once, waiting up to 10m` | **什么都不做**：这是 Claude Code 自己在重试，算「正在运行」。重试也失败、出现单独一行的 API 报错说没有响应时，才按网络错误处理 |
+
+网络类报错**必须单独成行**才算数（2.1.3 起）。夹在一句话中间的同样文字，是有人在引用它，
+通常是 Claude 在解释你贴的报错，不会被当成卡住去发 `continue`。
 | `limit on … → resets …; will fire at …` | 等到重置时间 + Buffer，再发 `continue` |
 | `answered the permission prompt` | 回车放行安全拦截（默认开） |
 | `answered the chooser` | 回车选中默认项（**默认关**，要自己打开） |

@@ -5555,6 +5555,13 @@ dropped rather than carried forever, since Claude Code updates itself and a
 pattern kept for builds nobody runs is dead weight that still has to be read
 and reasoned about. If you deliberately pin an old build and a banner stops
 being noticed, add its wording back under <b>Triggers</b>.</p>
+<p><b>A network error quoted in the middle of a sentence is not one.</b>
+Claude Code prints its error banners on a line of their own; the same words
+inside a sentence are someone quoting them — usually Claude, explaining an
+error you pasted. Those used to count, so a session that had simply
+<i>discussed</i> a failure was poked with <code>continue</code> every retry
+interval. They no longer do. The one gap left: prose that happens to wrap so
+the quoted words start a fresh row still looks like the real thing.</p>
 
 <h3>The table</h3>
 <p>One row per terminal window. The <b>Status</b> column is the quickest way
@@ -5611,6 +5618,16 @@ that.</p>
 then be seen running <i>and</i> finishing again before anything else is
 typed — the prompt is never repeated into a session that is merely
 sitting idle.</p>
+<p><b>Waiting on the API counts as running.</b> When a request gets no first
+byte for a while, Claude Code replaces its spinner with <i>No response from the
+API after 6m · retrying once, waiting up to 10m</i> and keeps waiting on its
+own. That line has no timer on it, and earlier builds read it as a finished
+turn — so after 90 seconds the next task was typed into a request that was
+still in flight. It is now read as running, by this and by everything else
+that waits for a quiet window. If the retry fails too and Claude Code gives
+up with an <code>API Error</code> line saying no response came back, that is a
+stuck session like any other network error, and gets its
+<code>continue</code>.</p>
 <p>The button shows <b>After finish &#10003;</b> once a prompt is set and
 hovering previews it; clearing the text turns the feature off for that
 window.</p>

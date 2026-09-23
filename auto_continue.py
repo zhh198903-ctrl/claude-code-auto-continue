@@ -42,7 +42,7 @@ import uiautomation as auto
 # A "-dev" suffix does not help: parse_version() strips it, so 1.0.17-dev and
 # 1.0.17 compare equal. Leave this at the LAST RELEASED version while
 # developing; release.yml refuses to publish if it disagrees with the tag.
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +142,12 @@ ECONNRESET_RE = re.compile(
     # matched. This one carries no errno and no parentheses — the request
     # simply never came back — but it leaves the session in exactly the same
     # place, waiting for a 'continue' that only a human was going to type.
-    r"|No\s+response\s+from\s+API"
+    r"|No\s+response\s+from\s+(?:the\s+)?API"
+    # "the" is optional: the 09-13 banner said "from API", and by 09-23 the
+    # in-flight notice for the same condition said "from the API". Wording
+    # drifts; a final banner in the newer style must not sit unpoked. Still
+    # anchored on "API Error:", so the in-flight notice (no such prefix, and
+    # Claude Code is still retrying) never triggers a 'continue'.
     r")",
     re.IGNORECASE,
 )
@@ -460,7 +465,17 @@ def parse_limit_message(
 # clock form carrying every one of 34 streaming samples and the old one none;
 # Claude Code auto-updates, so the dead branch went rather than being kept
 # for builds nobody runs.
-RUNNING_RE = re.compile(r"\((?:\s*\d+\s*[hms])+\s*·")
+RUNNING_RE = re.compile(
+    r"\((?:\s*\d+\s*[hms])+\s*·"
+    # The spinner line is REPLACED, timer and all, while Claude Code waits out
+    # a first-byte timeout on its own:
+    #   ✻ No response from the API after 6m · retrying once, waiting up to 10m
+    # Reported 2026-09-23. Without this the turn looked finished for the whole
+    # wait (up to 16 minutes), so after-finish typed the next task after 90s,
+    # a due limit 'continue' could land, and the API told companions the
+    # window was idle — all into a request that was still in flight.
+    r"|·\s*retrying\b[^\n]{0,80}?\bwaiting\s+up\s+to\s+\d+\s*[hms]"
+)
 
 
 RUNNING_TAIL_CHARS = 2000
@@ -557,6 +572,39 @@ def _is_composer_line(text: str, pos: int) -> bool:
     return _COMPOSER_LINE_RE.match(text[line_start:line_end]) is not None
 
 
+# What may stand in front of a REAL banner on its own line: indentation and
+# the glyphs Claude Code prints at the start of an output line. Measured over
+# every live sample in test_parse.py: the prefix is always "", "  " or "● ".
+_BANNER_LEAD_RE = re.compile(r"[\s ⎿●⏺✻✽✳·•*]*")
+# The retry banner can also follow the error it is retrying on the same line:
+#   ⎿  API Err·or (Connection error.) · Retry·ing in 3s · attempt 3/10
+_RETRY_LEAD_RE = re.compile(
+    r"[\s ⎿●⏺✻✽✳·•*]*API\s+Error\b[^\n]*?[·•]\s*")
+
+
+def _is_prose_mention(text: str, pos: int, allow=None) -> bool:
+    """True if the match at `pos` sits in the middle of a line of prose.
+
+    Claude Code prints its error banners on a line of their own. The same
+    words in the middle of a sentence are someone QUOTING the error — most
+    often Claude itself, explaining a failure the user pasted. Seen live on
+    2026-09-24: a reply that quoted the no-response line verbatim sat at the
+    bottom of its own session, was read as the real thing, and got 'continue'
+    typed into it (and would have kept getting one every retry interval).
+
+    Not airtight: prose that happens to wrap so the quoted phrase begins a new
+    row still looks like a banner. It closes the common case — the phrase
+    mid-sentence — without touching any real banner seen so far.
+    """
+    line_start = text.rfind("\n", 0, pos) + 1
+    lead = text[line_start:pos]
+    if _BANNER_LEAD_RE.fullmatch(lead):
+        return False
+    if allow is not None and allow.fullmatch(lead):
+        return False
+    return True
+
+
 def parse_retry_exhausted(text: str, pattern=None) -> bool:
     """True if the most recent network-retry banner shows N == total (e.g.
     `attempt 10/10`) and the banner sits near the tail of the buffer.
@@ -573,7 +621,8 @@ def parse_retry_exhausted(text: str, pattern=None) -> bool:
     """
     rx = pattern or RETRY_RE
     matches = [m for m in rx.finditer(text)
-               if not _is_composer_line(text, m.start())]
+               if not _is_composer_line(text, m.start())
+               and not _is_prose_mention(text, m.start(), _RETRY_LEAD_RE)]
     if not matches:
         return False
     m = matches[-1]
@@ -602,7 +651,8 @@ def parse_econnreset_stuck(text: str, pattern=None) -> bool:
     """
     rx = pattern or ECONNRESET_RE
     matches = [m for m in rx.finditer(text)
-               if not _is_composer_line(text, m.start())]
+               if not _is_composer_line(text, m.start())
+               and not _is_prose_mention(text, m.start())]
     if not matches:
         return False
     m = matches[-1]
@@ -627,7 +677,8 @@ def parse_server_error_stuck(text: str, pattern=None) -> bool:
     """
     rx = pattern or SERVER_ERROR_RE
     matches = [m for m in rx.finditer(text)
-               if not _is_composer_line(text, m.start())]
+               if not _is_composer_line(text, m.start())
+               and not _is_prose_mention(text, m.start())]
     if not matches:
         return False
     m = matches[-1]

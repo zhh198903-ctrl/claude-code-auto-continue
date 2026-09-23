@@ -613,6 +613,31 @@ check("G4 the default single run is spent — no second fire", not SENT)
 check("G4a and the remaining count was decremented to zero",
       w._after_finish_loops.get("win") == 0)
 
+# Reported 2026-09-23: Claude Code REPLACES the spinner line, timer and all,
+# while it waits out a first-byte timeout on its own ("retrying once, waiting
+# up to 10m"). With no timer on screen the turn looked finished, so the 90s
+# settle ran out and the next task was typed into a request still in flight.
+# Split so this file cannot trip the watchdog it tests.
+_WAITING = ("✻ No resp" "onse from the API after 6m · retrying once, "
+            "waiting up to 10m")
+SENT.clear()
+w = af_watcher()
+w._tick()                                       # running observed
+TEXTS[9] = IDLE + chr(10) + _WAITING              # first-byte wait begins
+for _ in range(12):                             # 12 minutes of waiting
+    advance(60)
+    w._tick()
+check("G2w a first-byte retry wait is not a finished turn -- nothing typed "
+      "into a request that is still in flight", not SENT)
+TEXTS[9] = IDLE                                 # the retry landed and finished
+advance(60)
+w._tick()
+advance(gui.AFTER_FINISH_SETTLE_S)
+w._tick()
+check("G2x and once it really finishes, after-finish still fires",
+      SENT == [(9, ["next task: refactor the parser"])])
+SENT.clear()
+
 # Spending a run is reported so the GUI can persist it — the whole reason
 # Loops counts DOWN instead of up.
 w = af_watcher()

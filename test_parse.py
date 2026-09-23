@@ -237,6 +237,14 @@ econn_samples = [
     ("  API Err" "or: No resp" "onse from API\n"
      "  ✽ Composing… (12s · ↓ 92 tokens)\n", False),
     (">\xa0API Err" "or: No resp" "onse from API\n", False),
+    # 2026-09-23: newer wording carries "the". A final banner in that style
+    # must be poked like the old one...
+    ("  API Err" "or: No resp" "onse from the API after 16m\n"
+     "  Crunched for 16m 2s · done 12:48\n> \n", True),
+    # ...but the IN-FLIGHT notice is Claude Code still retrying on its own:
+    # no "API Error:" prefix, and a 'continue' now would queue behind it.
+    ("✻ No resp" "onse from the API after 6m · retrying once, "
+     "waiting up to 10m\n> \n", False),
     # Exact form seen in the screenshot.
     ("⎿  · 电域模块 (S参数/RX Filter/CTLE/RX FFE/DFE) 直连光信号源...\n"
      "  API Error: Unable to conn" "ect to API (ECONNRESET)\n"
@@ -1186,6 +1194,52 @@ check_reset("KS9 a brace-looking run that is not a token is still counted, "
       "not echoed",
       ac.summarize_keyspec("{this is not a key name at all}")
       == "<31 chars>")   # 29 inside + 2 braces; a name that long is not a key
+
+print("---- an error QUOTED in prose is not an error ----")
+# 2026-09-24 00:12:30: a reply in a watched session quoted the no-response
+# line mid-sentence while explaining it; the tool read its own screen, saw the
+# words near the bottom, and typed 'continue' into that session. Real banners
+# sit on a line of their own (every live sample: prefix "", "  " or "● ").
+_PROMPT = "\n" + "─" * 40 + "\n❯ \n" + "─" * 40 + "\n"
+_INCIDENT = ("  09-13 收录的真实样本是 API Err" "or: No resp" "onse from API，"
+             "而你贴的新提示已经写成 from the" + _PROMPT)
+check_reset("PQ1 the exact line that fired on 2026-09-24 is no longer a stuck "
+            "session", not ac.parse_econnreset_stuck(_INCIDENT))
+check_reset("PQ2 the same error on a line of its own still is",
+            ac.parse_econnreset_stuck("  API Err" "or: No resp" "onse from API"
+                                      + _PROMPT))
+check_reset("PQ3 ...including under the ⎿ glyph Claude Code prints",
+            ac.parse_econnreset_stuck("  ⎿  API Err" "or: Unable to conn" "ect "
+                                      "to API (ECONNRESET)" + _PROMPT))
+check_reset("PQ4 a truncation marker quoted in prose is not a truncation",
+            not ac.parse_server_error_stuck(
+                "  the log said API Err" "or: Server error mid-resp" "onse. "
+                "yesterday" + _PROMPT))
+check_reset("PQ5 a retry banner quoted in prose is not exhaustion",
+            not ac.parse_retry_exhausted(
+                "  it showed Retry" "ing in 0s · attempt 10/10 then gave up"
+                + _PROMPT))
+check_reset("PQ6 but the retry banner riding on its own error line is real",
+            ac.parse_retry_exhausted(
+                "  ⎿  API Err" "or (Connection error.) · Retry" "ing in 0s · "
+                "attempt 10/10" + _PROMPT))
+
+print("---- a turn waiting on the API is still a running turn ----")
+# Claude Code replaces the spinner line, timer and all, while it waits out a
+# first-byte timeout itself. Everything that waits for "idle" (after-finish,
+# a due limit 'continue', the <idle> recovery step, the API's running field)
+# must read that as running -- it was read as finished (2026-09-23).
+_FOOT = "\n" + "─" * 40 + "\n❯ \n" + "─" * 40 + "\n  ⏵⏵ accept edits on"
+check_reset("RW1 the normal spinner is running",
+            ac.session_running("✻ Crunching… (6m 3s · ↓ 1.2k tokens)" + _FOOT))
+check_reset("RW2 the first-byte retry wait is running too",
+            ac.session_running("✻ No resp" "onse from the API after 6m · "
+                               "retrying once, waiting up to 10m" + _FOOT))
+check_reset("RW3 a finished turn is not",
+            not ac.session_running("✻ Worked for 9s · done 21:32" + _FOOT))
+check_reset("RW4 nor is prose that merely mentions retrying",
+            not ac.session_running("we are retrying the build later today"
+                                   + _FOOT))
 
 
 sys.exit(1 if failures else 0)
