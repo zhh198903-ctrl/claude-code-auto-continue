@@ -12,7 +12,9 @@ import codex_cli as cli
 from codex_watcher import CodexWatcher, State, clean_config
 
 FIXTURES = Path(__file__).parent / "tests" / "fixtures" / "codex"
-NOW = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
+# Captured CLI reset strings use the terminal's local timezone. Keep the
+# fixture clock at local 18:00 on both this PC and UTC GitHub runners.
+NOW = datetime(2026, 10, 1, 18, 0).astimezone(timezone.utc)
 
 
 def capture(name):
