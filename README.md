@@ -1,16 +1,28 @@
 # claude-code-auto-continue
 
-A Windows GUI watchdog that detects when [Claude Code](https://github.com/anthropics/claude-code) running in Windows Terminal hits the 5-hour usage limit, waits for the reset moment, then automatically types `continue` into that exact terminal — letting you walk away from a long session and come back to a still-progressing conversation.
+A Windows GUI watchdog for [Claude Code](https://github.com/anthropics/claude-code) and [Codex CLI](https://learn.chatgpt.com/docs/cli) in Windows Terminal. Choose Claude only, Codex only, or both. Each CLI has independent detection, state, retry settings and configuration.
 
-Optionally also sends `/effort <level>` first, configurable per window.
+It waits for usage limits to reset, resumes recoverable network failures, and can send a configured follow-up after a completed turn. Claude retains its existing behavior; Codex uses its native model and reasoning pickers.
 
 > **Windows-only.** Uses Win32 UI Automation to read terminal scrollback and `SendInput` for keystroke delivery. Tested on Windows 11 with Windows Terminal + PowerShell.
 
 ## Download
 
-**[⬇️ Auto-Continue.exe (latest release)](https://github.com/zhh198903-ctrl/claude-code-auto-continue/releases/latest)** — single-file Windows executable, ~55 MB, no Python or dependencies required. Double-click to run.
+**[⬇️ Auto-Continue.exe (latest release)](https://github.com/zhh198903-ctrl/claude-code-auto-continue/releases/latest)** — single-file Windows executable, no Python or dependencies required. Double-click to run.
 
 Prefer source? See [Install](#install) below.
+
+## Codex CLI (v2.2.0)
+
+- Select **Codex CLI only** or **Claude + Codex CLI** in **Watch**. The default remains Claude-only.
+- Set Codex **Poll**, **Buffer**, **Retry** and **Dry-run** on its own row. **Codex Advanced…** also controls the maximum network retries and resets only Codex settings.
+- Use each Codex window's **Model**, **Effort**, **Now**, **Skip**, **Exclude** and **After finish…** controls. Model and effort changes apply to the current Codex session through the native picker; they do not change the user's Codex defaults.
+- Usage resets include both same-day and dated reset messages. Healthy `/status` rate-limit information does not schedule a continuation.
+- Draft input, running turns and open permission or choice dialogs hold automatic input. Codex permission and choice dialogs require manual input in this version. Authentication and billing errors also require attention.
+- Verified against Codex CLI **0.159.3** in native Windows Terminal, using both default and inline display modes. Failure injection used a loopback provider with the actual CLI renderer.
+- Run each CLI session in a separate Windows Terminal window. Only the active tab/pane can be watched. The local companion API retains its existing Claude-only scope.
+
+The following sections describe the existing Claude watcher.
 
 ## How it works
 

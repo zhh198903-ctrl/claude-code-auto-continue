@@ -1,0 +1,30 @@
+› continue                                                                                                              
+                                                                                                                        
+                                                                                                                        
+■ unexpected status 503 Service Unavailable: Local watchdog failure injection, url: http://127.0.0.1:63722/v1/responses 
+                                                                                                                        
+                                                                                                                        
+› continue                                                                                                              
+                                                                                                                        
+                                                                                                                        
+■ unexpected status 503 Service Unavailable: Local watchdog failure injection, url: http://127.0.0.1:63722/v1/responses 
+                                                                                                                        
+                                                                                                                        
+› continue                                                                                                              
+                                                                                                                        
+                                                                                                                        
+■ unexpected status 503 Service Unavailable: Local watchdog failure injection, url: http://127.0.0.1:63722/v1/responses 
+                                                                                                                        
+                                                                                                                        
+› continue                                                                                                              
+                                                                                                                        
+                                                                                                                        
+• CODEX_RETRY_RECOVERED                                                                                                 
+                                                                                                                        
+  Worked for <1s • 23:35                                                                                                
+                                                                                                                        
+                                                                                                                        
+› release smoke unsent draft                                                                                            
+                                                                                                                        
+  GPT-6.1-Sol high · C:\watchdog-probe                                                          
+                                                                                               ⚠ 1 warning · f2 to view

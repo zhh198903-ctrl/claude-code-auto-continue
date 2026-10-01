@@ -1,0 +1,61 @@
+
+
+  >_ OpenAI Codex (v0.159.3)
+
+     C:\watchdog-probe
+
+
+
+  This looks like the start of a perfectly reasonable rabbit hole.
+
+
+
+  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra performance at a lower cost.
+
+
+
+/status
+
+
+
+  >_ OpenAI Codex (v0.159.3)
+
+
+
+  Visit https://chatgpt.com/codex/settings/usage for up-to-date
+
+  information on rate limits and credits
+
+
+
+  Model:               GPT-6.1-Sol (reasoning xhigh, summaries auto)
+
+  Model provider:      openai
+
+  Directory:           C:\watchdog-probe
+
+  Permissions:         Read Only (never)
+
+  Agents.md:           ~\.codex\AGENTS.md, AGENTS.md
+
+  Account:             Plus
+
+  Collaboration mode:  Default
+
+  Session:             <probe-session>
+
+
+
+  5h limit:            [████████████░░░░░░░░] 61% left (resets 21:51)
+
+  Weekly limit:        [████████████████░░░░] 78% left (resets 11:29 on 8 Oct)
+
+
+
+
+
+› Ask Codex to do anything
+
+
+
+  GPT-6.1-Sol xhigh · C:\watchdog-probe

@@ -1,0 +1,85 @@
+
+
+  >_ OpenAI Codex (v0.159.3)
+
+     C:\watchdog-probe
+
+
+
+  It’s dangerous to code alone. Take a prompt.
+
+
+
+  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra performance at a lower cost.
+
+
+
+
+
+› Reply only CODEX_PROBE_READY.
+
+
+
+
+
+■ You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit
+
+https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 5:33 PM.
+
+
+
+
+
+› continue
+
+
+
+
+
+• CODEX_RETRY_RECOVERED
+
+
+
+  Worked for <1s • 17:43
+
+
+
+
+
+› /model gpt-6.1-sol
+
+
+
+
+
+• CODEX_RETRY_RECOVERED
+
+
+
+  Worked for <1s • 17:46
+
+
+
+• Model changed to gpt-6.1-sol max for this session only
+
+
+
+
+
+› continue
+
+
+
+
+
+■ unexpected status 503 Service Unavailable: Local watchdog failure injection, url: http://127.0.0.1:63722/v1/responses
+
+
+
+
+
+› Ask Codex to do anything
+
+
+
+  GPT-6.1-Sol max · C:\watchdog-probe                                  ⚠ 1 warning · f2 to view

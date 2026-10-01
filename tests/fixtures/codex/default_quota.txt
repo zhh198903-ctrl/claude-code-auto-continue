@@ -1,0 +1,59 @@
+
+
+  >_ OpenAI Codex (v0.159.3)
+
+     C:\watchdog-probe
+
+
+
+  Bring a question. Bonus points if it’s a weird one.
+
+
+
+
+
+› Reply only CODEX_PROBE_READY.
+
+
+
+
+
+■ You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/
+
+settings/usage to purchase more credits or try again at 5:59 PM.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Ask Codex to do anything
+
+
+
+  gpt-probe xhigh · C:\watchdog-probe
+
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view

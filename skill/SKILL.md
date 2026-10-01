@@ -1,15 +1,27 @@
 ---
 name: auto-continue
-description: 排查和配置 Auto-Continue —— Claude Code 在 Windows 上的看门狗。看懂它的活动日志（每行都带窗口 id）、判断某个会话为什么没被接上、配置模型恢复与「跑完接下一棒」、把日志脱敏后发给作者。触发词：auto-continue, 自动继续, 会话卡住没人管, 5 小时限制没恢复, 窗口没被接上, activity.log, 看门狗, watchdog, 模型恢复, after-finish, 导出日志反馈。
+description: 排查和配置 Auto-Continue —— Windows 上 Claude Code / Codex CLI 的看门狗。看懂活动日志、判断会话为什么没被接上、配置独立的监控模式、模型恢复与「跑完接下一棒」、把日志脱敏后发给作者。触发词：auto-continue, 自动继续, Codex CLI, 会话卡住没人管, 5 小时限制没恢复, 窗口没被接上, activity.log, 看门狗, watchdog, 模型恢复, after-finish, 导出日志反馈。
 ---
 
 # Auto-Continue
 
-Claude Code 的 Windows 看门狗：盯着「窗口停下来了」并替用户推下去。
+Claude Code / Codex CLI 的 Windows 看门狗：监控终端中的故障和任务结束。
 单文件免安装，MIT 开源、免费、可商用。
 
 **先读日志再下结论。** 它是屏幕抓取工具，凭记忆猜它「应该」怎么做，
 十次有九次猜错——日志里写着它当时看见了什么、做了什么。
+
+## Codex CLI（v2.2.0）
+
+Watch 可选 Claude CLI only、Codex CLI only、Claude + Codex CLI。两套监控使用独立的检测、计时、重试和配置；先确认当前选中的模式。
+
+Codex 的 Poll、Buffer、Retry、Dry-run 和 **Codex Advanced…** 只影响 Codex。表格每个 Codex 窗口可以单独设置 Model / Effort、Exclude 和 After finish。模型和推理强度通过真实 CLI 的 `/model` 菜单应用到当前会话，支持范围取决于 CLI 的菜单。
+
+Codex 支持到额度重置时间发送 `continue`、网络错误重试（达到 Maximum retries 后停止）、任务结束后按设定次数发送下一条提示词。日志带 `Codex #窗口id` 前缀。无法解析额度重置时间时提示人工处理；登录、权限确认、选项菜单和未发送的草稿均等待用户操作。
+
+每个 Codex 会话使用独立 Windows Terminal 窗口。只读取当前可见的活动标签页；隐藏标签页无法可靠监控。已在真实 Codex CLI 0.159.3 的默认界面和 `--no-alt-screen` 界面上验证。此功能面向 Codex CLI；桌面 Codex App 不在监控范围内。本地 API 保持原有 Claude 范围。
+
+以下原有故障类型、自动许可与选择框说明适用于 Claude Code。
 
 ## 东西在哪
 
@@ -17,7 +29,7 @@ Claude Code 的 Windows 看门狗：盯着「窗口停下来了」并替用户�
 |---|---|
 | 活动日志 | `%LOCALAPPDATA%\auto_continue\activity.log` |
 | 轮转 | 到约 1 MB 转成 `.log.old`，只留一份；事发第二天排查记得连 `.old` 一起看 |
-| 设置 | 注册表，随 GUI 保存；界面上 **Advanced…** 里全部可改 |
+| 设置 | 注册表，随 GUI 保存；Claude 用 **Advanced…**，Codex 用 **Codex Advanced…** 和窗口表格 |
 | 日志本体 | 只记它自己的判断和动作，**从不记录终端内容** |
 
 ```bash

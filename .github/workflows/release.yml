@@ -67,6 +67,9 @@ jobs:
           python test_singleinstance.py
           python test_selftrigger.py
 
+      - name: Codex CLI isolation and GUI checks
+        run: python -m unittest test_codex_cli test_codex_gui -v
+
       - name: Build onefile exe
         run: pyinstaller Auto-Continue.spec --clean --noconfirm
 

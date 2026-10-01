@@ -101,6 +101,9 @@ from auto_continue import (
 )
 import updater
 import local_api
+from cli_routing import claude_windows as find_terminal_windows
+from cli_routing import claude_window as terminal_window_from_handle
+from codex_gui import CodexGuiMixin
 
 
 # Effort levels offered in the per-window dropdown, matching Claude Code's
@@ -3120,6 +3123,9 @@ STATUS_LABEL = {
     ST_RETRY:    "⚠ Net retry",
     ST_PROMPT:   "⏎ Limit prompt",
     ST_FABLE:    "⇄ Fable-recover",
+    "held":      "Input held",
+    "unknown":   "Unreadable",
+    "attention": "Needs attention",
 }
 
 
@@ -3378,11 +3384,19 @@ def set_autostart(enabled: bool) -> None:
             pass  # nothing to remove
 
 
-class MainWindow(QMainWindow):
+class MainWindow(CodexGuiMixin, QMainWindow):
     # Signals into the watcher (auto-connected via Qt::QueuedConnection
     # because the watcher lives on a different thread).
     sig_start = pyqtSignal()
     sig_stop = pyqtSignal()
+    sig_claude_start = pyqtSignal()
+    sig_claude_stop = pyqtSignal()
+    sig_codex_start = pyqtSignal()
+    sig_codex_stop = pyqtSignal()
+    sig_codex_config = pyqtSignal(dict)
+    sig_codex_fire = pyqtSignal(int)
+    sig_codex_skip = pyqtSignal(int)
+    sig_codex_cooldown = pyqtSignal(int)
     sig_set_interval = pyqtSignal(int)
     sig_set_buffer = pyqtSignal(int)
     sig_set_retry_interval = pyqtSignal(int)
@@ -3417,7 +3431,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"Auto-Continue v{APP_VERSION} · Claude Code")
+        self._init_cli_gui()
+        self.setWindowTitle(f"Auto-Continue v{APP_VERSION} · Claude / Codex CLI")
         self.resize(960, 620)
 
         self.settings = QSettings("auto_continue", "gui")
@@ -3661,6 +3676,7 @@ class MainWindow(QMainWindow):
         header.addLayout(autostart_box)
         header.addSpacing(12)
         header.addWidget(QLabel("poll"))
+        header.insertWidget(header.count() - 1, QLabel("Claude CLI"))
         header.addWidget(self.interval_spin)
         header.addWidget(QLabel("buffer"))
         header.addWidget(self.buffer_spin)
@@ -3713,6 +3729,7 @@ class MainWindow(QMainWindow):
             b.setMinimumWidth(110)
         header.addLayout(btn_grid)
         root.addLayout(header)
+        self._build_cli_controls(root)
 
         # Update banner (hidden until an update is found).
         self.update_banner = QWidget()
@@ -3908,8 +3925,10 @@ class MainWindow(QMainWindow):
         self.worker_thread.started.connect(self.worker.thread_started)
 
         # Forward UI commands → worker.
-        self.sig_start.connect(self.worker.start)
-        self.sig_stop.connect(self.worker.stop)
+        self.sig_start.connect(self._start_selected_watchers)
+        self.sig_stop.connect(self._stop_watchers)
+        self.sig_claude_start.connect(self.worker.start)
+        self.sig_claude_stop.connect(self.worker.stop)
         self.sig_set_interval.connect(self.worker.set_interval)
         self.sig_set_buffer.connect(self.worker.set_buffer)
         self.sig_set_retry_interval.connect(self.worker.set_retry_interval)
@@ -3937,11 +3956,12 @@ class MainWindow(QMainWindow):
             self.worker.set_trigger_patterns)
 
         # Receive snapshots and logs.
-        self.worker.snapshot.connect(self._on_snapshot)
+        self.worker.snapshot.connect(self._on_claude_snapshot)
         self.worker.log.connect(self._append_log)
         self.worker.fable_untick.connect(self._on_fable_untick)
         self.worker.loops_spent.connect(self._on_loops_spent)
-        self.worker.running_changed.connect(self._on_running_changed)
+        self.worker.running_changed.connect(self._on_claude_running)
+        self._build_codex_worker()
 
         self.worker_thread.start()
         # Only now: the API hands sends to the watcher, so there has to be a
@@ -4323,6 +4343,8 @@ class MainWindow(QMainWindow):
         it would let any caller slow the watcher down by polling."""
         rows = []
         for r in (self._latest_snapshot or []):
+            if r.get("provider", "claude") != "claude":
+                continue
             row = dict(r)
             for k in ("reset_utc", "last_sent_utc", "retry_last_sent_utc"):
                 v = row.get(k)
@@ -4692,6 +4714,7 @@ class MainWindow(QMainWindow):
             return default
 
     def _load_settings(self) -> None:
+        self._load_cli_settings()
         # Block widget signals so that programmatically populating the
         # controls doesn't trigger a chain of valueChanged → _save_settings
         # → sig_set_* before the worker is even ready.
@@ -4892,6 +4915,7 @@ class MainWindow(QMainWindow):
 
     def _save_settings(self) -> None:
         import json
+        self._save_cli_settings()
         self.settings.setValue("interval", self.interval_spin.value())
         self.settings.setValue("buffer", self.buffer_spin.value())
         self.settings.setValue("retry_interval", self.retry_spin.value())
@@ -4961,7 +4985,7 @@ class MainWindow(QMainWindow):
         # rebuilding destroys the cell widgets, which closes any model/
         # effort dropdown the user has open and resets row selection.
         # (The countdown column is repainted by its own 1s timer.)
-        sig = [(r["hwnd"], r["title"], r["status"], r["reset_utc"],
+        sig = [(r.get("provider", "claude"), r["hwnd"], r["title"], r["status"], r["reset_utc"],
                 r["last_sent_utc"], r["excluded"], r["model"], r["effort"],
                 r.get("tabs", 1))
                for r in rows]
@@ -5050,7 +5074,15 @@ class MainWindow(QMainWindow):
 
         for r, row in enumerate(rows):
             tabs = row.get("tabs", 1)
-            title_text = row["title"]
+            is_codex = row.get("provider") == "codex"
+            if is_codex:
+                # Show settings edits immediately, without waiting for the
+                # next Codex poll or changing the worker's snapshot object.
+                row = dict(row,
+                    model=self._codex_config["model_overrides"].get(row["title"], ""),
+                    effort=self._codex_config["effort_overrides"].get(row["title"], ""),
+                    excluded=row["title"] in self._codex_config["excluded"])
+            title_text = ("[Codex CLI] " if is_codex else "[Claude CLI] ") + row["title"]
             if tabs > 1:
                 title_text += f"   ⚠ {tabs} tabs"
             title_item = QTableWidgetItem(title_text)
@@ -5061,10 +5093,14 @@ class MainWindow(QMainWindow):
                         f" background tabs' content.\nDrag each Claude tab"
                         f" out into its own window for full coverage.")
             title_item.setToolTip(tip)
+            if is_codex:
+                title_item.setToolTip(tip + "\nOnly the active tab is watched. Use a separate window per session."
+                    + f"\nCurrent Codex: {row.get('current_model', '')} {row.get('current_effort', '')}")
             self.table.setItem(r, 0, title_item)
 
             status_item = QTableWidgetItem(
-                STATUS_LABEL.get(row["status"], row["status"])
+                "Waiting for input" if is_codex and row["status"] == ST_PROMPT
+                else STATUS_LABEL.get(row["status"], row["status"])
             )
             bg = self._palette["status_bg"].get(row["status"])
             if bg is not None:
@@ -5097,11 +5133,15 @@ class MainWindow(QMainWindow):
             model_combo = QComboBox()
             model_combo.setEditable(True)
             model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-            for level in MODEL_LEVELS:
-                model_combo.addItem(MODEL_LABEL[level], userData=level)
+            model_levels = MODEL_LEVELS
+            if is_codex:
+                from codex_gui import MODEL_LEVELS as codex_models
+                model_levels = codex_models
+            for level in model_levels:
+                model_combo.addItem((level or "(none)") if is_codex else MODEL_LABEL[level], userData=level)
             current_m = row.get("model", "")
             try:
-                idx_m = MODEL_LEVELS.index(current_m)
+                idx_m = model_levels.index(current_m)
                 model_combo.setCurrentIndex(idx_m)
             except ValueError:
                 # A custom name the user typed earlier — show it as-is.
@@ -5113,12 +5153,17 @@ class MainWindow(QMainWindow):
                 "(a newer model family). (none) leaves the session's model "
                 "unchanged. Setting persists per window across restarts."
             )
+            if is_codex:
+                model_combo.setToolTip("Apply a model from this session's native Codex picker before continuing. (none) keeps the current model. Session only.")
 
-            def _model_picked(_i=None, t=row["title"], cb=model_combo):
+            def _model_picked(_i=None, t=row["title"], cb=model_combo, cx=is_codex):
                 # currentData() is None for typed text, so fall back to it.
                 data = cb.currentData()
-                self._on_model_changed(
-                    t, data if data is not None else cb.currentText().strip())
+                value = data if data is not None else cb.currentText().strip()
+                if cx:
+                    self._on_codex_override(t, "model", value)
+                else:
+                    self._on_model_changed(t, value)
 
             model_combo.currentIndexChanged.connect(_model_picked)
             model_combo.lineEdit().editingFinished.connect(_model_picked)
@@ -5127,11 +5172,15 @@ class MainWindow(QMainWindow):
             # Effort dropdown — sent as `/effort <level>` right before
             # `continue`. "(none)" means skip /effort and just send continue.
             effort_combo = QComboBox()
-            for level in EFFORT_LEVELS:
-                effort_combo.addItem(EFFORT_LABEL[level], userData=level)
+            effort_levels = EFFORT_LEVELS
+            if is_codex:
+                from codex_gui import EFFORT_LEVELS as codex_efforts
+                effort_levels = codex_efforts
+            for level in effort_levels:
+                effort_combo.addItem((level or "(none)") if is_codex else EFFORT_LABEL[level], userData=level)
             current = row.get("effort", "")
             try:
-                idx = EFFORT_LEVELS.index(current)
+                idx = effort_levels.index(current)
             except ValueError:
                 idx = 0
             effort_combo.setCurrentIndex(idx)
@@ -5139,8 +5188,11 @@ class MainWindow(QMainWindow):
                 "Auto-prefix the next continue with `/effort <level>`. "
                 "Setting persists per window across restarts."
             )
+            if is_codex:
+                effort_combo.setToolTip("Apply reasoning effort in the native Codex picker before continuing. (none) keeps the current effort. Session only.")
             effort_combo.currentIndexChanged.connect(
-                lambda _i, t=row["title"], cb=effort_combo:
+                lambda _i, t=row["title"], cb=effort_combo, cx=is_codex:
+                self._on_codex_override(t, "effort", cb.currentData()) if cx else
                 self._on_effort_changed(t, cb.currentData())
             )
             self.table.setCellWidget(r, 6, effort_combo)
@@ -5155,14 +5207,14 @@ class MainWindow(QMainWindow):
                 un_btn = QPushButton("Include")
                 un_btn.setToolTip("Resume watching this window")
                 un_btn.clicked.connect(
-                    lambda _, t=row["title"]: self._do_unexclude(t)
+                    lambda _, rr=row: self._cli_action(rr, "include")
                 )
                 hl.addWidget(un_btn)
             else:
                 now_btn = QPushButton("Now")
                 now_btn.setToolTip("Send 'continue' immediately")
                 now_btn.clicked.connect(
-                    lambda _, h=row["hwnd"]: self.sig_fire_now.emit(h)
+                    lambda _, rr=row: self._cli_action(rr, "fire")
                 )
                 hl.addWidget(now_btn)
 
@@ -5170,25 +5222,26 @@ class MainWindow(QMainWindow):
                 skip_btn.setToolTip("Cancel pending continue for this row")
                 skip_btn.setEnabled(row["status"] == ST_PENDING)
                 skip_btn.clicked.connect(
-                    lambda _, h=row["hwnd"]: self.sig_skip.emit(h)
+                    lambda _, rr=row: self._cli_action(rr, "skip")
                 )
                 hl.addWidget(skip_btn)
 
                 ex_btn = QPushButton("Exclude")
                 ex_btn.setToolTip("Stop watching this window (remembered)")
                 ex_btn.clicked.connect(
-                    lambda _, h=row["hwnd"], t=row["title"]:
-                    self._do_exclude(h, t)
+                    lambda _, rr=row: self._cli_action(rr, "exclude")
                 )
                 hl.addWidget(ex_btn)
 
                 # After-finish prompt. A button + popup rather than an inline
                 # edit: prompts are sentences, and a column wide enough to
                 # show one would crowd out the table.
-                _af_key = title_key(row["title"])
-                _af_cur = self._after_finish.get(_af_key, "")
+                _af_key = row["title"] if is_codex else title_key(row["title"])
+                _af_config = self._codex_config["after_finish"] if is_codex else self._after_finish
+                _af_loops = self._codex_config["after_finish_loops"] if is_codex else self._after_finish_loops
+                _af_cur = _af_config.get(_af_key, "")
                 try:
-                    _af_left = int(self._after_finish_loops.get(_af_key, 1))
+                    _af_left = int(_af_loops.get(_af_key, 1))
                 except (TypeError, ValueError):
                     _af_left = 1
                 if not _af_cur:
@@ -5210,7 +5263,7 @@ class MainWindow(QMainWindow):
                     "Set a prompt to type automatically when this session "
                     "finishes its current run and sits idle. Empty = off.")
                 af_btn.clicked.connect(
-                    lambda _, t=row["title"]: self._on_after_finish_clicked(t)
+                    lambda _, rr=row: self._cli_action(rr, "after_finish")
                 )
                 hl.addWidget(af_btn)
 
@@ -5223,8 +5276,7 @@ class MainWindow(QMainWindow):
                         "Forget the recent send so detection resumes now."
                     )
                     cd_btn.clicked.connect(
-                        lambda _, h=row["hwnd"]:
-                        self.sig_clear_cooldown.emit(h)
+                        lambda _, rr=row: self._cli_action(rr, "cooldown")
                     )
                     hl.addWidget(cd_btn)
 
