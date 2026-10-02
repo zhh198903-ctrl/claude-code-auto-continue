@@ -1,25 +1,27 @@
 ---
 name: auto-continue
-description: 排查和配置 Auto-Continue —— Windows 上 Claude Code / Codex CLI 的看门狗。看懂活动日志、判断会话为什么没被接上、配置独立的监控模式、模型恢复与「跑完接下一棒」、把日志脱敏后发给作者。触发词：auto-continue, 自动继续, Codex CLI, 会话卡住没人管, 5 小时限制没恢复, 窗口没被接上, activity.log, 看门狗, watchdog, 模型恢复, after-finish, 导出日志反馈。
+description: 排查和配置 Auto-Continue —— Windows 上 Claude Code / Codex CLI / Codex 桌面 App 的看门狗。看懂活动日志、判断会话为什么没被接上、配置独立的监控模式、模型恢复与「跑完接下一棒」、把日志脱敏后发给作者。触发词：auto-continue, 自动继续, Codex CLI, 会话卡住没人管, 5 小时限制没恢复, 窗口没被接上, activity.log, 看门狗, watchdog, 模型恢复, after-finish, 导出日志反馈。
 ---
 
 # Auto-Continue
 
-Claude Code / Codex CLI 的 Windows 看门狗：监控终端中的故障和任务结束。
+Claude Code / Codex CLI / Codex 桌面 App 的 Windows 看门狗：监控故障和任务结束。
 单文件免安装，MIT 开源、免费、可商用。
 
 **先读日志再下结论。** 它是屏幕抓取工具，凭记忆猜它「应该」怎么做，
 十次有九次猜错——日志里写着它当时看见了什么、做了什么。
 
-## Codex CLI（v2.2.0）
+## Codex CLI 与桌面 App（v2.3.0）
 
-Watch 可选 Claude CLI only、Codex CLI only、Claude + Codex CLI。两套监控使用独立的检测、计时、重试和配置；先确认当前选中的模式。
+Watch 可选 Claude CLI only、Codex only、Claude + Codex；Codex targets 再选 CLI、Desktop App 或 CLI + Desktop App。Claude、Codex CLI、Codex App 各用独立检测、状态与配置，先确认模式和表格前缀。
 
-Codex 的 Poll、Buffer、Retry、Dry-run 和 **Codex Advanced…** 只影响 Codex。表格每个 Codex 窗口可以单独设置 Model / Effort、Exclude 和 After finish。模型和推理强度通过真实 CLI 的 `/model` 菜单应用到当前会话，支持范围取决于 CLI 的菜单。
+Codex CLI 与 App 各有 Poll、Buffer、Retry、Dry-run 和 Advanced 设置。每个窗口独立设置 Model / Effort、Exclude、After finish 提示词与剩余次数。模型和强度通过当前会话的原生菜单应用，不支持的值会阻止发送并记日志。设置不影响 Claude。
 
-Codex 支持到额度重置时间发送 `continue`、网络错误重试（达到 Maximum retries 后停止）、任务结束后按设定次数发送下一条提示词。日志带 `Codex #窗口id` 前缀。无法解析额度重置时间时提示人工处理；登录、权限确认、选项菜单和未发送的草稿均等待用户操作。
+CLI 到额度重置时间发送 continue；桌面 App 若只显示额度限制而没有重置时间，按 Retry 间隔尝试，到 Maximum retries 后停止。网络错误同样限制重试次数。After finish 次数发送后立即扣减并保存，0 次不会再发送。登录、付费和未知错误需要人工处理。
 
-每个 Codex 会话使用独立 Windows Terminal 窗口。只读取当前可见的活动标签页；隐藏标签页无法可靠监控。已在真实 Codex CLI 0.159.3 的默认界面和 `--no-alt-screen` 界面上验证。此功能面向 Codex CLI；桌面 Codex App 不在监控范围内。本地 API 保持原有 Claude 范围。
+草稿、任务运行、确认对话框、菜单、窗口不可读、切换会话都会暂停自动输入。每个 CLI 会话使用独立 Windows Terminal 窗口，只监控活动标签页；桌面 App 只监控各窗口当前可见的 Codex 会话，不监控隐藏会话或 ChatGPT 模式。本地 API 保持原有 Claude 范围。
+
+已在真实 Codex CLI 0.159.3 和桌面 App 26.930.2377.0 验证。CLI 和 App 的日志分别以 Codex CLI watcher started / Codex App watcher started 表示启动，动作含窗口 id。未知终端不会默认识别成 Claude。
 
 以下原有故障类型、自动许可与选择框说明适用于 Claude Code。
 

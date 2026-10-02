@@ -67,11 +67,11 @@ jobs:
           python test_singleinstance.py
           python test_selftrigger.py
 
-      - name: Codex CLI isolation and GUI checks
-        run: python -m unittest test_codex_cli test_codex_gui -v
+      - name: Codex routing, CLI, desktop and GUI checks
+        run: python -m unittest test_cli_routing test_codex_cli test_codex_gui test_codex_app -v
 
       - name: Build onefile exe
-        run: pyinstaller Auto-Continue.spec --clean --noconfirm
+        run: python build_release.py
 
       - name: Report exe size
         run: Get-Item dist/Auto-Continue.exe | Select-Object Name,Length

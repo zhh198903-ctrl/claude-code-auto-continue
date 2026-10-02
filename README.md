@@ -1,10 +1,10 @@
 # claude-code-auto-continue
 
-A Windows GUI watchdog for [Claude Code](https://github.com/anthropics/claude-code) and [Codex CLI](https://learn.chatgpt.com/docs/cli) in Windows Terminal. Choose Claude only, Codex only, or both. Each CLI has independent detection, state, retry settings and configuration.
+A Windows GUI watchdog for [Claude Code](https://github.com/anthropics/claude-code), Codex CLI in Windows Terminal, and the Codex desktop App. Choose Claude only, Codex only, or both; select CLI, Desktop App, or both for Codex. Each driver has independent detection, state, retries and configuration.
 
-It waits for usage limits to reset, resumes recoverable network failures, and can send a configured follow-up after a completed turn. Claude retains its existing behavior; Codex uses its native model and reasoning pickers.
+It resumes recoverable failures and can send a configured follow-up after a completed turn. Claude retains its existing behavior. Codex model and reasoning settings use the actual session's native controls.
 
-> **Windows-only.** Uses Win32 UI Automation to read terminal scrollback and `SendInput` for keystroke delivery. Tested on Windows 11 with Windows Terminal + PowerShell.
+> **Windows-only.** Tested on Windows 11 with native Windows Terminal and the installed Codex desktop App. The release contains one executable: `Auto-Continue.exe`.
 
 ## Download
 
@@ -12,15 +12,17 @@ It waits for usage limits to reset, resumes recoverable network failures, and ca
 
 Prefer source? See [Install](#install) below.
 
-## Codex CLI (v2.2.0)
+## Codex CLI and desktop App (v2.3.0)
 
-- Select **Codex CLI only** or **Claude + Codex CLI** in **Watch**. The default remains Claude-only.
-- Set Codex **Poll**, **Buffer**, **Retry** and **Dry-run** on its own row. **Codex Advanced…** also controls the maximum network retries and resets only Codex settings.
-- Use each Codex window's **Model**, **Effort**, **Now**, **Skip**, **Exclude** and **After finish…** controls. Model and effort changes apply to the current Codex session through the native picker; they do not change the user's Codex defaults.
-- Usage resets include both same-day and dated reset messages. Healthy `/status` rate-limit information does not schedule a continuation.
-- Draft input, running turns and open permission or choice dialogs hold automatic input. Codex permission and choice dialogs require manual input in this version. Authentication and billing errors also require attention.
-- Verified against Codex CLI **0.159.3** in native Windows Terminal, using both default and inline display modes. Failure injection used a loopback provider with the actual CLI renderer.
-- Run each CLI session in a separate Windows Terminal window. Only the active tab/pane can be watched. The local companion API retains its existing Claude-only scope.
+- In **Watch**, select **Codex only** or **Claude + Codex**. Then set **Codex targets** to **CLI**, **Desktop App**, or **CLI + Desktop App**. The default remains Claude-only, with CLI as the default Codex target.
+- CLI and App each have their own **Poll**, **Buffer**, **Retry**, **Dry-run**, advanced retry limit, exclusions, model/effort overrides and after-finish prompts. Codex settings do not change Claude settings.
+- Per-window **Model**, **Effort**, **Now**, **Skip**, **Exclude** and **After finish…** controls use that row's driver. Model/effort settings apply to the current session through native menus. An unavailable value holds the send and logs a warning.
+- CLI usage limits resume at the parsed reset time. The desktop App may show a usage-limit message without a reset time; those messages retry at the configured **Retry** interval, up to **Maximum retries**. Recoverable network failures also use this bounded retry policy. Authentication, billing and unrecognised native errors require attention.
+- **After finish…** sends the configured prompt after a completed turn. Its remaining loop count is persisted immediately; a count of zero prevents further automatic follow-ups.
+- Draft input, active turns, permission dialogs, open menus, unreadable UI and a changed conversation hold automatic input. Codex approval dialogs require manual input.
+- Each CLI session needs a separate Windows Terminal window; only the active tab/pane is watched. For the desktop App, only the visible Codex conversation in each App window is watched. Hidden conversations and ChatGPT mode are not watched. The local companion API retains its existing Claude-only scope.
+- Verified against actual Codex CLI **0.159.3** and Codex desktop App **26.930.2377.0**. Failure injection used a loopback provider with the actual native renderer, including quota recovery, bounded network retries, one follow-up, native model/effort controls, drafts and menus.
+- Terminal routing requires positive provider identification. Unknown terminals are held, and switching a tab from Claude to Codex clears the retained Claude row. The App is identified from its installed executable, including builds whose native process is named `ChatGPT.exe`.
 
 The following sections describe the existing Claude watcher.
 
@@ -47,9 +49,9 @@ cd claude-code-auto-continue
 pip install -r requirements.txt
 ```
 
-To build your own exe from source: `python -m PyInstaller Auto-Continue.spec --clean --noconfirm` → output at `dist/Auto-Continue.exe`.
+To build your own exe from source: `python build_release.py` → output at `dist/Auto-Continue.exe`.
 
-`python _make_dist_zip.py` then packages that exe with the README and LICENSE into `D:\claude\Auto-Continue_dist_v<version>.zip`, matching the sibling projects' layout. Nothing calls it automatically — a release publishes the bare exe through CI — so **run it after bumping the version**, or the zip on disk keeps claiming an older release. It takes the version from `APP_VERSION`, so the name can never disagree with what is inside it, and it prunes older `Auto-Continue_dist_v*.zip` files so only the newest package remains — the pattern is exact, because that folder is shared with the sibling projects' packages.
+`python _make_dist_zip.py` packages the executable, README, LICENSE and matching skill into `packages/Auto-Continue_dist_v<version>.zip`. `--out-dir` may select another directory inside this project. Build through `build_release.py` so unrelated DLL directories in the launching shell do not enter the bundle. Keep test executables outside `dist`; the release directory must contain only `Auto-Continue.exe`.
 
 ## Run
 

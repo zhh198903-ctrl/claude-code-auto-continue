@@ -4,6 +4,8 @@ projects' convention:  <Name>_dist_v<X>_<Y>_<Z>.zip  containing a top
 folder <Name>_dist/ with the runnable distributable inside.
 """
 import os
+import argparse
+from pathlib import Path
 import re
 import sys
 import zipfile
@@ -24,7 +26,14 @@ if not _m:
 VERSION = _m.group(1).replace(".", "_")
 
 TOP = f"{NAME}_dist"
-OUT = rf"D:\claude\{NAME}_dist_v{VERSION}.zip"
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--out-dir', default='packages', help='Package directory inside this project')
+args = parser.parse_args()
+package_dir = (Path(HERE) / args.out_dir).resolve()
+if not package_dir.is_relative_to(Path(HERE)) or package_dir == Path(HERE):
+    parser.error('Package output must be a subdirectory of this project')
+package_dir.mkdir(parents=True, exist_ok=True)
+OUT = str(package_dir / f"{NAME}_dist_v{VERSION}.zip")
 
 # (source path, name inside the zip's top folder)
 MEMBERS = [
@@ -67,7 +76,7 @@ print(f"\nOUT: {OUT}  ({os.path.getsize(OUT)/1e6:.1f} MB zipped)")
 # folder in the same step, which is what stops them drifting apart -- a
 # skill describing a different build's log format is worse than none.
 SKILL_TOP = f"{NAME}-Skill_dist"
-SKILL_OUT = os.path.join(r"D:\claude", f"{NAME}-Skill_dist_v{VERSION}.zip")
+SKILL_OUT = str(package_dir / f"{NAME}-Skill_dist_v{VERSION}.zip")
 SKILL_MEMBERS = [
     (os.path.join(HERE, "skill", "SKILL.md"), "auto-continue/SKILL.md"),
     (os.path.join(HERE, "skill", "INSTALL.md"), "auto-continue/INSTALL.md"),

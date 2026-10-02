@@ -2,7 +2,7 @@
 """PyInstaller spec for the Auto-Continue GUI watchdog.
 
 Build:
-    pyinstaller Auto-Continue.spec --clean --noconfirm
+    python build_release.py
 
 Output:
     dist/Auto-Continue.exe   (single-file, no console, no deps)

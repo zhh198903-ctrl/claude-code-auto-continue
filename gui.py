@@ -3397,6 +3397,12 @@ class MainWindow(CodexGuiMixin, QMainWindow):
     sig_codex_fire = pyqtSignal(int)
     sig_codex_skip = pyqtSignal(int)
     sig_codex_cooldown = pyqtSignal(int)
+    sig_codex_app_start = pyqtSignal()
+    sig_codex_app_stop = pyqtSignal()
+    sig_codex_app_config = pyqtSignal(dict)
+    sig_codex_app_fire = pyqtSignal(int)
+    sig_codex_app_skip = pyqtSignal(int)
+    sig_codex_app_cooldown = pyqtSignal(int)
     sig_set_interval = pyqtSignal(int)
     sig_set_buffer = pyqtSignal(int)
     sig_set_retry_interval = pyqtSignal(int)
@@ -3432,7 +3438,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self._init_cli_gui()
-        self.setWindowTitle(f"Auto-Continue v{APP_VERSION} · Claude / Codex CLI")
+        self.setWindowTitle(f"Auto-Continue v{APP_VERSION} · Claude / Codex")
         self.resize(960, 620)
 
         self.settings = QSettings("auto_continue", "gui")
@@ -5074,15 +5080,17 @@ class MainWindow(CodexGuiMixin, QMainWindow):
 
         for r, row in enumerate(rows):
             tabs = row.get("tabs", 1)
-            is_codex = row.get("provider") == "codex"
+            provider = row.get("provider", "claude")
+            is_codex = provider in ("codex", "codex_app")
             if is_codex:
+                codex_config = self._codex_row_config(row)
                 # Show settings edits immediately, without waiting for the
                 # next Codex poll or changing the worker's snapshot object.
                 row = dict(row,
-                    model=self._codex_config["model_overrides"].get(row["title"], ""),
-                    effort=self._codex_config["effort_overrides"].get(row["title"], ""),
-                    excluded=row["title"] in self._codex_config["excluded"])
-            title_text = ("[Codex CLI] " if is_codex else "[Claude CLI] ") + row["title"]
+                    model=codex_config["model_overrides"].get(row["title"], ""),
+                    effort=codex_config["effort_overrides"].get(row["title"], ""),
+                    excluded=row["title"] in codex_config["excluded"])
+            title_text = {"codex": "[Codex CLI] ", "codex_app": "[Codex App] "}.get(provider, "[Claude CLI] ") + row["title"]
             if tabs > 1:
                 title_text += f"   ⚠ {tabs} tabs"
             title_item = QTableWidgetItem(title_text)
@@ -5156,12 +5164,12 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             if is_codex:
                 model_combo.setToolTip("Apply a model from this session's native Codex picker before continuing. (none) keeps the current model. Session only.")
 
-            def _model_picked(_i=None, t=row["title"], cb=model_combo, cx=is_codex):
+            def _model_picked(_i=None, t=row["title"], cb=model_combo, cx=is_codex, cp=provider):
                 # currentData() is None for typed text, so fall back to it.
                 data = cb.currentData()
                 value = data if data is not None else cb.currentText().strip()
                 if cx:
-                    self._on_codex_override(t, "model", value)
+                    self._on_codex_override(t, "model", value, cp)
                 else:
                     self._on_model_changed(t, value)
 
@@ -5191,8 +5199,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             if is_codex:
                 effort_combo.setToolTip("Apply reasoning effort in the native Codex picker before continuing. (none) keeps the current effort. Session only.")
             effort_combo.currentIndexChanged.connect(
-                lambda _i, t=row["title"], cb=effort_combo, cx=is_codex:
-                self._on_codex_override(t, "effort", cb.currentData()) if cx else
+                lambda _i, t=row["title"], cb=effort_combo, cx=is_codex, cp=provider:
+                self._on_codex_override(t, "effort", cb.currentData(), cp) if cx else
                 self._on_effort_changed(t, cb.currentData())
             )
             self.table.setCellWidget(r, 6, effort_combo)
@@ -5237,8 +5245,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 # edit: prompts are sentences, and a column wide enough to
                 # show one would crowd out the table.
                 _af_key = row["title"] if is_codex else title_key(row["title"])
-                _af_config = self._codex_config["after_finish"] if is_codex else self._after_finish
-                _af_loops = self._codex_config["after_finish_loops"] if is_codex else self._after_finish_loops
+                _af_config = codex_config["after_finish"] if is_codex else self._after_finish
+                _af_loops = codex_config["after_finish_loops"] if is_codex else self._after_finish_loops
                 _af_cur = _af_config.get(_af_key, "")
                 try:
                     _af_left = int(_af_loops.get(_af_key, 1))

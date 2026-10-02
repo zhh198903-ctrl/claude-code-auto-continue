@@ -18,7 +18,7 @@ import uiautomation as auto
 
 TAIL_CHARS = 24000
 _FOOTER = re.compile(
-    r"^\s*(?P<model>(?:gpt|o\d|codex)[\w.:-]*)\s+"
+    r"^\s*(?P<model>[\w][\w./:-]*)\s+"
     r"(?P<effort>none|minimal|low|medium|high|xhigh|max|ultra)\s*[·•]", re.I)
 _OLD_FOOTER = re.compile(r"\d+%\s+context\s+left", re.I)
 _SHORTCUTS = re.compile(r"^\s*\? for shortcuts\b", re.I)
