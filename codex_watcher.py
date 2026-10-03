@@ -233,7 +233,10 @@ class CodexWatcher(QObject):
         if screen.running:
             st.seen_running = True
             st.idle_since = None
-            st.status = "idle"
+            st.status = "quota_busy" if screen.error_kind in ("quota", "quota_retry") else "retry_busy" if screen.error_kind == "network" else "idle"
+            if screen.error_kind and screen.error_id != st.last_error:
+                st.last_error = screen.error_id
+                self.log.emit("warn", f"Codex #{st.hwnd:x}: {screen.error_kind}; App is retrying; automatic input held")
             return
         if screen.blocked or screen.draft or not screen.ready:
             st.status = "prompt" if screen.blocked else "held"

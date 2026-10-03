@@ -182,6 +182,12 @@ class WatcherState(unittest.TestCase):
         self.observe("quota.txt")
         self.send.assert_not_called()
 
+    def test_running_native_app_quota_is_displayed_and_held(self):
+        self.observe(running=True, error_kind='quota_retry', error_id='actual-native-quota')
+        self.assertEqual(self.st.status, 'quota_busy')
+        self.assertEqual(self.st.retry_attempts, 0)
+        self.send.assert_not_called()
+
     def test_after_finish_requires_new_turn_and_spends_own_budget(self):
         self.w.config["after_finish"]["probe"] = "Continue next task"
         self.w.config["after_finish_loops"]["probe"] = 1

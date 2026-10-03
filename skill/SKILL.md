@@ -11,11 +11,13 @@ Claude Code / Codex CLI / Codex 桌面 App 的 Windows 看门狗：监控故障�
 **先读日志再下结论。** 它是屏幕抓取工具，凭记忆猜它「应该」怎么做，
 十次有九次猜错——日志里写着它当时看见了什么、做了什么。
 
-## Codex CLI 与桌面 App（v2.3.0）
+## Codex CLI 与桌面 App（v2.3.1）
 
 Watch 可选 Claude CLI only、Codex only、Claude + Codex；Codex targets 再选 CLI、Desktop App 或 CLI + Desktop App。Claude、Codex CLI、Codex App 各用独立检测、状态与配置，先确认模式和表格前缀。
 
 Codex CLI 与 App 各有 Poll、Buffer、Retry、Dry-run 和 Advanced 设置。每个窗口独立设置 Model / Effort、Exclude、After finish 提示词与剩余次数。模型和强度通过当前会话的原生菜单应用，不支持的值会阻止发送并记日志。设置不影响 Claude。
+
+任务中已有中间回复或工具输出后再触发的原生限额提示也会识别。App 内部重试时显示 Usage limit · App retrying，待 App 可输入后才继续；历史错误和对话中引用的提示不触发。
 
 CLI 到额度重置时间发送 continue；桌面 App 若只显示额度限制而没有重置时间，按 Retry 间隔尝试，到 Maximum retries 后停止。网络错误同样限制重试次数。After finish 次数发送后立即扣减并保存，0 次不会再发送。登录、付费和未知错误需要人工处理。
 

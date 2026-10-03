@@ -173,6 +173,9 @@ class CodexGuiChecks(unittest.TestCase):
         self.window._on_codex_app_snapshot([row])
         self.assertTrue(self.window.table.item(0, 0).text().startswith('[Codex App]'))
         self.assertEqual(self.window.table.cellWidget(0, 6).currentData(), 'high')
+        row['status'] = 'quota_busy'
+        self.window._on_codex_app_snapshot([row])
+        self.assertEqual(self.window.table.item(0, 1).text(), 'Usage limit · App retrying')
 
     def test_switched_codex_terminal_does_not_retain_a_claude_label(self):
         self.window._watch_targets = 'both'

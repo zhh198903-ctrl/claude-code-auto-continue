@@ -14,6 +14,7 @@ class Node:
         self.ControlTypeName = data['kind']
         self.Name = data['name']
         self.AutomationId = data['id']
+        self.ClassName = data.get('class', '')
         self.IsEnabled = data['enabled']
         self.IsOffscreen = data['offscreen']
         self.runtime = data['runtime']
@@ -43,7 +44,53 @@ def replay(name):
     node = Node(json.loads((FIXTURES / (name + '.json')).read_text(encoding='utf-8')))
     return app.Window(node, 123)
 
+def native_task_quota():
+    window = replay('quota')
+    target = [c for c in app.walk(window.control) if c.ControlTypeName == 'TextControl'
+              and c.Name.startswith('你已达到使用上限')][-1]
+    group = target.parent
+    parent = group.parent
+    captured = json.loads((FIXTURES / 'native_quota_component.json').read_text(encoding='utf-8'))
+    native = Node(captured, parent)
+    index = parent.children.index(group)
+    parent.children[index] = native
+    header = {'kind': 'TextControl', 'name': 'ChatGPT 说：', 'id': '', 'enabled': True,
+              'offscreen': False, 'runtime': [1, 2], 'value': None, 'children': []}
+    parent.children.insert(index, Node(header, parent))
+    return window, native
+
 class DesktopScreens(unittest.TestCase):
+    def test_real_task_quota_after_commentary_is_detected(self):
+        window, _ = native_task_quota()
+        view = app.read_text(window)
+        self.assertEqual(view.screen.error_kind, 'quota_retry')
+        self.assertIsNone(view.screen.reset_utc)
+
+    def test_real_task_quota_while_app_retries_is_visible_but_not_sent(self):
+        window, _ = native_task_quota()
+        view = app.read_text(window)
+        scope = view.composer.GetParentControl().GetParentControl().GetParentControl()
+        stop = {'kind': 'ButtonControl', 'name': '停止', 'id': '', 'enabled': True,
+                'offscreen': False, 'runtime': [1, 3], 'value': None, 'children': []}
+        scope.children.append(Node(stop, scope))
+        view = app.read_text(window)
+        self.assertTrue(view.screen.running)
+        self.assertEqual(view.screen.error_kind, 'quota_retry')
+        self.assertFalse(app.send_prompt(window, 'continue', dry_run=True))
+
+    def test_native_quota_clears_after_a_later_assistant_entry(self):
+        window, native = native_task_quota()
+        header = {'kind': 'TextControl', 'name': 'ChatGPT 说：', 'id': '', 'enabled': True,
+                  'offscreen': False, 'runtime': [1, 4], 'value': None, 'children': []}
+        parent = native.parent
+        parent.children.insert(parent.children.index(native) + 1, Node(header, parent))
+        self.assertEqual(app.read_text(window).screen.error_kind, '')
+
+    def test_a_user_quotation_does_not_use_the_native_error_component(self):
+        window, native = native_task_quota()
+        native.ClassName = '_Paragraph_176oq_2'
+        self.assertEqual(app._native_error(list(app.walk(window.control))), '')
+
     def test_native_high_and_extra_high_are_distinct(self):
         self.assertEqual(app._status_effort('自定义 极高，第 5 项，共 6 项。'), 'xhigh')
         self.assertEqual(app._status_effort('自定义 高，第 4 项，共 6 项。'), 'high')

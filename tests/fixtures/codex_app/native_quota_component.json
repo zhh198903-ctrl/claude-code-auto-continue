@@ -1,0 +1,37 @@
+{
+  "kind": "GroupControl",
+  "class": "outline-none",
+  "name": "",
+  "id": "",
+  "enabled": true,
+  "offscreen": true,
+  "runtime": [
+    42,
+    23072572,
+    4,
+    12,
+    1,
+    272265
+  ],
+  "value": null,
+  "children": [
+    {
+      "kind": "TextControl",
+      "class": "",
+      "name": "你已达到使用上限。升级套餐或充值额度以继续，或稍后再试。",
+      "id": "",
+      "enabled": true,
+      "offscreen": true,
+      "runtime": [
+        42,
+        23072572,
+        4,
+        12,
+        1,
+        272433
+      ],
+      "value": null,
+      "children": []
+    }
+  ]
+}

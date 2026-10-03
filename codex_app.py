@@ -110,6 +110,27 @@ def _native_error(nodes):
     if not users:
         return ''
     after = nodes[users[-1] + 1:]
+    # Actual local tasks can show commentary/tool output before a failed
+    # request. The native error is a focusable outline-none group containing
+    # one TextControl, unlike the Paragraph/markdown nodes in message prose.
+    native = []
+    for i, control in enumerate(after):
+        if control.ControlTypeName != 'TextControl' or not re.match(
+            r"^(?:你已达到使用上限|You've (?:hit|reached) your usage limit|You have reached|"
+            r"Usage limit|超出使用限制|Stream disconnected|stream disconnected|unexpected status|"
+            r"Error sending request|error sending request|连接失败|请求失败|无法连接)", control.Name or '', re.I):
+            continue
+        parent = control.GetParentControl()
+        children = parent.GetChildren() if parent is not None else []
+        if parent is not None and getattr(parent, 'ClassName', '').strip() == 'outline-none' and len(children) == 1:
+            native.append((i, control.Name))
+    if native:
+        index, error = native[-1]
+        # A later assistant entry means this failure already recovered.
+        if not any(c.ControlTypeName == 'TextControl' and c.Name in
+                   {'ChatGPT 说：', 'ChatGPT said:', 'Assistant said:'} for c in after[index + 1:]):
+            return error
+        return ''
     actions = [i for i, c in enumerate(after) if c.ControlTypeName == 'ButtonControl' and
                c.Name in {'复制消息', '编辑消息', 'Copy message', 'Edit message'}]
     if not actions:
@@ -175,16 +196,23 @@ def read_text(window):
                       or (c.Name or '').startswith('自定义 ')), None)
         # Only native controls trigger error recovery. Assistant text quoting
         # an error, sidebar usage meters, and previous turns do not.
-        native_errors = [c.Name for c in nodes if c.ControlTypeName == 'ButtonControl'
+        users = [i for i, c in enumerate(nodes) if c.ControlTypeName == 'TextControl' and
+                 c.Name in {'你说：', 'You said:', 'You said：'}]
+        turn = nodes[users[-1] + 1:] if users else []
+        # Do not pick historical reconnect buttons from earlier turns.
+        native_errors = [(i, c.Name) for i, c in enumerate(turn) if c.ControlTypeName == 'ButtonControl'
             and not c.IsOffscreen and re.match(r'^(?:正在重新连接|Reconnecting|重试|Retry|Try again)(?:\s|$)', c.Name or '')]
-        error = ' | '.join(native_errors)
+        if native_errors and any(c.ControlTypeName == 'TextControl' and c.Name in
+            {'ChatGPT 说：', 'ChatGPT said:', 'Assistant said:'} for c in turn[native_errors[-1][0] + 1:]):
+            native_errors = []
+        error = ' | '.join(name for _, name in native_errors)
         message = _native_error(nodes)
         if message:
             error = message
         lower = error.casefold()
         kind = ''
         reset = None
-        if error and not busy:
+        if error:
             if lower.startswith('native_attention:'):
                 kind = 'attention'
             elif re.search(r'使用上限|使用限制|usage limit|usage_limit_reached', lower):
