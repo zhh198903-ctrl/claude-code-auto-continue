@@ -66,6 +66,9 @@ class State:
     quota_attempts: int = 0
     quota_sent: datetime | None = None
     quota_generation: str = ""
+    submission: object | None = None
+    submit_action: str = ""
+    submit_reason: str = ""
 
 
 class CodexWatcher(QObject):
@@ -134,6 +137,7 @@ class CodexWatcher(QObject):
     def skip(self, hwnd):
         st = self.states.get(hwnd)
         if st is not None:
+            st.submission = None
             st.consumed_quota = st.quota_id
             st.reset_utc = None
             st.status = "idle"
@@ -152,7 +156,32 @@ class CodexWatcher(QObject):
             st.status = "idle"
             self._publish()
 
-    def _send(self, st, window, text, now, reason) -> bool:
+    def _sent(self, st, now, reason, action):
+        st.submission = None
+        st.last_sent = now
+        st.status = "sent"
+        prefix = "[dry-run] " if self.config["dry_run"] else ""
+        confirmation = "; submission confirmed" if self.provider == "codex_app" and not self.config["dry_run"] else ""
+        self.log.emit("fire", f"{prefix}Codex #{st.hwnd:x}: {reason}{confirmation}")
+        st.seen_running = False
+        st.idle_since = None
+        if action == "quota":
+            st.consumed_quota = st.quota_id
+            st.reset_utc = None
+            st.quota_sent = now
+            st.quota_attempts += 1
+        elif action == "retry":
+            st.retry_sent = now
+            st.retry_attempts += 1
+        elif action == "after_finish" and not self.config["dry_run"]:
+            left = self.config["after_finish_loops"].get(st.title, 1)
+            if left > 0:
+                self.config["after_finish_loops"][st.title] = left - 1
+                self.loops_spent.emit(st.title, left - 1)
+
+    def _send(self, st, window, text, now, reason, action="") -> bool:
+        if st.submission is not None:
+            return False
         prepare = getattr(self.driver, "prepare", None)
         if prepare:
             prepare(window, st.identity)
@@ -163,15 +192,17 @@ class CodexWatcher(QObject):
             if not self.driver.apply_session_options(window, model, effort):
                 self.log.emit("warn", f"Codex #{st.hwnd:x}: session model / effort could not be applied; continue held")
                 return False
-        if not self.driver.send_prompt(window, text, dry_run=self.config["dry_run"]):
+        outcome = self.driver.send_prompt(window, text, dry_run=self.config["dry_run"])
+        if getattr(outcome, "submission", None) is not None:
+            st.submission = outcome.submission
+            st.submit_reason, st.submit_action = reason, action
+            st.status = outcome.status
+            self.log.emit("info", f"Codex #{st.hwnd:x}: own prompt staged; waiting for native Send and submission confirmation")
+            return False
+        if not outcome:
             self.log.emit("warn", f"Codex #{st.hwnd:x}: {reason} held (draft, menu, running, unreadable, or focus)")
             return False
-        st.last_sent = now
-        st.status = "sent"
-        prefix = "[dry-run] " if self.config["dry_run"] else ""
-        self.log.emit("fire", f"{prefix}Codex #{st.hwnd:x}: {reason}")
-        st.seen_running = False
-        st.idle_since = None
+        self._sent(st, now, reason, action)
         return True
 
     @pyqtSlot()
@@ -226,9 +257,30 @@ class CodexWatcher(QObject):
             st.completion_id = screen.completion_id
             st.initialized = True
         if st.title in self.config["excluded"]:
+            st.submission = None
             st.status = "excluded"
             st.seen_running = False
             st.idle_since = None
+            return
+        if st.submission is not None:
+            if screen.error_kind == "quota" and screen.reset_utc is not None:
+                st.reset_utc = screen.reset_utc
+            if st.submit_action == "after_finish" and (
+                    self.config["after_finish_loops"].get(st.title, 1) == 0 or
+                    self.config["after_finish"].get(st.title, "") != st.submission.prompt):
+                st.submission = None
+                st.status = "held"
+                return
+            prepare = getattr(self.driver, "prepare", None)
+            if prepare:
+                prepare(window, st.identity)
+            due = st.reset_utc is None or now >= st.reset_utc + timedelta(seconds=self.config["buffer"])
+            outcome = self.driver.poll_submission(window, st.submission, retry_seconds=self.config["retry"], allow_click=due)
+            if outcome:
+                self._sent(st, now, st.submit_reason, st.submit_action)
+            else:
+                st.submission = outcome.submission
+                st.status = outcome.status
             return
         if screen.running:
             st.seen_running = True
@@ -272,11 +324,7 @@ class CodexWatcher(QObject):
                     if st.quota_sent and now - st.quota_sent < timedelta(seconds=self.config["retry"]):
                         st.status = "cooldown"
                         return
-                    if self._send(st, window, "continue", now, "usage reset → continue"):
-                        st.consumed_quota = st.quota_id
-                        st.reset_utc = None
-                        st.quota_sent = now
-                        st.quota_attempts += 1
+                    self._send(st, window, "continue", now, "usage reset → continue", "quota")
                 return
             if screen.error_kind in ("network", "quota_retry"):
                 if st.retry_attempts >= self.config["max_retries"]:
@@ -285,9 +333,7 @@ class CodexWatcher(QObject):
                 st.status = "retry"
                 if st.retry_sent is None or now - st.retry_sent >= timedelta(seconds=self.config["retry"]):
                     reason = "usage limit without reset time → continue" if screen.error_kind == "quota_retry" else "network recovery → continue"
-                    if self._send(st, window, "continue", now, reason):
-                        st.retry_sent = now
-                        st.retry_attempts += 1
+                    self._send(st, window, "continue", now, reason, "retry")
                 return
             st.status = "attention"
             return
@@ -310,10 +356,7 @@ class CodexWatcher(QObject):
         if st.idle_since is None:
             st.idle_since = now
         elif now - st.idle_since >= timedelta(seconds=5):
-            if self._send(st, window, prompt, now, "after-finish prompt"):
-                if left > 0 and not self.config["dry_run"]:
-                    self.config["after_finish_loops"][st.title] = left - 1
-                    self.loops_spent.emit(st.title, left - 1)
+            self._send(st, window, prompt, now, "after-finish prompt", "after_finish")
 
     def _publish(self):
         rows = []

@@ -12,13 +12,14 @@ It resumes recoverable failures and can send a configured follow-up after a comp
 
 Prefer source? See [Install](#install) below.
 
-## Codex CLI and desktop App (v2.3.1)
+## Codex CLI and desktop App (v2.3.2)
 
 - In **Watch**, select **Codex only** or **Claude + Codex**. Then set **Codex targets** to **CLI**, **Desktop App**, or **CLI + Desktop App**. The default remains Claude-only, with CLI as the default Codex target.
 - CLI and App each have their own **Poll**, **Buffer**, **Retry**, **Dry-run**, advanced retry limit, exclusions, model/effort overrides and after-finish prompts. Codex settings do not change Claude settings.
 - Per-window **Model**, **Effort**, **Now**, **Skip**, **Exclude** and **After finish…** controls use that row's driver. Model/effort settings apply to the current session through native menus. An unavailable value holds the send and logs a warning.
 - Native desktop quota errors after commentary/tool output are recognised. While the App retries internally, the row shows **Usage limit · App retrying** and automatic input remains held until the App is ready. Historical errors and message quotations do not schedule retries.
-- CLI usage limits resume at the parsed reset time. The desktop App may show a usage-limit message without a reset time; those messages retry at the configured **Retry** interval, up to **Maximum retries**. Recoverable network failures also use this bounded retry policy. Authentication, billing and unrecognised native errors require attention.
+- The desktop App retains its own staged follow-up while native **Send** is unavailable, then submits it when Send becomes usable. **Waiting for Send** and **Confirming submission** distinguish the two phases. Retry and after-finish counts are spent only after a new submitted user message appears. Editing the draft, switching conversations, Skip or Exclude cancels the pending send.
+- CLI usage limits resume at the parsed reset time. The desktop App may show a usage-limit message without a reset time; actual submissions retry at the configured **Retry** interval, up to **Maximum retries**. Waiting for a disabled Send button does not consume that limit. Recoverable network failures also use this bounded retry policy. Authentication, billing and unrecognised native errors require attention.
 - **After finish…** sends the configured prompt after a completed turn. Its remaining loop count is persisted immediately; a count of zero prevents further automatic follow-ups.
 - Draft input, active turns, permission dialogs, open menus, unreadable UI and a changed conversation hold automatic input. Codex approval dialogs require manual input.
 - Each CLI session needs a separate Windows Terminal window; only the active tab/pane is watched. For the desktop App, only the visible Codex conversation in each App window is watched. Hidden conversations and ChatGPT mode are not watched. The local companion API retains its existing Claude-only scope.

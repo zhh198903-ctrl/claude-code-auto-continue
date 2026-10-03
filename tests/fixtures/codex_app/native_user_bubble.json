@@ -1,0 +1,549 @@
+{
+  "kind": "GroupControl",
+  "name": "",
+  "id": "",
+  "class": "relative shrink-0",
+  "enabled": true,
+  "offscreen": false,
+  "runtime": [
+    42,
+    1247848,
+    4,
+    6,
+    1,
+    1899
+  ],
+  "value": null,
+  "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+  "children": [
+    {
+      "kind": "TextControl",
+      "name": "你说：",
+      "id": "",
+      "class": "sr-only m-0 select-none",
+      "enabled": true,
+      "offscreen": true,
+      "runtime": [
+        42,
+        1247848,
+        4,
+        6,
+        1,
+        2125
+      ],
+      "value": null,
+      "aria": "readonly=true;expanded=false;level=4;multiline=false;multiselectable=false;required=false;hasactions=false",
+      "children": [
+        {
+          "kind": "TextControl",
+          "name": "你说：",
+          "id": "",
+          "class": "",
+          "enabled": true,
+          "offscreen": true,
+          "runtime": [
+            42,
+            1247848,
+            4,
+            6,
+            1,
+            2159
+          ],
+          "value": null,
+          "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "children": []
+        }
+      ]
+    },
+    {
+      "kind": "GroupControl",
+      "name": "",
+      "id": "",
+      "class": "bg-user-message text-user-message min-w-0 max-w-(--user-chat-width) overflow-hidden break-words px-(--thread-content-margin) [&_.contain-inline-size]:[contain:initial] _bubble_11evq_1 py-2.5 rounded-2xl relative text-start",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        1247848,
+        4,
+        6,
+        1,
+        2127
+      ],
+      "value": null,
+      "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+      "children": [
+        {
+          "kind": "GroupControl",
+          "name": "",
+          "id": "",
+          "class": "relative w-full min-w-0 text-size-chat leading-relaxed",
+          "enabled": true,
+          "offscreen": false,
+          "runtime": [
+            42,
+            1247848,
+            4,
+            6,
+            1,
+            2129
+          ],
+          "value": null,
+          "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "children": [
+            {
+              "kind": "GroupControl",
+              "name": "",
+              "id": "",
+              "class": "_Paragraph_176oq_2",
+              "enabled": true,
+              "offscreen": false,
+              "runtime": [
+                42,
+                1247848,
+                4,
+                6,
+                1,
+                2134
+              ],
+              "value": null,
+              "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "children": [
+                {
+                  "kind": "TextControl",
+                  "name": "NATIVE_DISABLED_SEND_TEST",
+                  "id": "",
+                  "class": "",
+                  "enabled": true,
+                  "offscreen": false,
+                  "runtime": [
+                    42,
+                    1247848,
+                    4,
+                    6,
+                    1,
+                    2155
+                  ],
+                  "value": null,
+                  "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "TextControl",
+      "name": "14:28",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        1247848,
+        4,
+        6,
+        1,
+        2156
+      ],
+      "value": null,
+      "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+      "children": []
+    },
+    {
+      "kind": "GroupControl",
+      "name": "",
+      "id": "",
+      "class": "contents",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        1247848,
+        4,
+        6,
+        1,
+        2141
+      ],
+      "value": null,
+      "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+      "children": [
+        {
+          "kind": "ButtonControl",
+          "name": "复制消息",
+          "id": "",
+          "class": "no-drag cursor-interaction items-center select-none disabled:cursor-default aria-disabled:cursor-default focus:outline-hidden disabled:opacity-40 aria-disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 whitespace-nowrap flex border gap-1 rounded-full electron:rounded-md text-tertiary not-disabled:not-aria-disabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent electron:p-1 electron:[&>svg]:icon-sm flex items-center justify-center p-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0",
+          "enabled": true,
+          "offscreen": false,
+          "runtime": [
+            42,
+            1247848,
+            4,
+            6,
+            1,
+            2142
+          ],
+          "value": null,
+          "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "children": [
+            {
+              "kind": "ImageControl",
+              "name": "",
+              "id": "",
+              "class": "icon-xs",
+              "enabled": true,
+              "offscreen": false,
+              "runtime": [
+                42,
+                1247848,
+                4,
+                6,
+                1,
+                2143
+              ],
+              "value": null,
+              "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "GroupControl",
+      "name": "",
+      "id": "",
+      "class": "outline-none",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        1247848,
+        4,
+        6,
+        1,
+        2195
+      ],
+      "value": null,
+      "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+      "children": [
+        {
+          "kind": "TextControl",
+          "name": "你已达到使用上限。请稍后再试。",
+          "id": "",
+          "class": "",
+          "enabled": true,
+          "offscreen": false,
+          "runtime": [
+            42,
+            1247848,
+            4,
+            6,
+            1,
+            2214
+          ],
+          "value": null,
+          "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "children": []
+        }
+      ]
+    },
+    {
+      "kind": "TextControl",
+      "name": "你说：",
+      "id": "",
+      "class": "sr-only m-0 select-none",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        1247848,
+        4,
+        6,
+        1,
+        2308
+      ],
+      "value": null,
+      "aria": "readonly=true;expanded=false;level=4;multiline=false;multiselectable=false;required=false;hasactions=false",
+      "children": [
+        {
+          "kind": "TextControl",
+          "name": "你说：",
+          "id": "",
+          "class": "",
+          "enabled": true,
+          "offscreen": false,
+          "runtime": [
+            42,
+            1247848,
+            4,
+            6,
+            1,
+            2342
+          ],
+          "value": null,
+          "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "children": []
+        }
+      ]
+    },
+    {
+      "kind": "GroupControl",
+      "name": "",
+      "id": "",
+      "class": "bg-user-message text-user-message min-w-0 max-w-(--user-chat-width) overflow-hidden break-words px-(--thread-content-margin) [&_.contain-inline-size]:[contain:initial] _bubble_11evq_1 py-2.5 rounded-2xl relative text-start",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        1247848,
+        4,
+        6,
+        1,
+        2310
+      ],
+      "value": null,
+      "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+      "children": [
+        {
+          "kind": "GroupControl",
+          "name": "",
+          "id": "",
+          "class": "relative w-full min-w-0 text-size-chat leading-relaxed",
+          "enabled": true,
+          "offscreen": false,
+          "runtime": [
+            42,
+            1247848,
+            4,
+            6,
+            1,
+            2312
+          ],
+          "value": null,
+          "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "children": [
+            {
+              "kind": "GroupControl",
+              "name": "",
+              "id": "",
+              "class": "_Paragraph_176oq_2",
+              "enabled": true,
+              "offscreen": false,
+              "runtime": [
+                42,
+                1247848,
+                4,
+                6,
+                1,
+                2317
+              ],
+              "value": null,
+              "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "children": [
+                {
+                  "kind": "TextControl",
+                  "name": "continue",
+                  "id": "",
+                  "class": "",
+                  "enabled": true,
+                  "offscreen": false,
+                  "runtime": [
+                    42,
+                    1247848,
+                    4,
+                    6,
+                    1,
+                    2338
+                  ],
+                  "value": null,
+                  "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "TextControl",
+      "name": "14:33",
+      "id": "",
+      "class": "",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        1247848,
+        4,
+        6,
+        1,
+        2339
+      ],
+      "value": null,
+      "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+      "children": []
+    },
+    {
+      "kind": "GroupControl",
+      "name": "",
+      "id": "",
+      "class": "contents",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        1247848,
+        4,
+        6,
+        1,
+        2324
+      ],
+      "value": null,
+      "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+      "children": [
+        {
+          "kind": "ButtonControl",
+          "name": "复制消息",
+          "id": "",
+          "class": "no-drag cursor-interaction items-center select-none disabled:cursor-default aria-disabled:cursor-default focus:outline-hidden disabled:opacity-40 aria-disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 whitespace-nowrap flex border gap-1 rounded-full electron:rounded-md text-tertiary not-disabled:not-aria-disabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent electron:p-1 electron:[&>svg]:icon-sm flex items-center justify-center p-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0",
+          "enabled": true,
+          "offscreen": false,
+          "runtime": [
+            42,
+            1247848,
+            4,
+            6,
+            1,
+            2325
+          ],
+          "value": null,
+          "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "children": [
+            {
+              "kind": "ImageControl",
+              "name": "",
+              "id": "",
+              "class": "icon-xs",
+              "enabled": true,
+              "offscreen": false,
+              "runtime": [
+                42,
+                1247848,
+                4,
+                6,
+                1,
+                2326
+              ],
+              "value": null,
+              "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "GroupControl",
+      "name": "",
+      "id": "",
+      "class": "contents",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        1247848,
+        4,
+        6,
+        1,
+        2413
+      ],
+      "value": null,
+      "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+      "children": [
+        {
+          "kind": "ButtonControl",
+          "name": "编辑消息",
+          "id": "",
+          "class": "no-drag cursor-interaction items-center select-none disabled:cursor-default aria-disabled:cursor-default focus:outline-hidden disabled:opacity-40 aria-disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 whitespace-nowrap flex border gap-1 rounded-full electron:rounded-md text-tertiary not-disabled:not-aria-disabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent electron:p-1 electron:[&>svg]:icon-sm flex items-center justify-center p-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0",
+          "enabled": true,
+          "offscreen": false,
+          "runtime": [
+            42,
+            1247848,
+            4,
+            6,
+            1,
+            2414
+          ],
+          "value": null,
+          "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "children": [
+            {
+              "kind": "ImageControl",
+              "name": "",
+              "id": "",
+              "class": "icon-xs",
+              "enabled": true,
+              "offscreen": false,
+              "runtime": [
+                42,
+                1247848,
+                4,
+                6,
+                1,
+                2415
+              ],
+              "value": null,
+              "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "GroupControl",
+      "name": "",
+      "id": "",
+      "class": "outline-none",
+      "enabled": true,
+      "offscreen": false,
+      "runtime": [
+        42,
+        1247848,
+        4,
+        6,
+        1,
+        2378
+      ],
+      "value": null,
+      "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+      "children": [
+        {
+          "kind": "TextControl",
+          "name": "你已达到使用上限。请稍后再试。",
+          "id": "",
+          "class": "",
+          "enabled": true,
+          "offscreen": false,
+          "runtime": [
+            42,
+            1247848,
+            4,
+            6,
+            1,
+            2397
+          ],
+          "value": null,
+          "aria": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "children": []
+        }
+      ]
+    }
+  ]
+}

@@ -102,6 +102,23 @@ class View:
     composer: object = None
     send: object = None
     model_button: object = None
+    user_turn: str = ''
+    user_text: str = ''
+
+@dataclass
+class Submission:
+    identity: str
+    prompt: str
+    user_turn: str
+    invoked_at: float | None = None
+
+@dataclass
+class SendOutcome:
+    status: str
+    submission: Submission | None = None
+
+    def __bool__(self):
+        return self.status == 'sent'
 
 def _native_error(nodes):
     """A failed turn renders an error after the user entry, outside a reply."""
@@ -245,7 +262,25 @@ def read_text(window):
                         error_kind=kind, reset_utc=reset,
                         error_id=hashlib.sha256((identity + error).encode()).hexdigest() if error else '',
                         completion_id=completion)
-        return View(identity, title, screen, composer, send, model)
+        user_turn = ''
+        user_text = ''
+        if users:
+            header = nodes[users[-1]]
+            body = None
+            for control in nodes[users[-1] + 1:]:
+                if control.ControlTypeName == 'ButtonControl' and control.Name in {
+                    '复制消息', '编辑消息', 'Copy message', 'Edit message'}:
+                    break
+                # The native bubble contains the submitted text. Its sibling
+                # timestamp is outside it and is not part of the prompt.
+                if 'bg-user-message' in getattr(control, 'ClassName', '').split():
+                    body = [c.Name for c in walk(control) if c.ControlTypeName == 'TextControl'
+                            and not any(x.ControlTypeName == 'TextControl' for x in c.GetChildren())]
+                    break
+            if body is not None:
+                user_text = '\n'.join(body).strip()
+                user_turn = hashlib.sha256(repr((tuple(header.GetRuntimeId()), user_text)).encode()).hexdigest()
+        return View(identity, title, screen, composer, send, model, user_turn, user_text)
     except Exception:
         return None
 
@@ -267,44 +302,128 @@ def _ready(window):
 
 def send_prompt(window, prompt, dry_run=False):
     if not prompt.strip() or '\n' in prompt or '\r' in prompt:
-        return False
+        return SendOutcome('held')
     view = _ready(window)
     if view is None:
-        return False
+        return SendOutcome('held')
     if dry_run:
-        return True
+        return SendOutcome('sent')
     user = ctypes.windll.user32
     user.GetForegroundWindow.restype = wintypes.HWND
     previous = user.GetForegroundWindow()
     identity = view.identity
+    submission = None
     try:
         window.control.SetActive()
         view.composer.SetFocus()
         time.sleep(.2)
         current = _ready(window)
         if current is None or current.identity != identity or user.GetForegroundWindow() != window.hwnd:
-            return False
+            return SendOutcome('held')
         # ValuePattern updates the contenteditable without typing over a
         # user's draft; the empty value was verified immediately above.
         pattern = current.composer.GetValuePattern()
         if not pattern:
-            return False
+            return SendOutcome('held')
+        submission = Submission(identity, prompt, current.user_turn)
         pattern.SetValue(prompt)
         time.sleep(.2)
-        pending = read_text(window)
-        if pending is None or pending.identity != identity or user.GetForegroundWindow() != window.hwnd:
-            return False
-        # Submit through the actual Send control, not Enter on a permission
-        # modal or another focused element.
-        if pending.send is None or not pending.send.IsEnabled or pending.screen.running or pending.screen.blocked:
-            return False
-        value = pending.composer.GetValuePattern().Value
-        if value.strip() != prompt.strip():
-            return False
-        pending.send.GetInvokePattern().Invoke()
-        return True
+        return poll_submission(window, submission)
     except Exception:
+        return SendOutcome('waiting_send', submission) if submission else SendOutcome('held')
+    finally:
+        if previous and previous != window.hwnd and user.GetForegroundWindow() == window.hwnd:
+            user.SetForegroundWindow(wintypes.HWND(previous))
+
+def _draft(view):
+    pattern = view.composer.GetValuePattern() if view.composer else None
+    return pattern.Value if pattern else None
+
+def _submitted(view, submission):
+    value = _draft(view) if view is not None else None
+    return (view is not None and view.identity == submission.identity and
+            bool(view.user_turn) and view.user_turn != submission.user_turn and
+            view.user_text.strip() == submission.prompt.strip() and
+            value is not None and value.strip() in _EMPTY)
+
+
+def _send_available(button):
+    if button is None or not button.IsEnabled or button.IsOffscreen:
         return False
+    # Electron can expose IsEnabled=True for an aria-disabled button. The
+    # installed native composer also uses these explicit classes for its
+    # blocked state; CSS variants such as disabled:opacity-50 are not flags.
+    if {'opacity-50', 'cursor-default'} & set(getattr(button, 'ClassName', '').split()):
+        return False
+    getter = getattr(button, 'GetPropertyValue', None)
+    if getter:
+        properties = str(getter(auto.PropertyId.AriaPropertiesProperty) or '')
+        if re.search(r'(?:^|;)\s*(?:disabled|busy)\s*=\s*true(?:;|$)', properties, re.I):
+            return False
+    return True
+
+def poll_submission(window, submission, retry_seconds=30, allow_click=True):
+    """Wait for native Send availability; account only an observed user turn.
+
+    The receipt owns one exact draft in one visible conversation. No timeout
+    or quota estimate grants permission to click a disabled native button.
+    """
+    user = ctypes.windll.user32
+    user.GetForegroundWindow.restype = wintypes.HWND
+    previous = user.GetForegroundWindow()
+    try:
+        view = read_text(window)
+        if view is None or not view.identity:
+            return SendOutcome('waiting_send', submission)
+        if view.identity != submission.identity or (window.expected_identity and view.identity != window.expected_identity):
+            return SendOutcome('held')
+        if _submitted(view, submission):
+            return SendOutcome('sent')
+        value = _draft(view)
+        if value is None:
+            return SendOutcome('waiting_send', submission)
+        if value.strip() != submission.prompt.strip():
+            # Clearing/editing our draft revokes it. A cleared composer alone
+            # is not evidence of submission.
+            if submission.invoked_at is not None and value.strip() in _EMPTY and time.monotonic() - submission.invoked_at < 5:
+                return SendOutcome('confirming_send', submission)
+            return SendOutcome('held')
+        if (not allow_click or not view.screen.ready or view.screen.running or view.screen.blocked or
+                view.screen.error_kind == 'attention' or not _send_available(view.send)):
+            return SendOutcome('waiting_send', submission)
+        if submission.invoked_at is not None and time.monotonic() - submission.invoked_at < retry_seconds:
+            return SendOutcome('confirming_send', submission)
+        window.control.SetActive()
+        view.composer.SetFocus()
+        time.sleep(.1)
+        view = read_text(window)
+        if view is None or not view.identity:
+            return SendOutcome('waiting_send', submission)
+        if _submitted(view, submission):
+            return SendOutcome('sent')
+        if view.identity != submission.identity:
+            return SendOutcome('held')
+        value = _draft(view)
+        if value is None:
+            return SendOutcome('waiting_send', submission)
+        if value.strip() != submission.prompt.strip():
+            return SendOutcome('held')
+        if (user.GetForegroundWindow() != window.hwnd or not view.screen.ready or
+                view.screen.running or view.screen.blocked or view.screen.error_kind == 'attention' or
+                not _send_available(view.send)):
+            return SendOutcome('waiting_send', submission)
+        invoke = view.send.GetInvokePattern()
+        if not invoke:
+            return SendOutcome('waiting_send', submission)
+        submission.invoked_at = time.monotonic()
+        invoke.Invoke()
+        for _ in range(2):
+            time.sleep(.15)
+            if _submitted(read_text(window), submission):
+                return SendOutcome('sent')
+        return SendOutcome('confirming_send', submission)
+    except Exception:
+        return SendOutcome('waiting_send', submission)
     finally:
         if previous and previous != window.hwnd and user.GetForegroundWindow() == window.hwnd:
             user.SetForegroundWindow(wintypes.HWND(previous))

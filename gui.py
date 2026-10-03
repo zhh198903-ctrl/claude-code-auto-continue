@@ -5108,6 +5108,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
 
             status_item = QTableWidgetItem(
                 "Waiting for input" if is_codex and row["status"] == ST_PROMPT
+                else "Waiting for Send" if is_codex and row["status"] == "waiting_send"
+                else "Confirming submission" if is_codex and row["status"] == "confirming_send"
                 else "Usage limit · App retrying" if is_codex and row["status"] == "quota_busy"
                 else "App retrying" if is_codex and row["status"] == "retry_busy"
                 else STATUS_LABEL.get(row["status"], row["status"])
