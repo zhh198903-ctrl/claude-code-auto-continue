@@ -21,6 +21,7 @@
 - 功能或修复先验证实际本机 EXE，再同步源码与匹配版本的 GitHub Release，按 dlweb skill 使用 `push --only Auto-Continue` 发布产品及同版本配套技能。
 - 发布使用已验证的干净源，GitHub EXE、dlweb ZIP 内的 EXE 与本机验证的 EXE 必须一致；从公网核对版本、文件大小、下载完整性和 SHA-256。
 - 仅更新本产品与下载卡片，保留服务器最近 5 个版本；不修改其它产品、受保护区、chatbot、nginx 或中继。
+- 发布文案以已验证功能和 `docs/release/dlweb-public-metadata.json` 为依据；更新首页使用服务器原始文件，保留其它卡片，避免把 HTTP 响应注入的咨询脚本写回首页；写文件须保留原始换行。
 - 文章与下载说明在实际公开包核验后更新；发布失败时如实报告，不能将源码同步当成公开包已更新。
 
 ## 文件与驱动边界

@@ -45,3 +45,27 @@ log, activity refresh, changing Recent from 5 to 6, persistence across an
 actual EXE restart, restoring 5, independent CLI/EXE settings and the fifth
 activity model popup surviving polling. Installed and built EXE SHA-256 matched.
 Existing settings were preserved, with missing permission defaults normalised.
+
+## Repository rename and public release verification
+
+The repository is now `zhh198903-ctrl/codex-cc-auto-continue`.
+The updater and Help links use that address. The renamed-source build was
+installed locally and started as the actual 3.0.0 EXE on 2026-10-05;
+five recent activities, three tabs, bottom log and live refresh were observed.
+The updater checks and all 28 GUI regressions passed. GitHub source checks
+also passed for commit `5b84291b63690cbb5e092ffcf7fb138d5cfe530b`.
+
+GitHub Latest is the published v3.0.0 release. Both dlweb ZIPs were downloaded
+over the public endpoint, passed size, SHA-256 and ZIP CRC checks, and
+returned HTTP 206 for Range requests. The EXE extracted from the public ZIP,
+the installed EXE and the GitHub asset digest are identical:
+
+`745ccf0bd00b40406db1ed18662826eea4113ebcbf375006e1997e55867672a7`
+
+The main and companion packages each retain exactly five server versions:
+3.0.0, 2.3.2, 2.3.1, 2.3.0 and 2.2.0. The public card points to 3.0.0 and
+the renamed repository. All 26 public homepage download links were reachable.
+Other homepage content was compared against the original response and the
+recovered raw server page, including line endings and the server-injected
+consultation script. Only the Auto-Continue card differs. No protected-site,
+chatbot, nginx, relay or other-product package changes were made.

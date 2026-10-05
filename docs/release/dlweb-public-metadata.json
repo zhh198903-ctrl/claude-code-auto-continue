@@ -1,0 +1,211 @@
+{
+  "product": "Auto-Continue",
+  "meta": {
+    "display": "Codex/CC Auto-Continue",
+    "tagline": "Codex 与 Claude 的 Windows 自动续接工具",
+    "desc": "支持 Codex 桌面版、Codex CLI 和 Claude CLI 的独立监测。",
+    "detail": "Codex EXE、Codex CLI 和 Claude CLI 通过三个切换栏使用各自设置，活动日志固定在底部。Codex 桌面最近活动默认显示 5 个，可自定义；每个会话可独立设置模型、推理强度和完成后续接。支持额度恢复与有限网络重试，权限默认完全访问，自动工具权限批准默认开启，也可改为等待人工批准。最近活动支持配置；自动输入只作用于核实的当前可见 Codex 会话，不监测 ChatGPT 普通聊天或 Work 会话。单文件免安装。",
+    "tags": [
+      "Codex EXE",
+      "Codex CLI",
+      "Claude CLI",
+      "MIT 开源",
+      "免安装"
+    ],
+    "specs": [
+      {
+        "k": "目标场景",
+        "v": "Codex 桌面版 / Codex CLI / Claude CLI"
+      },
+      {
+        "k": "最近活动",
+        "v": "Codex 桌面默认 5 个，可自定义；自动输入需当前可见会话"
+      },
+      {
+        "k": "Codex 设置",
+        "v": "逐会话模型、推理强度与续接；CLI 和 EXE 各自独立权限设置"
+      },
+      {
+        "k": "自升级",
+        "v": "GitHub 与下载站双渠道，支持断点续传"
+      },
+      {
+        "k": "系统",
+        "v": "Windows 10 / 11"
+      },
+      {
+        "k": "协议",
+        "v": "MIT 开源，完全免费"
+      }
+    ],
+    "license": "MIT 开源 · 免费",
+    "license_type": "open",
+    "repo": "codex-cc-auto-continue",
+    "display_en": "Codex/CC Auto-Continue",
+    "tagline_en": "A Windows auto-continue companion for Codex and Claude",
+    "intro_en": "Codex desktop, Codex CLI and Claude CLI have separate settings in three tabs, with the activity log at the bottom. Desktop recent activities default to five and are configurable, with per-session model, effort and follow-ups. Supports quota recovery and bounded network retries. Full access and automatic tool approval are defaults; manual approval is available. Recent activities can be configured; automatic input requires a verified visible Codex conversation. ChatGPT chats and Work conversations are excluded. Single file, no install.",
+    "detail_en": "Codex desktop, Codex CLI and Claude CLI have separate settings in three tabs, with the activity log at the bottom. Desktop recent activities default to five and are configurable, with per-session model, effort and follow-ups. Supports quota recovery and bounded network retries. Full access and automatic tool approval are defaults; manual approval is available. Recent activities can be configured; automatic input requires a verified visible Codex conversation. ChatGPT chats and Work conversations are excluded. Single file, no install.",
+    "tags_en": [
+      "Codex desktop",
+      "Codex CLI",
+      "Claude CLI",
+      "MIT licensed",
+      "No install"
+    ],
+    "license_en": "MIT open source · free",
+    "specs_en": [
+      {
+        "k": "Target setup",
+        "v": "Codex desktop / Codex CLI / Claude CLI"
+      },
+      {
+        "k": "Recent activities",
+        "v": "Five by default, configurable; automatic input requires a visible conversation"
+      },
+      {
+        "k": "Codex settings",
+        "v": "Per-session model, effort and follow-ups; separate CLI and desktop permission settings"
+      },
+      {
+        "k": "Self-update",
+        "v": "GitHub and download-site sources, resumable downloads"
+      },
+      {
+        "k": "Platform",
+        "v": "Windows 10 / 11"
+      },
+      {
+        "k": "License",
+        "v": "MIT, completely free"
+      }
+    ],
+    "companion": {
+      "key": "Auto-Continue-Skill",
+      "label": "AI 助手技能 · Claude Code / Codex",
+      "label_en": "AI Skills · Claude Code / Codex",
+      "tagline": "让 AI 助手自己去读 Auto-Continue 的日志",
+      "tagline_en": "Lets your AI assistant read Auto-Continue's log",
+      "note": "Claude Code 和 Codex 都可以安装此可选技能，读取活动日志并排查配置。v3.0.0 主程序支持 Codex EXE、Codex CLI 和 Claude CLI 的独立监测；运行主程序不依赖技能。",
+      "note_en": "Both Claude Code and Codex can use this optional skill to read logs and diagnose settings. The v3.0.0 executable independently watches Codex desktop, Codex CLI and Claude CLI. The executable does not require the skill.",
+      "license": "MIT 开源 · 免费",
+      "license_en": "MIT licensed · free",
+      "installs": [
+        {
+          "label": "Claude Code",
+          "directory": "%USERPROFILE%/.claude/skills/auto-continue/"
+        },
+        {
+          "label": "Codex",
+          "directory": "%USERPROFILE%/.agents/skills/auto-continue/"
+        }
+      ]
+    }
+  },
+  "changelog": {
+    "2.2.0": {
+      "date": "2026-10-02",
+      "items": [
+        {
+          "t": "new",
+          "zh": "新增 Codex CLI 自动继续，支持单独 Claude、单独 Codex 或同时监控，设置与状态相互独立。",
+          "en": "Adds Codex CLI auto-continue, with Claude-only, Codex-only or combined monitoring and independent settings and state."
+        },
+        {
+          "t": "new",
+          "zh": "Codex 支持额度重置恢复、有限次数网络重试和任务完成后续接，模型与推理强度可逐窗口设置，只应用于当前会话。",
+          "en": "Codex supports usage-reset recovery, bounded network retries and follow-ups, with per-window model and reasoning effort applied only to the current session."
+        },
+        {
+          "t": "improve",
+          "zh": "基于真实 Codex CLI 窗口适配；草稿、运行中任务和确认菜单暂停自动输入。Claude 原监控逻辑保持不变。",
+          "en": "Adapted against real Codex CLI windows. Drafts, active turns and confirmation dialogs hold automatic input. Existing Claude monitoring remains unchanged."
+        }
+      ]
+    },
+    "2.3.0": {
+      "date": "2026-10-02",
+      "items": [
+        {
+          "t": "fix",
+          "zh": "修复 Codex CLI 被误识别为 Claude，以及切换终端标签页后残留 Claude 标记的问题。",
+          "en": "Fixes Codex CLI being misidentified as Claude and stale Claude labels after terminal tab switches."
+        },
+        {
+          "t": "fix",
+          "zh": "发布包仅保留一个 Auto-Continue.exe，修复打包环境导致程序无法启动的问题。",
+          "en": "Ships one Auto-Continue.exe and fixes startup failures caused by the build environment."
+        },
+        {
+          "t": "new",
+          "zh": "新增 Codex 桌面 App 自动继续，可与 CLI 分别或同时监控，支持错误恢复和任务完成后续接。",
+          "en": "Adds Codex desktop App auto-continue, independently or alongside the CLI, with recovery and follow-ups."
+        },
+        {
+          "t": "improve",
+          "zh": "CLI 与桌面 App 各有独立参数、模型与强度、续发次数和排除设置；草稿、菜单和会话切换暂停发送。",
+          "en": "CLI and App have separate timing, model/effort, loop counts and exclusions. Drafts, menus and conversation switches hold sends."
+        }
+      ]
+    },
+    "2.3.1": {
+      "date": "2026-10-03",
+      "items": [
+        {
+          "t": "fix",
+          "zh": "修复真实 Codex 桌面任务已有中间回复或工具记录后，再出现限额提示时漏识别的问题。",
+          "en": "Recognises native quota errors after commentary or tool output in actual Codex desktop tasks."
+        },
+        {
+          "t": "fix",
+          "zh": "App 内部重试时明确显示限额状态，待 App 可输入后才继续；历史错误和引用文本不会触发恢复。",
+          "en": "Shows quota state during the App's internal retries, holding input until ready. Historical errors and quoted text do not trigger recovery."
+        }
+      ]
+    },
+    "2.3.2": {
+      "date": "2026-10-03",
+      "items": [
+        {
+          "t": "fix",
+          "zh": "修复 Codex 桌面 App 在限额期间只填入 continue、发送恢复可用后仍未提交的问题。",
+          "en": "Retains the pending Codex desktop follow-up while Send is unavailable and submits it when native Send becomes usable."
+        },
+        {
+          "t": "fix",
+          "zh": "消息确认提交后才计入重试或跟进次数；修改草稿、切换聊天、跳过或排除窗口会取消待发送。",
+          "en": "Counts retries and follow-ups only after submission is confirmed. Editing the draft, switching chats, Skip or Exclude cancels the pending send."
+        }
+      ]
+    },
+    "3.0.0": {
+      "date": "2026-10-05",
+      "items": [
+        {
+          "t": "improve",
+          "zh": "Codex EXE、Codex CLI 和 Claude CLI 使用三个切换栏，设置按类型显示，活动日志固定在底部。",
+          "en": "Codex desktop, Codex CLI and Claude CLI use three tabs with settings for the selected type and the activity log at the bottom."
+        },
+        {
+          "t": "new",
+          "zh": "Codex 桌面最近活动默认显示 5 个，可自定义数量；每个活动均可单独设置模型、推理强度和完成后续接，同名会话分别保存。",
+          "en": "Desktop recent activities default to five and are configurable. Each activity has separate model, effort and follow-up settings, including conversations with identical titles."
+        },
+        {
+          "t": "new",
+          "zh": "Codex Advanced 增加权限模式与自动工具权限批准开关；默认完全访问且自动批准开启，可切换为等待人工批准。普通选择菜单、模型对话框和登录提示由用户处理。",
+          "en": "Codex Advanced adds permission modes and an automatic tool-approval switch. Full access and automatic approval are defaults; waiting for manual approval is available. General pickers, model dialogs and login prompts remain manual."
+        },
+        {
+          "t": "fix",
+          "zh": "轮询刷新不再打断模型下拉选择或未完成的自定义输入；未打开的最近活动也能保存配置。",
+          "en": "Polling no longer interrupts model dropdowns or unfinished custom input. Recent activities can save their configuration before being opened."
+        },
+        {
+          "t": "improve",
+          "zh": "GitHub 仓库更名为 Codex/CC Auto-Continue，程序更新与源码链接同步使用新地址。",
+          "en": "The GitHub repository is renamed Codex/CC Auto-Continue, with updater and source links aligned to the new address."
+        }
+      ]
+    }
+  }
+}

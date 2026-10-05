@@ -1,0 +1,29 @@
+{
+  "version": "3.0.0",
+  "source_commit": "5b84291b63690cbb5e092ffcf7fb138d5cfe530b",
+  "github_release": "https://github.com/zhh198903-ctrl/codex-cc-auto-continue/releases/tag/v3.0.0",
+  "exe_sha256": "745ccf0bd00b40406db1ed18662826eea4113ebcbf375006e1997e55867672a7",
+  "exe_bytes": 27904532,
+  "packages": {
+    "Auto-Continue_dist_v3_0_0.zip": {
+      "bytes": 27562146,
+      "sha256": "229b516dad17990cce6d01ecab6b71b22e934c501d3b8aab4f08a861dc10a01d"
+    },
+    "Auto-Continue-Skill_dist_v3_0_0.zip": {
+      "bytes": 8563,
+      "sha256": "16d2a5b925c69ba471b5b07bb882d419542e32c8d5d55a68a79282dd2e41910e"
+    }
+  },
+  "github_and_zip_exe_match_local": true,
+  "homepage_cards": 5,
+  "other_homepage_content_identical": true,
+  "public_download_verified": true,
+  "http_range_verified": true,
+  "server_versions_retained": [
+    "2.2.0",
+    "2.3.0",
+    "2.3.1",
+    "2.3.2",
+    "3.0.0"
+  ]
+}
