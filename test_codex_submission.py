@@ -63,11 +63,15 @@ class PendingSubmission(unittest.TestCase):
         patch.object(app, 'read_text', side_effect=lambda _: self.surface.view).start()
         patch.object(app.ctypes, 'windll', SimpleNamespace(user32=self.surface.user)).start()
         patch.object(app.time, 'sleep', return_value=None).start()
+        # These cases isolate Send/ack behavior; native permission switching
+        # is exercised separately against the captured App picker and probe.
+        patch.object(app, 'apply_session_permissions', return_value=True).start()
         self.addCleanup(patch.stopall)
         self.watcher = CodexWatcher(app, provider='codex_app', label='Codex App')
         self.watcher.config.update(poll=1, retry=5, buffer=20, max_retries=1)
         self.state = State(123, 'probe', identity='chat')
         self.now = datetime(2026, 10, 3, tzinfo=timezone.utc)
+        self.watcher.now = lambda: self.now
 
     def observe(self, seconds=0):
         self.state.screen = self.surface.view.screen

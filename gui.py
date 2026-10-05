@@ -1,18 +1,10 @@
 """
-GUI for the Claude Code 5h auto-continue watchdog.
+GUI for the independent Claude CLI, Codex EXE and Codex CLI watchers.
 
-Layout:
-  ┌─ header ────────────────────────────────────────────────────────────┐
-  │ ● Running   [Stop]   [✓] dry-run   poll 30s   buffer 20s          │
-  ├─ window table ─────────────────────────────────────────────────────┤
-  │ Title              Status      Reset      Countdown  Action        │
-  │ ⠂ peak-pulse…      ⏳ Waiting   23:00      02:15:42   [Now] [Skip]  │
-  │ ⠐ move-resources…  Idle        —          —          [Exclude]     │
-  │ …                                                                  │
-  ├─ log ──────────────────────────────────────────────────────────────┤
-  │ 10:35:42  [detect] limit hit on 'move-resources…' → resets 11pm    │
-  │ …                                                                  │
-  └────────────────────────────────────────────────────────────────────┘
+The header contains global actions. Three tabs switch the settings and
+shared session table between monitor types. The activity log stays below.
+Shared form construction lives in
+watcher_ui; provider configuration and command routing remain independent.
 
 The watching loop runs on a QThread so UIA reads (which can take 100ms+
 per terminal) never block the UI. The worker emits a snapshot dict each
@@ -73,10 +65,11 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QAction, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-    QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
-    QLabel,
+    QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QHeaderView,
+    QFrame, QLabel, QScrollArea,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
+    QPlainTextEdit, QPushButton, QSpinBox, QSplitter, QStyle, QSystemTrayIcon, QToolButton,
     QTextBrowser,
     QGridLayout, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget,
@@ -103,7 +96,8 @@ import updater
 import local_api
 from cli_routing import claude_windows as find_terminal_windows
 from cli_routing import claude_window as terminal_window_from_handle
-from codex_gui import CodexGuiMixin
+from codex_gui import ACTIVITY_LABELS, CodexGuiMixin
+from watcher_ui import AppSettingsDialog, timing_spin
 
 
 # Effort levels offered in the per-window dropdown, matching Claude Code's
@@ -3397,6 +3391,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
     sig_codex_fire = pyqtSignal(int)
     sig_codex_skip = pyqtSignal(int)
     sig_codex_cooldown = pyqtSignal(int)
+    sig_codex_app_bind = pyqtSignal(dict)
     sig_codex_app_start = pyqtSignal()
     sig_codex_app_stop = pyqtSignal()
     sig_codex_app_config = pyqtSignal(dict)
@@ -3439,7 +3434,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         super().__init__()
         self._init_cli_gui()
         self.setWindowTitle(f"Auto-Continue v{APP_VERSION} · Claude / Codex")
-        self.resize(960, 620)
+        self.resize(1060, 760)
 
         self.settings = QSettings("auto_continue", "gui")
         self._latest_snapshot: list = []
@@ -3475,6 +3470,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self._after_finish: dict = {}
         self._after_finish_loops: dict = {}
         self._auto_choose = False
+        self._dry_run_enabled = False
         self._auto_permission = True
         # Fable refusal-recovery config (Advanced dialog). Empty pattern =
         # use the built-in default.
@@ -3565,7 +3561,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         central = QWidget()
         root = QVBoxLayout(central)
         root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setSpacing(6)
 
         # Header bar
         header = QHBoxLayout()
@@ -3588,14 +3584,6 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         _sbf.setPointSize(_sbf.pointSize() + 1)
         self.start_btn.setFont(_sbf)
         self.start_btn.clicked.connect(self._toggle_running)
-
-        self.dry_run_check = QCheckBox("Dry-run")
-        self.dry_run_check.setToolTip(
-            "Detect and log, but do not actually press keys."
-        )
-        self.dry_run_check.toggled.connect(
-            lambda v: (self.sig_set_dry_run.emit(v), self._save_settings())
-        )
 
         self.keep_awake_check = QCheckBox("Keep awake")
         self.keep_awake_check.setToolTip(
@@ -3628,28 +3616,19 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         )
         self.boot_check.toggled.connect(self._on_boot_toggled)
 
-        self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(5, 600)
-        self.interval_spin.setValue(DEFAULT_INTERVAL_S)
-        self.interval_spin.setSuffix(" s")
+        self.interval_spin = timing_spin(DEFAULT_INTERVAL_S, 5, 600)
         self.interval_spin.setToolTip("Polling interval")
         self.interval_spin.valueChanged.connect(
             lambda v: (self.sig_set_interval.emit(v), self._save_settings())
         )
 
-        self.buffer_spin = QSpinBox()
-        self.buffer_spin.setRange(0, 600)
-        self.buffer_spin.setValue(DEFAULT_BUFFER_S)
-        self.buffer_spin.setSuffix(" s")
+        self.buffer_spin = timing_spin(DEFAULT_BUFFER_S, 0, 600)
         self.buffer_spin.setToolTip("Extra delay past the reset hour")
         self.buffer_spin.valueChanged.connect(
             lambda v: (self.sig_set_buffer.emit(v), self._save_settings())
         )
 
-        self.retry_spin = QSpinBox()
-        self.retry_spin.setRange(5, 3600)
-        self.retry_spin.setValue(DEFAULT_RETRY_S)
-        self.retry_spin.setSuffix(" s")
+        self.retry_spin = timing_spin(DEFAULT_RETRY_S, 5, 3600)
         self.retry_spin.setToolTip(
             "When Claude shows 'attempt 10/10' (network retries exhausted), "
             "resend 'continue' every N seconds until the connection comes "
@@ -3664,76 +3643,26 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         header.addWidget(self.status_text)
         header.addSpacing(6)
         header.addWidget(self.start_btn)
-        header.addSpacing(12)
-        # Dry-run / Keep-awake stacked vertically as a compact pair.
-        drk_box = QVBoxLayout()
-        drk_box.setSpacing(2)
-        drk_box.setContentsMargins(0, 0, 0, 0)
-        drk_box.addWidget(self.dry_run_check)
-        drk_box.addWidget(self.keep_awake_check)
-        header.addLayout(drk_box)
-        # Stack the boot-autostart switch directly beneath "Start on launch"
-        # — both are auto-start options, so keep them visually paired.
-        autostart_box = QVBoxLayout()
-        autostart_box.setSpacing(2)
-        autostart_box.setContentsMargins(0, 0, 0, 0)
-        autostart_box.addWidget(self.autostart_check)
-        autostart_box.addWidget(self.boot_check)
-        header.addLayout(autostart_box)
-        header.addSpacing(12)
-        header.addWidget(QLabel("poll"))
-        header.insertWidget(header.count() - 1, QLabel("Claude CLI"))
-        header.addWidget(self.interval_spin)
-        header.addWidget(QLabel("buffer"))
-        header.addWidget(self.buffer_spin)
-        header.addWidget(QLabel("retry"))
-        header.addWidget(self.retry_spin)
         header.addStretch()
+        self.app_settings_btn = QPushButton("App settings…")
+        self.app_settings_btn.clicked.connect(self._open_app_settings)
+        header.addWidget(self.app_settings_btn)
+        self.more_btn = QToolButton()
+        self.more_btn.setText("More")
+        self.more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.more_menu = QMenu(self.more_btn)
+        for label, callback in (("Help", self._open_help),
+                                ("Export log…", self._export_log_for_feedback),
+                                ("Check updates", lambda: self.sig_update_check.emit(True))):
+            action = self.more_menu.addAction(label)
+            action.triggered.connect(callback)
+        self.more_btn.setMenu(self.more_menu)
+        header.addWidget(self.more_btn)
 
-        # The four secondary actions sit in a 2x2 block so the header stays
-        # one row tall no matter how wide the window is.
-        self.advanced_btn = QPushButton("Advanced…")
-        self.advanced_btn.setToolTip(
-            "Trigger patterns, and the opt-in model recovery")
+        # Driver settings live only in their corresponding visible card.
+        self.advanced_btn = QPushButton("More settings…")
+        self.advanced_btn.setToolTip("Claude CLI: answering, model recovery, triggers and local API")
         self.advanced_btn.clicked.connect(self._open_advanced)
-
-        self.check_updates_btn = QPushButton("Check updates")
-        self.check_updates_btn.setToolTip(
-            "Check GitHub for a newer Auto-Continue release")
-        self.check_updates_btn.clicked.connect(
-            lambda: self.sig_update_check.emit(True))
-
-        self.help_btn = QPushButton("Help")
-        self.help_btn.setToolTip("How this watchdog works and how to use it")
-        self.help_btn.clicked.connect(self._open_help)
-
-        self.reset_btn = QPushButton("Reset")
-        self.reset_btn.setToolTip(
-            "Restore every setting to its shipped default — timings, model "
-            "and effort overrides, exclusions, trigger patterns and the model "
-            "recovery. Asks first.")
-        self.reset_btn.clicked.connect(self._reset_settings)
-
-        btn_grid = QGridLayout()
-        btn_grid.setSpacing(4)
-        btn_grid.setContentsMargins(0, 0, 0, 0)
-        self.export_log_btn = QPushButton("Export log for feedback…")
-        self.export_log_btn.setToolTip(
-            "Save a copy of the activity log with the window titles and your "
-            "own prompts stripped out, so it can be sent to the author "
-            "without disclosing what this machine is working on. Shows you "
-            "exactly what it will write before writing it.")
-        self.export_log_btn.clicked.connect(self._export_log_for_feedback)
-
-        btn_grid.addWidget(self.advanced_btn, 0, 0)
-        btn_grid.addWidget(self.check_updates_btn, 0, 1)
-        btn_grid.addWidget(self.help_btn, 1, 0)
-        btn_grid.addWidget(self.reset_btn, 1, 1)
-        btn_grid.addWidget(self.export_log_btn, 2, 0, 1, 2)
-        for b in (self.advanced_btn, self.check_updates_btn,
-                  self.help_btn, self.reset_btn):
-            b.setMinimumWidth(110)
-        header.addLayout(btn_grid)
         root.addLayout(header)
         self._build_cli_controls(root)
 
@@ -3760,7 +3689,12 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self._apply_banner_theme()
         root.addWidget(self.update_banner)
 
-        # Window table
+        # Resizable monitoring areas, with no duplicated configuration fields.
+        self.monitor_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.monitor_splitter.setChildrenCollapsible(False)
+        self.windows_panel = QGroupBox("Monitored sessions")
+        window_layout = QVBoxLayout(self.windows_panel)
+        self._build_monitor_status(window_layout)
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
             ["Window", "Status", "Reset", "Countdown", "Last sent",
@@ -3774,22 +3708,33 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             QAbstractItemView.EditTrigger.NoEditTriggers
         )
         self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for i in range(1, 8):
             h.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
-        root.addWidget(self.table, stretch=2)
+        for i, width in ((5, 135), (6, 90), (7, 150)):
+            h.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+            self.table.setColumnWidth(i, width)
+        self.table.setMinimumHeight(70)
+        window_layout.addWidget(self.table)
+        self.monitor_splitter.addWidget(self.windows_panel)
 
         # Log view
-        log_label = QLabel("Activity log")
-        log_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
-        root.addWidget(log_label)
-
+        log_panel = QGroupBox("Activity log")
+        self.log_panel = log_panel
+        log_layout = QVBoxLayout(log_panel)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
         self.log_view.setFont(QFont("Consolas", 9))
-        root.addWidget(self.log_view, stretch=1)
+        self.log_view.setMinimumHeight(55)
+        log_layout.addWidget(self.log_view)
+        self.monitor_splitter.addWidget(log_panel)
+        self.monitor_splitter.setStretchFactor(0, 3)
+        self.monitor_splitter.setStretchFactor(1, 1)
+        self.monitor_splitter.setSizes([360, 120])
+        root.addWidget(self.monitor_splitter, 1)
 
         self.setCentralWidget(central)
 
@@ -3805,7 +3750,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             return
         icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self.tray = QSystemTrayIcon(icon, self)
-        self.tray.setToolTip("Auto-Continue — Claude Code")
+        self.tray.setToolTip("Auto-Continue — Claude CLI / Codex EXE / Codex CLI")
         self.tray.activated.connect(self._on_tray_activated)
 
         # Right-click context menu so the user can show the window or
@@ -4173,7 +4118,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             f"(you switched it by hand); re-tick it in Advanced to resume")
 
     def _reset_settings(self) -> None:
-        """Put every setting back to its shipped default.
+        """Put Claude CLI settings back to their shipped defaults.
 
         Destructive and not obviously undoable, so it asks first and names
         what goes. Model recovery returns to OFF, which is how it ships —
@@ -4181,8 +4126,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         in the wrong direction.
         """
         if QMessageBox.question(
-                self, "Reset all settings?",
-                "This restores the shipped defaults:\n\n"
+                self, "Reset Claude CLI settings?",
+                "This restores the Claude CLI shipped defaults:\n\n"
                 f"  • poll {DEFAULT_INTERVAL_S}s · buffer {DEFAULT_BUFFER_S}s "
                 f"· retry {DEFAULT_RETRY_S}s\n"
                 "  • clears per-window model and effort overrides\n"
@@ -4190,7 +4135,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 "  • clears excluded windows\n"
                 "  • restores the built-in trigger patterns\n"
                 "  • turns model recovery OFF and clears its window list\n\n"
-                "Dry-run, keep-awake and the start-up options are left as "
+                "Keep-awake and the start-up options are left as "
                 "they are. Continue?",
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.Cancel,
@@ -4612,15 +4557,26 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         # so they can still be un-ticked.
         seen = {}
         for r in self._latest_snapshot:
+            if r.get("provider", "claude") != "claude":
+                continue
             k = title_key(r["title"])
             if k:
                 seen[k] = r["title"]
         dlg = AdvancedDialog(self, dict(self._fable_cfg), seen,
                              dict(self._trigger_patterns),
                              {"choose": self._auto_choose,
-                              "permission": self._auto_permission})
+                              "permission": self._auto_permission},
+                             {"autostart": self.autostart_check.isChecked(),
+                              "boot": self.boot_check.isChecked(),
+                              "keep_awake": self.keep_awake_check.isChecked()}, scope="claude")
         self._pending_optouts.clear()
-        if dlg.exec():
+        _accepted = dlg.exec()
+        if dlg.reset_requested:
+            # The dialog was rejected on purpose so nothing it holds is
+            # written back; the reset (which asks first) runs on its own.
+            self._reset_settings()
+            return
+        if _accepted:
             new_cfg = dlg.result_config()
             # The dialog snapshotted the scope when it opened. If the watcher
             # unticked a window while it was up, OK would resurrect it — and
@@ -4725,7 +4681,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         # controls doesn't trigger a chain of valueChanged → _save_settings
         # → sig_set_* before the worker is even ready.
         widgets = [self.interval_spin, self.buffer_spin, self.retry_spin,
-                   self.dry_run_check, self.keep_awake_check,
+                   self.keep_awake_check,
                    self.autostart_check, self.boot_check]
         for w in widgets:
             w.blockSignals(True)
@@ -4737,7 +4693,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             self.retry_spin.setValue(
                 self._settings_int("retry_interval", DEFAULT_RETRY_S)
             )
-            self.dry_run_check.setChecked(
+            self._dry_run_enabled = (
                 self.settings.value("dry_run", False, type=bool)
             )
             self.keep_awake_check.setChecked(
@@ -4862,7 +4818,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self.sig_set_interval.emit(self.interval_spin.value())
         self.sig_set_buffer.emit(self.buffer_spin.value())
         self.sig_set_retry_interval.emit(self.retry_spin.value())
-        self.sig_set_dry_run.emit(self.dry_run_check.isChecked())
+        self.sig_set_dry_run.emit(self._dry_run_enabled)
         self.sig_set_excluded.emit(list(self._excluded_titles))
         self.sig_set_effort_overrides.emit(dict(self._effort_overrides))
         self.sig_set_model_overrides.emit(dict(self._model_overrides))
@@ -4925,7 +4881,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         self.settings.setValue("interval", self.interval_spin.value())
         self.settings.setValue("buffer", self.buffer_spin.value())
         self.settings.setValue("retry_interval", self.retry_spin.value())
-        self.settings.setValue("dry_run", self.dry_run_check.isChecked())
+        self.settings.setValue("dry_run", self._dry_run_enabled)
         self.settings.setValue("keep_awake", self.keep_awake_check.isChecked())
         self.settings.setValue("autostart", self.autostart_check.isChecked())
         self.settings.setValue("excluded", list(self._excluded_titles))
@@ -4965,6 +4921,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             self.status_text.setText("Stopped")
             self.start_btn.setText("Start")
         self._refresh_running_indicator()
+        self._update_cli_controls()
 
     def _refresh_running_indicator(self) -> None:
         running = self.start_btn.text() == "Stop"
@@ -4978,7 +4935,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             "QPushButton {"
             f" background:{bg}; color:white; font-weight:bold;"
             " border:none; border-radius:5px; padding:6px 16px; }"
-            f"QPushButton:hover {{ background:{hover}; }}")
+            f"QPushButton:hover {{ background:{hover}; }}"
+            "QPushButton:disabled { background:palette(button); color:palette(mid); }")
 
     @pyqtSlot(list)
     def _on_snapshot(self, rows: list) -> None:
@@ -4991,12 +4949,18 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         # rebuilding destroys the cell widgets, which closes any model/
         # effort dropdown the user has open and resets row selection.
         # (The countdown column is repainted by its own 1s timer.)
-        sig = [(r.get("provider", "claude"), r["hwnd"], r["title"], r["status"], r["reset_utc"],
+        sig = (self._view_provider, [(r.get("provider", "claude"), r["hwnd"], r["title"], r["status"], r["reset_utc"],
                 r["last_sent_utc"], r["excluded"], r["model"], r["effort"],
-                r.get("tabs", 1))
-               for r in rows]
+                r.get("tabs", 1), r.get("thread_id"), r.get("cwd"), r.get("record_only", False))
+               for r in rows])
         if sig == self._last_render_sig:
+            self._refresh_activity_times()
             return
+        if QApplication.activePopupWidget() is not None or any(
+                combo.view().isVisible() or (combo.isEditable() and combo.lineEdit().hasFocus()
+                                             and combo.lineEdit().isModified())
+                for combo in self.table.findChildren(QComboBox)):
+            return  # Preserve open menus and unfinished model-name edits.
         self._last_render_sig = sig
         self._render_table()
 
@@ -5075,25 +5039,53 @@ class MainWindow(CodexGuiMixin, QMainWindow):
 
     def _render_table(self) -> None:
         rows = self._latest_snapshot
+        selected_item = self.table.item(self.table.currentRow(), 0)
+        selected_id = selected_item.data(Qt.ItemDataRole.UserRole) if selected_item else None
+        # Qt defers deleting replaced cell widgets until the next event loop.
+        # Hide them immediately so fast selection changes cannot leave ghosts.
+        for old_row in range(self.table.rowCount()):
+            for column in (5, 6, 7):
+                widget = self.table.cellWidget(old_row, column)
+                if widget:
+                    widget.blockSignals(True)
+                    if isinstance(widget, QComboBox) and widget.lineEdit():
+                        widget.lineEdit().blockSignals(True)
+                    widget.hide()
+                    self.table.removeCellWidget(old_row, column)
+        self.table.clearContents()
         self.table.setRowCount(len(rows))
+        app_view = self._view_provider == "codex_app"
+        self.table.setColumnHidden(2, app_view)
+        self.table.setColumnHidden(3, app_view)
+        self.table.horizontalHeaderItem(0).setText("Codex session / Window" if app_view else "Window")
+        self.table.horizontalHeaderItem(4).setText("Last activity" if app_view else "Last sent")
         now = datetime.now(pytz.UTC)
 
         for r, row in enumerate(rows):
+            self.table.setRowHeight(r, 30)
             tabs = row.get("tabs", 1)
             provider = row.get("provider", "claude")
+            activity = bool(row.get("activity_row"))
+            thread_id = row.get("thread_id", "") if provider == "codex_app" else ""
             is_codex = provider in ("codex", "codex_app")
             if is_codex:
                 codex_config = self._codex_row_config(row)
+                options = self._codex_row_options(row)
                 # Show settings edits immediately, without waiting for the
                 # next Codex poll or changing the worker's snapshot object.
                 row = dict(row,
-                    model=codex_config["model_overrides"].get(row["title"], ""),
-                    effort=codex_config["effort_overrides"].get(row["title"], ""),
-                    excluded=row["title"] in codex_config["excluded"])
-            title_text = {"codex": "[Codex CLI] ", "codex_app": "[Codex App] "}.get(provider, "[Claude CLI] ") + row["title"]
+                    model=options["model"], effort=options["effort"], excluded=options["excluded"])
+            title_text = {"codex": "[Codex CLI] ", "codex_app": "[Codex EXE] "}.get(provider, "[Claude CLI] ") + row["title"]
+            if activity:
+                title_text = "[Codex] " + row["title"]
+                if row.get("cwd"):
+                    title_text += "\n" + row["cwd"]
+                    self.table.setRowHeight(r, 46)
             if tabs > 1:
                 title_text += f"   ⚠ {tabs} tabs"
             title_item = QTableWidgetItem(title_text)
+            title_item.setData(Qt.ItemDataRole.UserRole,
+                (provider, "session", thread_id) if activity else (provider, "window", row["hwnd"]))
             tip = f"hwnd={row['hwnd']}"
             if tabs > 1:
                 tip += (f"\n⚠ This window has {tabs} tabs — only the ACTIVE"
@@ -5104,14 +5096,21 @@ class MainWindow(CodexGuiMixin, QMainWindow):
             if is_codex:
                 title_item.setToolTip(tip + "\nOnly the active tab is watched. Use a separate window per session."
                     + f"\nCurrent Codex: {row.get('current_model', '')} {row.get('current_effort', '')}")
+            if activity:
+                title_item.setToolTip(f"{row['title']}\n{row.get('cwd', '')}\nSession ID: {thread_id}"
+                    + f"\nCurrent: {row.get('current_model', '')} {row.get('current_effort', '')}"
+                    + (f"\nBound window: {row['hwnd']}" if row.get("hwnd") is not None else
+                       "\nSettings saved per session. Open the session in Codex to apply them before its next continue."))
             self.table.setItem(r, 0, title_item)
 
             status_item = QTableWidgetItem(
-                "Waiting for input" if is_codex and row["status"] == ST_PROMPT
-                else "Waiting for Send" if is_codex and row["status"] == "waiting_send"
-                else "Confirming submission" if is_codex and row["status"] == "confirming_send"
+                "Excluded" if is_codex and row["excluded"]
+                else ACTIVITY_LABELS[row["status"]] if activity and row["status"] in ACTIVITY_LABELS
+                else "Waiting for input" if is_codex and row["status"] == ST_PROMPT
                 else "Usage limit · App retrying" if is_codex and row["status"] == "quota_busy"
                 else "App retrying" if is_codex and row["status"] == "retry_busy"
+                else "Waiting for Send" if is_codex and row["status"] == "waiting_send"
+                else "Confirming submission" if is_codex and row["status"] == "confirming_send"
                 else STATUS_LABEL.get(row["status"], row["status"])
             )
             bg = self._palette["status_bg"].get(row["status"])
@@ -5130,7 +5129,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 _fmt_countdown(row["reset_utc"], now)
             ))
             self.table.setItem(r, 4, QTableWidgetItem(
-                _fmt_local(row["last_sent_utc"])
+                self._activity_time(row) if app_view else _fmt_local(row["last_sent_utc"])
             ))
 
             # Model dropdown — sent as `/model <name>` right before the
@@ -5150,7 +5149,7 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 from codex_gui import MODEL_LEVELS as codex_models
                 model_levels = codex_models
             for level in model_levels:
-                model_combo.addItem((level or "(none)") if is_codex else MODEL_LABEL[level], userData=level)
+                model_combo.addItem((level or ("Keep current" if thread_id else "(none)")) if is_codex else MODEL_LABEL[level], userData=level)
             current_m = row.get("model", "")
             try:
                 idx_m = model_levels.index(current_m)
@@ -5166,14 +5165,19 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 "unchanged. Setting persists per window across restarts."
             )
             if is_codex:
-                model_combo.setToolTip("Apply a model from this session's native Codex picker before continuing. (none) keeps the current model. Session only.")
+                model_combo.setToolTip(f"Current: {row.get('current_model') or 'unknown'}. Select or type a model. Saved for this session; applied before continuing when its window is bound.")
 
-            def _model_picked(_i=None, t=row["title"], cb=model_combo, cx=is_codex, cp=provider):
-                # currentData() is None for typed text, so fall back to it.
+            def _model_picked(_i=None, t=row["title"], cb=model_combo, cx=is_codex, cp=provider, sid=thread_id, saved=current_m):
+                # Editable combos retain the old item data while typing.
+                text = cb.currentText().strip()
                 data = cb.currentData()
-                value = data if data is not None else cb.currentText().strip()
+                value = data if data is not None and text == cb.itemText(cb.currentIndex()) else text
+                # Opening the popup can finish line editing. Rebuilding an
+                # unchanged row here would immediately destroy that popup.
+                if value == saved:
+                    return
                 if cx:
-                    self._on_codex_override(t, "model", value, cp)
+                    self._on_codex_override(t, "model", value, cp, sid)
                 else:
                     self._on_model_changed(t, value)
 
@@ -5201,10 +5205,10 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 "Setting persists per window across restarts."
             )
             if is_codex:
-                effort_combo.setToolTip("Apply reasoning effort in the native Codex picker before continuing. (none) keeps the current effort. Session only.")
+                effort_combo.setToolTip("Saved for this Codex session; applied before continuing when its window is bound. (none) keeps the current effort.")
             effort_combo.currentIndexChanged.connect(
-                lambda _i, t=row["title"], cb=effort_combo, cx=is_codex, cp=provider:
-                self._on_codex_override(t, "effort", cb.currentData(), cp) if cx else
+                lambda _i, t=row["title"], cb=effort_combo, cx=is_codex, cp=provider, sid=thread_id:
+                self._on_codex_override(t, "effort", cb.currentData(), cp, sid) if cx else
                 self._on_effort_changed(t, cb.currentData())
             )
             self.table.setCellWidget(r, 6, effort_combo)
@@ -5223,37 +5227,35 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                 )
                 hl.addWidget(un_btn)
             else:
-                now_btn = QPushButton("Now")
-                now_btn.setToolTip("Send 'continue' immediately")
+                bound = row.get("hwnd") is not None and not row.get("record_only")
+                now_btn = QPushButton("Now" if bound else "Open")
+                now_btn.setToolTip("Send 'continue' immediately" if bound else "Open this session in Codex. Its settings are already saved.")
                 now_btn.clicked.connect(
-                    lambda _, rr=row: self._cli_action(rr, "fire")
+                    lambda _, rr=row, action="fire" if bound else "open": self._cli_action(rr, action)
                 )
                 hl.addWidget(now_btn)
 
-                skip_btn = QPushButton("Skip")
-                skip_btn.setToolTip("Cancel pending continue for this row")
-                skip_btn.setEnabled(row["status"] == ST_PENDING)
-                skip_btn.clicked.connect(
-                    lambda _, rr=row: self._cli_action(rr, "skip")
-                )
-                hl.addWidget(skip_btn)
+                more = QToolButton()
+                more.setText("Actions")
+                more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+                menu = QMenu(more)
+                skip = menu.addAction("Skip pending continue")
+                skip.setEnabled(bound and row["status"] == ST_PENDING)
+                skip.triggered.connect(lambda _, rr=row: self._cli_action(rr, "skip"))
+                exclude = menu.addAction("Exclude session" if thread_id else "Exclude window")
+                exclude.triggered.connect(lambda _, rr=row: self._cli_action(rr, "exclude"))
+                if thread_id and not bound:
+                    link = menu.addAction("Link visible Codex window")
+                    link.setEnabled(self._cli_running["codex_app"] and len(self._codex_link_candidates(row)) == 1)
+                    link.setToolTip("For identical titles: open this exact session first, then link its visible window to this session ID.")
+                    link.triggered.connect(lambda _, rr=row: self._cli_action(rr, "link"))
+                menu.addSeparator()
 
-                ex_btn = QPushButton("Exclude")
-                ex_btn.setToolTip("Stop watching this window (remembered)")
-                ex_btn.clicked.connect(
-                    lambda _, rr=row: self._cli_action(rr, "exclude")
-                )
-                hl.addWidget(ex_btn)
-
-                # After-finish prompt. A button + popup rather than an inline
-                # edit: prompts are sentences, and a column wide enough to
-                # show one would crowd out the table.
+                # Keep the follow-up state visible without widening the table.
                 _af_key = row["title"] if is_codex else title_key(row["title"])
-                _af_config = codex_config["after_finish"] if is_codex else self._after_finish
-                _af_loops = codex_config["after_finish_loops"] if is_codex else self._after_finish_loops
-                _af_cur = _af_config.get(_af_key, "")
+                _af_cur = options["after_finish"] if is_codex else self._after_finish.get(_af_key, "")
                 try:
-                    _af_left = int(_af_loops.get(_af_key, 1))
+                    _af_left = options["loops"] if is_codex else int(self._after_finish_loops.get(_af_key, 1))
                 except (TypeError, ValueError):
                     _af_left = 1
                 if not _af_cur:
@@ -5264,8 +5266,8 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                     _af_label = "After finish ✓ (0 left)"
                 else:
                     _af_label = f"After finish ✓ ({_af_left} left)"
-                af_btn = QPushButton(_af_label)
-                af_btn.setToolTip(
+                af_action = menu.addAction(_af_label)
+                af_tip = (
                     ("When this session finishes a run and sits idle, type "
                      "this prompt so it keeps working"
                      + (" (unlimited runs)" if _af_left < 0
@@ -5274,26 +5276,39 @@ class MainWindow(CodexGuiMixin, QMainWindow):
                     if _af_cur else
                     "Set a prompt to type automatically when this session "
                     "finishes its current run and sits idle. Empty = off.")
-                af_btn.clicked.connect(
+                af_action.setToolTip(af_tip)
+                more.setToolTip(af_tip)
+                more.setText("Actions ✓" if _af_cur and _af_left else "Actions")
+                af_action.triggered.connect(
                     lambda _, rr=row: self._cli_action(rr, "after_finish")
                 )
-                hl.addWidget(af_btn)
 
                 # Only relevant during cooldown — clears the suppression so
                 # the next tick re-detects (useful for testing or when you
                 # want to immediately catch a new limit hit after a fire).
                 if row["status"] == ST_COOLDOWN:
-                    cd_btn = QPushButton("Clear cooldown")
-                    cd_btn.setToolTip(
+                    cd_action = menu.addAction("Clear cooldown")
+                    cd_action.setToolTip(
                         "Forget the recent send so detection resumes now."
                     )
-                    cd_btn.clicked.connect(
+                    cd_action.triggered.connect(
                         lambda _, rr=row: self._cli_action(rr, "cooldown")
                     )
-                    hl.addWidget(cd_btn)
+                more.setMenu(menu)
+                hl.addWidget(more)
+
+            for button in btn_widget.findChildren(QPushButton):
+                button.setMinimumWidth(0)
+                button.setMaximumWidth(60)
 
             hl.addStretch()
             self.table.setCellWidget(r, 7, btn_widget)
+
+        if selected_id is not None:
+            for r in range(self.table.rowCount()):
+                if self.table.item(r, 0).data(Qt.ItemDataRole.UserRole) == selected_id:
+                    self.table.selectRow(r)
+                    break
 
     def _refresh_countdowns(self) -> None:
         # Lightweight repaint of column 3 only — avoids rebuilding action
@@ -5538,6 +5553,29 @@ class MainWindow(CodexGuiMixin, QMainWindow):
         # to quit explicitly.
         QApplication.instance().quit()
 
+    @staticmethod
+    def _activity_time(row) -> str:
+        stamp = row.get("updated_utc") if row.get("activity_row") else row.get("read_utc") or row.get("last_sent_utc")
+        return stamp.astimezone().strftime("%m-%d %H:%M:%S") if stamp else "—"
+
+
+    def _refresh_activity_times(self) -> None:
+        if self._view_provider != "codex_app":
+            return
+        for r, row in enumerate(self._latest_snapshot):
+            item = self.table.item(r, 4)
+            if item:
+                item.setText(self._activity_time(row))
+
+
+    def _open_app_settings(self) -> None:
+        controls = {"autostart": self.autostart_check, "boot": self.boot_check,
+                    "keep_awake": self.keep_awake_check}
+        dlg = AppSettingsDialog(self, controls)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            for key, value in dlg.values().items():
+                controls[key].setChecked(value)
+
 
 # ---------------------------------------------------------------------------
 # In-app help
@@ -5547,6 +5585,20 @@ class MainWindow(CodexGuiMixin, QMainWindow):
 # are not about to go browsing GitHub.
 HELP_HTML = """
 <h2>Auto-Continue v{version}</h2>
+<h3>Codex EXE, Codex CLI and Claude CLI</h3>
+<p>Enable any combination with the three monitor tabs. Each tab shows its own
+settings and the shared session table; the activity log stays below. App settings
+contains global startup and keep-awake options. Dry-run is hidden from the GUI.</p>
+<p>Codex EXE lists five recent Codex activities by default (Recent: 1–100).
+Every activity can be configured independently, including duplicate titles.
+Hidden activities can be listed and configured; input requires a verified binding
+to a visible native Codex conversation. ChatGPT and Work are excluded.</p>
+<p>Codex Advanced offers Full access (default), Approve for me and Ask for approval,
+with automatic tool permission approval on by default. Turning it off holds a
+permission request. Ordinary choosers and login prompts still require attention.
+Native model/effort controls and submission confirmation prevent premature budget
+consumption. CLI and EXE detection, settings and budgets remain independent.</p>
+<h3>Claude CLI details</h3>
 <p>A watchdog for Claude Code running in Windows Terminal. It reads each
 window's scrollback, notices when a session has stopped for a reason you can
 fix by typing something, waits for the right moment, and types it for you —
@@ -5567,10 +5619,7 @@ terminal window found.</li>
 <li>That's it. Leave it running. Nothing is typed until a session actually
 needs it.</li>
 </ol>
-<p>Not sure yet? Tick <b>Dry-run</b> first: everything is detected, scheduled
-and logged, but no keystroke is ever sent and no Loops budget is spent. The
-log shows exactly what would have happened, prefixed
-<code>[dry-run]</code>.</p>
+<p>Dry-run is an internal saved diagnostic setting; it is hidden from the GUI.</p>
 
 <h3>What it reacts to</h3>
 <ul>
@@ -6098,7 +6147,10 @@ reports what is available.</li>
 # ===========================================================================
 
 class AdvancedDialog(QDialog):
-    """Advanced sub-window with two tabs:
+    """Claude-specific answering, triggers, local API and model recovery.
+
+    The legacy General page is available to older callers; production opens
+    the Claude scope and places global options in AppSettingsDialog.
 
     * **Triggers** — the regexes that decide when auto-continue fires. Editable
       because Anthropic re-words these banners without notice and a rename
@@ -6109,10 +6161,18 @@ class AdvancedDialog(QDialog):
     """
 
     def __init__(self, parent, cfg: dict, windows: dict, patterns: dict,
-                 auto: dict = None):
+                 auto: dict = None, general: dict = None, scope: str = "all"):
         super().__init__(parent)
-        self.setWindowTitle("Advanced")
-        self.resize(660, 640)
+        self.setWindowTitle("Claude CLI — More settings" if scope == "claude" else "Advanced")
+        # Set by the General tab's reset button. The dialog is then REJECTED
+        # rather than accepted, so its now-stale values are never written
+        # back over the defaults the reset is about to put in place.
+        self.reset_requested = False
+        # Tall enough that the Model recovery page needs no scrolling on an
+        # ordinary screen, never taller than the screen actually has room for.
+        _scr = QApplication.primaryScreen()
+        _avail = _scr.availableGeometry().height() if _scr else 800
+        self.resize(660, max(480, min(760, _avail - 60)))
         self._orig_windows = list(cfg.get("windows", []))
         _res = cfg.get("resume")
         self._orig_resume = dict(_res) if isinstance(_res, dict) else {}
@@ -6121,6 +6181,12 @@ class AdvancedDialog(QDialog):
         outer = QVBoxLayout(self)
         tabs = QTabWidget()
         outer.addWidget(tabs, 1)
+        self._tabs = tabs
+
+        if scope != "claude":
+            gen_tab = QWidget()
+            tabs.addTab(gen_tab, "General")
+            self._build_general_tab(gen_tab, general or {})
 
         ans_tab = QWidget()
         tabs.addTab(ans_tab, "Answering")
@@ -6134,16 +6200,36 @@ class AdvancedDialog(QDialog):
         tabs.addTab(api_tab, "Local API")
         self._build_api_tab(api_tab)
 
-        fable_tab = QWidget()
-        tabs.addTab(fable_tab, "Fable recovery")
-        root = QVBoxLayout(fable_tab)
+        # The densest page: in a scroll area so that on a short screen (or a
+        # high scaling factor) it scrolls instead of Qt squeezing the fixed-
+        # height script box under the next group — which is what it did the
+        # moment the page was split into groups.
+        fable_page = QWidget()
+        fable_tab = QScrollArea()
+        fable_tab.setWidgetResizable(True)
+        fable_tab.setFrameShape(QFrame.Shape.NoFrame)
+        fable_tab.setWidget(fable_page)
+        tabs.addTab(fable_tab, "Model recovery")
+        # Most used first: General, Answering, then model recovery; the
+        # regex editor and the companion-program API are rarely opened.
+        tabs.tabBar().moveTab(tabs.indexOf(fable_tab), 1 if scope == "claude" else 2)
+        tabs.setCurrentIndex(0)
+        root = QVBoxLayout(fable_page)
+        # Three groups, in the order a reader needs them: whether and when it
+        # acts, what it types, and which windows it may type into.
+        g_act = QGroupBox("When it acts")
+        act = QVBoxLayout(g_act)
+        g_scr = QGroupBox("Recovery script")
+        scr = QVBoxLayout(g_scr)
+        g_win = QGroupBox("Which windows")
+        win = QVBoxLayout(g_win)
 
         intro = QLabel(
             "When safeguards block a turn: finish the work on a fallback "
             "model, /compact, switch back. <b>Help</b> has the details."
         )
         intro.setWordWrap(True)
-        root.addWidget(intro)
+        act.addWidget(intro)
 
         prereq = QLabel(
             "⚠ A ticked window is also kept on the script's target model "
@@ -6156,9 +6242,13 @@ class AdvancedDialog(QDialog):
             "is not the one your script targets, it sends /model to switch "
             "it back — no safeguard block required. Switch a window's model "
             "by hand and it is unticked automatically and left alone.")
-        root.addWidget(prereq)
+        act.addWidget(prereq)
 
         form = QFormLayout()
+        # Fields at their natural width: a seconds box stretched across the
+        # whole dialog read as a text field.
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.enable_chk = QCheckBox("Enable Fable refusal-recovery")
         self.enable_chk.setChecked(bool(cfg.get("enabled", False)))
         form.addRow(self.enable_chk)
@@ -6184,13 +6274,14 @@ class AdvancedDialog(QDialog):
         except (TypeError, ValueError):
             self.delay_spin.setValue(180)
         form.addRow("Wait for <wait> steps", self.delay_spin)
-        root.addLayout(form)
+        act.addLayout(form)
+        root.addWidget(g_act)
 
         detect_hint = QLabel(
             "Detection pattern: <b>Triggers</b> tab → “Fable safeguard "
             "block”.")
         detect_hint.setWordWrap(True)
-        root.addWidget(detect_hint)
+        scr.addWidget(detect_hint)
 
         steps_hint = QLabel(
             "Steps, one per line — a plain line is typed + Enter. Hover for "
@@ -6209,7 +6300,7 @@ class AdvancedDialog(QDialog):
             "<b>&lt;resume&gt;</b> type this window's After recovery "
             "command ('continue' when empty)")
         steps_hint.setWordWrap(True)
-        root.addWidget(steps_hint)
+        scr.addWidget(steps_hint)
         _steps_src = cfg.get("steps")
         if not isinstance(_steps_src, str) or not _steps_src.strip():
             _steps_src = DEFAULT_FABLE_STEPS
@@ -6228,7 +6319,8 @@ class AdvancedDialog(QDialog):
             _fm.lineSpacing() * (_lines + 1)
             + int(self.steps_edit.document().documentMargin()) * 2
             + self.steps_edit.frameWidth() * 2)
-        root.addWidget(self.steps_edit)
+        scr.addWidget(self.steps_edit)
+        root.addWidget(g_scr, 1)
 
         self.all_windows_chk = QCheckBox(
             "Apply to all watched windows (recommended)")
@@ -6237,14 +6329,14 @@ class AdvancedDialog(QDialog):
             "On: recovery is eligible on every watched window — but only the "
             "window that actually shows the Fable notice is ever switched. "
             "Off: restrict to the specific windows ticked below.")
-        root.addWidget(self.all_windows_chk)
+        win.addWidget(self.all_windows_chk)
 
         after_hint = QLabel(
             "Ticks apply only with “all windows” off. <b>After recovery</b> "
             "= what &lt;resume&gt; types; <b>Tries</b> = how many per block "
             "(default 1).")
         after_hint.setWordWrap(True)
-        root.addWidget(after_hint)
+        win.addWidget(after_hint)
         self.win_list = QTableWidget()
         self.win_list.setColumnCount(3)
         self.win_list.setHorizontalHeaderLabels(
@@ -6307,7 +6399,8 @@ class AdvancedDialog(QDialog):
                     "within one block and starts over at the next block.")
                 self.win_list.setItem(r, 2, lp)
             self.win_list.resizeColumnToContents(0)
-        root.addWidget(self.win_list, 1)
+        win.addWidget(self.win_list, 1)
+        root.addWidget(g_win, 1)
 
         # The command and loops columns matter in all-windows mode too, so
         # the table stays editable; only the tick column is scope, and it
@@ -6319,6 +6412,10 @@ class AdvancedDialog(QDialog):
             | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
+        if scope == "claude":
+            self.gen_reset_btn = QPushButton("Reset Claude CLI settings…")
+            self.gen_reset_btn.clicked.connect(self._request_reset)
+            btns.addButton(self.gen_reset_btn, QDialogButtonBox.ButtonRole.ResetRole)
         outer.addWidget(btns)
 
     def _build_api_tab(self, tab) -> None:
@@ -6395,6 +6492,66 @@ class AdvancedDialog(QDialog):
             Qt.TextInteractionFlag.TextSelectableByMouse)
         root.addWidget(path)
         root.addStretch(1)
+
+    def _build_general_tab(self, tab, general: dict) -> None:
+        self._general_dry_run = bool(general.get("dry_run", False))
+        root = QVBoxLayout(tab)
+        intro = QLabel(
+            "Set once and forget: how Auto-Continue starts, and whether it "
+            "keeps the machine awake. See <b>Help</b>.")
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        start_box = QGroupBox("Start-up")
+        sb = QVBoxLayout(start_box)
+        self.gen_autostart_chk = QCheckBox("Start watching when the app opens")
+        self.gen_autostart_chk.setChecked(bool(general.get("autostart", True)))
+        self.gen_autostart_chk.setToolTip(
+            "Begin watching automatically when the app opens — including "
+            "the automatic relaunch after a self-update. Without this, "
+            "protection lapses until you click Start.")
+        sb.addWidget(self.gen_autostart_chk)
+        self.gen_boot_chk = QCheckBox("Start with Windows")
+        self.gen_boot_chk.setChecked(bool(general.get("boot", False)))
+        self.gen_boot_chk.setToolTip(
+            "Launch Auto-Continue when you sign in to Windows. With the box "
+            "above also ticked, protection runs from boot with nothing to "
+            "click. A per-user registry Run entry, no admin needed.")
+        sb.addWidget(self.gen_boot_chk)
+        root.addWidget(start_box)
+
+        run_box = QGroupBox("While it runs")
+        rb = QVBoxLayout(run_box)
+        self.gen_keep_awake_chk = QCheckBox("Keep the computer awake")
+        self.gen_keep_awake_chk.setChecked(
+            bool(general.get("keep_awake", True)))
+        self.gen_keep_awake_chk.setToolTip(
+            "Stops sleep / Modern Standby while this runs — needed if a "
+            "limit is to be picked up hours after you walked away.")
+        rb.addWidget(self.gen_keep_awake_chk)
+        root.addWidget(run_box)
+
+        root.addStretch(1)
+        # Destructive, so kept apart at the bottom and worded as what it does.
+        reset_row = QHBoxLayout()
+        reset_row.addStretch(1)
+        self.gen_reset_btn = QPushButton("Reset Claude CLI settings…")
+        self.gen_reset_btn.setToolTip(
+            "Timings, overrides, exclusions, trigger patterns, answering and "
+            "model recovery — all back to default. Asks first.")
+        self.gen_reset_btn.clicked.connect(self._request_reset)
+        reset_row.addWidget(self.gen_reset_btn)
+        root.addLayout(reset_row)
+
+    def _request_reset(self) -> None:
+        self.reset_requested = True
+        self.reject()
+
+    def result_general(self) -> dict:
+        return {"autostart": self.gen_autostart_chk.isChecked(),
+                "boot": self.gen_boot_chk.isChecked(),
+                "keep_awake": self.gen_keep_awake_chk.isChecked(),
+                "dry_run": self._general_dry_run}
 
     def _build_answer_tab(self, tab, auto: dict) -> None:
         root = QVBoxLayout(tab)

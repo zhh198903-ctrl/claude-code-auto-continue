@@ -104,6 +104,10 @@ class View:
     model_button: object = None
     user_turn: str = ''
     user_text: str = ''
+    thread_hint: str = ''
+    permission_button: object = None
+    permission_mode: str = ''
+    approval_button: object = None
 
 @dataclass
 class Submission:
@@ -111,6 +115,7 @@ class Submission:
     prompt: str
     user_turn: str
     invoked_at: float | None = None
+    thread_hint: str = ''
 
 @dataclass
 class SendOutcome:
@@ -176,6 +181,51 @@ def _native_error(nodes):
             return c.Name
     return 'native_attention: ' + ' '.join(candidates) if candidates else ''
 
+def _permission_card(nodes):
+    """The captured native permission card replaces the composer entirely."""
+    if any(not c.IsOffscreen and c.ControlTypeName in {'MenuControl', 'WindowControl', 'EditControl'} for c in nodes):
+        return None
+    approvals = []
+    for button in nodes:
+        if button.ControlTypeName != 'ButtonControl' or button.Name != '允许一次' or button.IsOffscreen or not button.IsEnabled:
+            continue
+        actions = button.GetParentControl()
+        if '@max-md/approval-card:flex-col' not in getattr(actions, 'ClassName', '').split():
+            continue
+        names = {c.Name for c in actions.GetChildren() if c.ControlTypeName == 'ButtonControl' and not c.IsOffscreen}
+        card = actions.GetParentControl()
+        if names == {'拒绝', '允许一次', '审批选项'} and any(c.ControlTypeName == 'TextControl' and c.Name == '权限'
+                                                     for c in walk(card)):
+            approvals.append(button)
+    return approvals[0] if len(approvals) == 1 else None
+
+
+def _native_user_text(nodes, index):
+    for control in nodes[index + 1:]:
+        if control.ControlTypeName == 'ButtonControl' and control.Name in {
+                '复制消息', '编辑消息', 'Copy message', 'Edit message'}:
+            break
+        if 'bg-user-message' in getattr(control, 'ClassName', '').split():
+            return '\n'.join(c.Name for c in walk(control) if c.ControlTypeName == 'TextControl'
+                             and not any(child.ControlTypeName == 'TextControl' for child in c.GetChildren())).strip()
+    return None
+
+
+def _conversation_hint(nodes, users):
+    if not users:
+        return ''
+    actions = [c for c in nodes if c.ControlTypeName == 'ButtonControl' and not c.IsOffscreen
+               and c.Name == '聊天操作']
+    if len(actions) == 1:
+        # Native captures prove this control survives message virtualization
+        # and approval cards, and is replaced on sidebar conversation changes.
+        # The outer chat panel itself is reused between different chats.
+        key = (actions[0].AutomationId, tuple(actions[0].GetRuntimeId()))
+    else:
+        key = tuple(nodes[users[0]].GetRuntimeId())
+    return hashlib.sha256(repr(key).encode()).hexdigest()
+
+
 def read_text(window):
     """Read actual UIA controls, keeping conversation prose out of identity."""
     try:
@@ -183,12 +233,25 @@ def read_text(window):
         if not document.Exists(0, 0):
             return None
         nodes = list(walk(document))
+        modes = [match.group(1).strip().casefold() for c in nodes
+                 if c.ControlTypeName == 'ButtonControl' and not c.IsOffscreen
+                 and (match := re.search(r'(?:当前模式[：:]|current mode:\s*)\s*([^,，]+)', c.Name or '', re.I))]
+        mode = bool(modes) and all(value == 'codex' for value in modes)
+        users = [i for i, c in enumerate(nodes) if c.ControlTypeName == 'TextControl' and
+                 c.Name in {'你说：', 'You said:', 'You said：'}]
+        thread_hint = _conversation_hint(nodes, users)
         edits = [c for c in nodes if c.ControlTypeName == 'EditControl' and c.IsEnabled and not c.IsOffscreen]
         # Codex's composer is the last editable control in the document;
         # modal input/search fields must not be mistaken for it.
         composers = [c for c in edits if c.Name in _EMPTY - {''}]
         if len(composers) != 1:
-            return View('', document.Name or 'Codex App', Screen(identified=True, blocked=True))
+            approval = _permission_card(nodes) if mode and thread_hint else None
+            if approval is not None:
+                identity = hashlib.sha256(repr((document.Name, thread_hint)).encode()).hexdigest()
+                return View(identity, document.Name or 'Codex App',
+                            Screen(identified=True, blocked=True, permission=True),
+                            thread_hint=thread_hint, approval_button=approval)
+            return View('', document.Name or 'Codex App', Screen(identified=mode, blocked=True))
         composer = composers[0]
         scope = composer.GetParentControl()
         for _ in range(2):
@@ -197,7 +260,9 @@ def read_text(window):
         buttons = [c for c in controls if c.ControlTypeName == 'ButtonControl' and not c.IsOffscreen]
         # Native chat action/composer runtime IDs change when the active
         # conversation changes. Pending recovery never crosses that boundary.
-        identity = hashlib.sha256(repr((document.Name, tuple(composer.GetRuntimeId()))).encode()).hexdigest()
+        # Permission cards temporarily unmount the composer. The native chat
+        # actions control keeps this conversation distinct during that change.
+        identity = hashlib.sha256(repr((document.Name, thread_hint or tuple(composer.GetRuntimeId()))).encode()).hexdigest()
         value_pattern = composer.GetValuePattern()
         value = value_pattern.Value if value_pattern else ''
         if not value_pattern:
@@ -209,8 +274,13 @@ def read_text(window):
         draft = (value or '').strip() not in _EMPTY
         busy = any(c.Name in _STOP for c in buttons)
         send = next((c for c in buttons if c.Name in {'发送', '发送消息', 'Send', 'Send message', 'Submit'}), None)
-        model = next((c for c in buttons if re.match(r'(?:GPT|gpt|o\d|Codex|自定义|Custom|[5-9](?:\.\d+)?\s+(?:Sol|Astra|Luna|Terra))\b', c.Name or '')
+        model = next((c for c in buttons if re.match(r'(?:GPT|gpt|o\d|Codex|自定义|Custom|5\.5|[5-9](?:\.\d+)?\s+(?:Sol|Astra|Luna|Terra))\b', c.Name or '')
                       or (c.Name or '').startswith('自定义 ')), None)
+        permission_button = next((c for c in buttons if c.Name == '更改权限'), None)
+        permission_labels = {'请求批准': 'ask-for-approval', '帮我批准': 'approve-for-me', '完全访问': 'full-access'}
+        current_permissions = {permission_labels[c.Name] for c in controls
+                               if c.ControlTypeName == 'TextControl' and not c.IsOffscreen and c.Name in permission_labels}
+        permission_mode = next(iter(current_permissions)) if len(current_permissions) == 1 else ''
         # Only native controls trigger error recovery. Assistant text quoting
         # an error, sidebar usage meters, and previous turns do not.
         users = [i for i, c in enumerate(nodes) if c.ControlTypeName == 'TextControl' and
@@ -241,8 +311,9 @@ def read_text(window):
                 kind = 'network'
         blocked = any(not c.IsOffscreen and (c.ControlTypeName in {'MenuControl', 'WindowControl'} or
                       c.Name in {'确认', 'Permission request', '需要批准', 'Approval required'}) for c in nodes)
-        mode = any(c.ControlTypeName == 'ButtonControl' and re.search(
-            r'(?:当前模式：|current mode:\s*)Codex\b', c.Name or '', re.I) for c in nodes)
+        # The shared desktop shell can also show ChatGPT / Work. Only its
+        # visible mode control can identify a Codex session; hidden controls
+        # left over from another view must not enable watching or sending.
         title = document.Name or 'Codex App'
         window.Name = title
         current_label = model.Name if model else ''
@@ -280,7 +351,9 @@ def read_text(window):
             if body is not None:
                 user_text = '\n'.join(body).strip()
                 user_turn = hashlib.sha256(repr((tuple(header.GetRuntimeId()), user_text)).encode()).hexdigest()
-        return View(identity, title, screen, composer, send, model, user_turn, user_text)
+        # Keep the same conversation hint when React redraws message nodes.
+        return View(identity, title, screen, composer, send, model, user_turn, user_text, thread_hint,
+                    permission_button, permission_mode)
     except Exception:
         return None
 
@@ -297,8 +370,14 @@ def _ready(window):
     view = read_text(window)
     if view is None or not view.identity or (window.expected_identity and view.identity != window.expected_identity):
         return None
+    if not _hint_matches(window, view):
+        return None
     screen = view.screen
     return view if screen.ready and not (screen.running or screen.draft or screen.blocked) else None
+
+def _hint_matches(window, view):
+    expected = getattr(window, 'expected_thread_hint', '')
+    return not expected or (view is not None and view.thread_hint == expected)
 
 def send_prompt(window, prompt, dry_run=False):
     if not prompt.strip() or '\n' in prompt or '\r' in prompt:
@@ -325,7 +404,7 @@ def send_prompt(window, prompt, dry_run=False):
         pattern = current.composer.GetValuePattern()
         if not pattern:
             return SendOutcome('held')
-        submission = Submission(identity, prompt, current.user_turn)
+        submission = Submission(identity, prompt, current.user_turn, thread_hint=current.thread_hint)
         pattern.SetValue(prompt)
         time.sleep(.2)
         return poll_submission(window, submission)
@@ -342,6 +421,7 @@ def _draft(view):
 def _submitted(view, submission):
     value = _draft(view) if view is not None else None
     return (view is not None and view.identity == submission.identity and
+            (not submission.thread_hint or view.thread_hint == submission.thread_hint) and
             bool(view.user_turn) and view.user_turn != submission.user_turn and
             view.user_text.strip() == submission.prompt.strip() and
             value is not None and value.strip() in _EMPTY)
@@ -375,7 +455,9 @@ def poll_submission(window, submission, retry_seconds=30, allow_click=True):
         view = read_text(window)
         if view is None or not view.identity:
             return SendOutcome('waiting_send', submission)
-        if view.identity != submission.identity or (window.expected_identity and view.identity != window.expected_identity):
+        if (view.identity != submission.identity or not _hint_matches(window, view) or
+                (submission.thread_hint and view.thread_hint != submission.thread_hint) or
+                (window.expected_identity and view.identity != window.expected_identity)):
             return SendOutcome('held')
         if _submitted(view, submission):
             return SendOutcome('sent')
@@ -401,7 +483,8 @@ def poll_submission(window, submission, retry_seconds=30, allow_click=True):
             return SendOutcome('waiting_send', submission)
         if _submitted(view, submission):
             return SendOutcome('sent')
-        if view.identity != submission.identity:
+        if (view.identity != submission.identity or not _hint_matches(window, view) or
+                (submission.thread_hint and view.thread_hint != submission.thread_hint)):
             return SendOutcome('held')
         value = _draft(view)
         if value is None:
@@ -448,6 +531,144 @@ def _act(control):
     time.sleep(.15)
     return True
 
+_PERMISSION_CHOICES = {
+    'ask-for-approval': '请求批准 编辑外部文件和使用互联网时始终询问',
+    'approve-for-me': '帮我批准 仅对检测到的风险操作请求批准',
+    'full-access': '完全访问权限 可不受限制地访问互联网和你电脑上的任何文件',
+}
+
+
+def _permission_selected(menu, mode):
+    selected = []
+    for item in walk(menu):
+        if item.ControlTypeName != 'MenuItemControl' or item.IsOffscreen:
+            continue
+        # Captured checked rows have a trailing checkmark in addition to
+        # their leading icon-sm permission icon. Full access colors it.
+        images = [c for c in walk(item) if c.ControlTypeName == 'ImageControl' and not c.IsOffscreen]
+        if (len(images) == 2 and 'icon-sm' in getattr(images[0], 'ClassName', '').split()
+                and 'icon-sm' not in getattr(images[1], 'ClassName', '').split()):
+            selected.append(item.Name)
+    return selected == [_PERMISSION_CHOICES[mode]]
+
+
+def approve_permission(window):
+    """Invoke only the captured native once-only approval in this Codex chat."""
+    view = read_text(window)
+    if (view is None or not view.screen.permission or view.approval_button is None or
+            (window.expected_identity and view.identity != window.expected_identity) or
+            not _hint_matches(window, view)):
+        return False
+    identity = view.identity
+    request = tuple(view.approval_button.GetRuntimeId())
+    user = ctypes.windll.user32
+    user.GetForegroundWindow.restype = wintypes.HWND
+    previous = user.GetForegroundWindow()
+    try:
+        window.control.SetActive()
+        current = read_text(window)
+        if (current is None or current.identity != identity or not _hint_matches(window, current) or
+                not current.screen.permission or current.approval_button is None or
+                tuple(current.approval_button.GetRuntimeId()) != request or user.GetForegroundWindow() != window.hwnd):
+            return False
+        if not _act(current.approval_button):
+            return False
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            current = read_text(window)
+            if current is not None and current.identity == identity and not current.screen.permission:
+                return True
+            time.sleep(.1)
+        return False
+    except Exception:
+        return False
+    finally:
+        if previous and previous != window.hwnd and user.GetForegroundWindow() == window.hwnd:
+            user.SetForegroundWindow(wintypes.HWND(previous))
+
+
+def apply_session_permissions(window, mode):
+    """Change only the verified native permission picker of this conversation."""
+    view = _ready(window)
+    if mode not in _PERMISSION_CHOICES or view is None or view.permission_button is None:
+        return False
+    if view.permission_mode == mode:
+        return True
+    identity = view.identity
+    user = ctypes.windll.user32
+    user.GetForegroundWindow.restype = wintypes.HWND
+    previous = user.GetForegroundWindow()
+    menu_id = ''
+    try:
+        window.control.SetActive()
+        if user.GetForegroundWindow() != window.hwnd or not _act(view.permission_button):
+            return False
+        current = read_text(window)
+        if current is None or current.identity != identity or not _hint_matches(window, current):
+            return False
+        document = window.control.DocumentControl(searchDepth=18, AutomationId='RootWebArea')
+        menus = [c for c in walk(document) if c.ControlTypeName == 'MenuControl' and not c.IsOffscreen]
+        if len(menus) != 1 or menus[0].Name != '更改权限':
+            return False
+        menu_id = menus[0].AutomationId
+        if _permission_selected(menus[0], mode):
+            auto.SendKeys('{Esc}')
+            time.sleep(.15)
+            current = _ready(window)
+            return bool(current and current.identity == identity)
+        choice = next((c for c in walk(menus[0]) if c.ControlTypeName == 'MenuItemControl'
+                       and c.Name == _PERMISSION_CHOICES[mode]), None)
+        if choice is None or user.GetForegroundWindow() != window.hwnd or not _act(choice):
+            return False
+        if mode == 'full-access':
+            # This modal hides the composer. Confirm only after our own exact
+            # full-access menu action; generic approval never handles it.
+            deadline = time.monotonic() + 3
+            dialogs = []
+            while time.monotonic() < deadline:
+                dialogs = [c for c in walk(document) if c.ControlTypeName == 'WindowControl' and not c.IsOffscreen]
+                if dialogs:
+                    break
+                time.sleep(.1)
+            if len(dialogs) != 1 or dialogs[0].Name != '要开启完整访问权限吗？':
+                return False
+            confirm = [c for c in walk(dialogs[0]) if c.ControlTypeName == 'ButtonControl' and c.Name == '确认']
+            if len(confirm) != 1 or user.GetForegroundWindow() != window.hwnd or not _act(confirm[0]):
+                return False
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            current = _ready(window)
+            if current is not None and current.identity == identity:
+                if current.permission_mode == mode:
+                    return True
+                # Compact native layouts omit the current permission label.
+                # Reopen our picker to verify its captured checked marker.
+                if not current.permission_button or user.GetForegroundWindow() != window.hwnd or not _act(current.permission_button):
+                    return False
+                menus = [c for c in walk(document) if c.ControlTypeName == 'MenuControl' and not c.IsOffscreen]
+                if len(menus) != 1 or menus[0].Name != '更改权限':
+                    return False
+                menu_id = menus[0].AutomationId
+                checked = _permission_selected(menus[0], mode)
+                auto.SendKeys('{Esc}')
+                time.sleep(.15)
+                return checked
+            time.sleep(.1)
+        return False
+    except Exception:
+        return False
+    finally:
+        current = read_text(window)
+        if (menu_id and current is not None and current.identity == identity and
+                _hint_matches(window, current) and user.GetForegroundWindow() == window.hwnd):
+            document = window.control.DocumentControl(searchDepth=18, AutomationId='RootWebArea')
+            if any(c.ControlTypeName == 'MenuControl' and c.AutomationId == menu_id and not c.IsOffscreen
+                   for c in walk(document)):
+                auto.SendKeys('{Esc}')
+        if previous and previous != window.hwnd and user.GetForegroundWindow() == window.hwnd:
+            user.SetForegroundWindow(wintypes.HWND(previous))
+
+
 def apply_session_options(window, model, effort):
     view = _ready(window)
     if view is None:
@@ -471,7 +692,7 @@ def apply_session_options(window, model, effort):
 
     def menu_nodes():
         current = read_text(window)
-        if current is None or current.identity != identity or user.GetForegroundWindow() != window.hwnd:
+        if current is None or current.identity != identity or not _hint_matches(window, current) or user.GetForegroundWindow() != window.hwnd:
             return []
         document = window.control.DocumentControl(searchDepth=18, AutomationId='RootWebArea')
         menus = [c for c in walk(document) if c.ControlTypeName == 'MenuControl' and not c.IsOffscreen]
@@ -486,7 +707,7 @@ def apply_session_options(window, model, effort):
 
     def close_menu():
         current = read_text(window)
-        if current is None or current.identity != identity or user.GetForegroundWindow() != window.hwnd:
+        if current is None or current.identity != identity or not _hint_matches(window, current) or user.GetForegroundWindow() != window.hwnd:
             return
         document = window.control.DocumentControl(searchDepth=18, AutomationId='RootWebArea')
         if any(c.ControlTypeName == 'MenuControl' and c.AutomationId in owned_menus

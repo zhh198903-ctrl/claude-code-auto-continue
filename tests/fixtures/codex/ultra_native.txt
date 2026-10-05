@@ -1,0 +1,59 @@
+│ ✨ Update available! 0.159.3 -> 0.160.0         │
+
+│ Run npm install -g @openai/codex to update.     │
+
+│                                                 │
+
+│ See full release notes:                         │
+
+│ https://github.com/openai/codex/releases/latest │
+
+╰─────────────────────────────────────────────────╯
+
+
+
+
+
+  >_ OpenAI Codex (v0.159.3)
+
+     D:\native-test\project
+
+
+
+  Shall we turn “what if” into something?
+
+
+
+
+
+› Reply only CODEX_PROBE_READY. Use no tools.
+
+
+
+
+
+• CODEX_RETRY_RECOVERED
+
+
+
+  Worked for <1s • 20:39
+
+
+
+• Model changed to gpt-6.1-sol medium for this session only
+
+
+
+• Model changed to gpt-6.1-sol ultra for this session only
+
+
+
+
+
+» Ask Codex to do anything
+
+
+
+  GPT-6.1-Sol ultra · D:\native-test\project
+
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view

@@ -26,9 +26,11 @@ _WARNINGS = re.compile(r"^\s*⚠\s+\d+\s+warnings?\s*[·•]\s*f2\s+to\s+view\s*
 _BUSY = re.compile(r"^[•◦●○✦✧]\s+.+\(.*\besc to interrupt\)", re.I)
 _TIME = re.compile(r"try again at\s+(?:([A-Za-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})\s+)?"
                    r"(\d{1,2}):(\d{2})\s*([AP]M)?(?:\s+on\s+([^.!\n]+))?", re.I)
-_MENU = re.compile(r"\b(?:enter|esc|s)\s+(?:select|confirm|back|cancel|default|session)\b", re.I)
+_MENU = re.compile(r"\b(?:enter|esc|s)\s+(?:to\s+)?(?:select|confirm|back|cancel|default|session)\b", re.I)
 _ERROR = re.compile(r"^\s*■\s+(.+)", re.M)
-_USER = re.compile(r"^\s*›\s+", re.M)
+# Native CLI 0.159.3 uses » for the empty Ultra composer (captured in
+# Windows Terminal); submitted turns and other levels use ›.
+_USER = re.compile(r"^\s*[›»]\s+", re.M)
 _EMPTY = {"Ask Codex to do anything", "", "Use /skills to list available skills"}
 
 
@@ -49,6 +51,7 @@ class Screen:
     error_id: str = ""
     reset_utc: datetime | None = None
     completion_id: str = ""
+    permission: bool = False
 
 
 def _reset_time(message: str, now: datetime) -> datetime | None:
@@ -106,15 +109,21 @@ def inspect_screen(text: str, now: datetime | None = None) -> Screen:
     footer = _FOOTER.match(footer_line)
     menu = bool(_MENU.search(lines[-1]))
     header = bool(re.search(r"^\s*>_ OpenAI Codex\s*\(v[\d.]+", text, re.M))
-    picker = any(re.match(r"\s*(Select Model and Effort|Select Reasoning Level for|Advanced Reasoning)\b", line)
-                 for line in lines[-20:])
+    picker = any(re.match(r"\s*(Select Model and Effort|Select Reasoning Level for|Advanced Reasoning|Update Model Permissions)\b", line)
+                 or re.fullmatch(r"\s*Enable full access\?\s*", line) for line in lines[-20:])
+    # A native command approval replaces both the composer and the startup
+    # header in a long transcript. Identify its own heading, selected option
+    # and confirmation footer, not arbitrary assistant text mentioning it.
+    permission = bool(menu and re.fullmatch(r"\s*Press enter to confirm or esc to cancel\s*", lines[-1], re.I)
+        and any(re.fullmatch(r"\s*Would you like to run the following command\?\s*", line) for line in lines[-20:])
+        and any(re.match(r"\s*[›»]\s+\d+\.\s+", line) for line in lines[-8:]))
     prompts = list(_USER.finditer(text))
     old_footer = bool(_OLD_FOOTER.search(lines[-1]))
-    identified = bool((footer or old_footer) and prompts) or bool((header or picker) and menu)
+    identified = bool((footer or old_footer) and prompts) or bool((header or picker) and menu) or permission
     if not identified:
         return Screen()
     running = any(_BUSY.match(line.strip()) for line in bottom)
-    blocked = menu or any("Would you like to run" in line for line in bottom)
+    blocked = menu or permission
     ready = bool(prompts and (footer or old_footer) and not blocked)
     draft = False
     if ready:
@@ -156,7 +165,7 @@ def inspect_screen(text: str, now: datetime | None = None) -> Screen:
     completion = hashlib.sha256(" ".join(text[:completions[-1].end()].split()).encode()).hexdigest() if completions else ""
     return Screen(identified, ready, running, draft, blocked,
                   footer.group("model") if footer else "",
-                  footer.group("effort") if footer else "", kind, event, reset, completion)
+                  footer.group("effort") if footer else "", kind, event, reset, completion, permission)
 
 
 def terminal_handles() -> list[int]:
@@ -274,12 +283,18 @@ def send_menu_keys(window, keys, expected_heading, expected_rows=None) -> bool:
     previous = u32.GetForegroundWindow()
     target = int(window.NativeWindowHandle or 0)
     try:
-        window.SetActive()
         term = term_control(window)
         if term is None:
             return False
-        term.SetFocus()
-        time.sleep(.25)
+        # Windows Terminal can reject the first focus transfer when the
+        # previous picker step restored another window. Use the same bounded
+        # acquisition as prompt submission, then recheck this exact picker.
+        for _ in range(2):
+            window.SetActive()
+            term.SetFocus()
+            time.sleep(.25)
+            if u32.GetForegroundWindow() == target:
+                break
         text = normalized(read_text(window) or "")
         if u32.GetForegroundWindow() != target or expected_heading not in text or not _MENU.search("\n".join(text.splitlines()[-4:])):
             return False
@@ -370,4 +385,73 @@ def apply_session_options(window, model="", effort="") -> bool:
         if current.ready and current.model.casefold() == wanted_model.casefold() and current.effort == wanted_effort:
             return True
         time.sleep(.15)
+    return False
+
+
+PERMISSION_NAMES = {"full-access": "Full Access", "approve-for-me": "Approve for me",
+                    "ask-for-approval": "Ask for approval"}
+
+
+def _permission_current(rows, name):
+    pattern = r"^" + re.escape(name) + r"(?: \(non-admin sandbox\))? \(current\)"
+    return any(re.match(pattern, label) for _, label, _ in rows)
+
+
+def apply_session_permissions(window, mode):
+    """Use the captured CLI 0.160 permission picker; verify its current row."""
+    if mode not in PERMISSION_NAMES or not send_prompt(window, "/permissions"):
+        return False
+    heading = "Update Model Permissions"
+    text, found = _wait_picker(window, [heading])
+    if not found:
+        return False
+    name = PERMISSION_NAMES[mode]
+    rows = picker_rows(text, heading)
+    if _permission_current(rows, name):
+        return send_menu_keys(window, "{Esc}", heading, rows)
+    if not _select_picker(window, text, heading, name):
+        send_menu_keys(window, "{Esc}", heading, rows)
+        return False
+    if mode == "full-access":
+        text, found = _wait_picker(window, ["Enable full access?"])
+        if not found or not _select_picker(window, text, found, "Yes, continue anyway"):
+            return False
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        current = inspect_screen(read_text(window) or "")
+        if current.ready and not (current.blocked or current.draft or current.running):
+            break
+        time.sleep(.1)
+    else:
+        return False
+    if not send_prompt(window, "/permissions"):
+        return False
+    text, found = _wait_picker(window, [heading])
+    if not found:
+        return False
+    rows = picker_rows(text, heading)
+    applied = _permission_current(rows, name)
+    closed = send_menu_keys(window, "{Esc}", heading, rows)
+    return applied and closed
+
+
+def approve_permission(window):
+    """Approve this exact native command request, never an unrelated chooser."""
+    text = normalized(read_text(window) or "")
+    if not inspect_screen(text).permission:
+        return False
+    heading = "Would you like to run the following command?"
+    rows = picker_rows(text, heading)
+    selected = next((label for _, label, active in rows if active), "")
+    # A user already moving through this prompt takes priority over the
+    # automatic default. The once-only approval must remain the active row.
+    if not selected.startswith("Yes, proceed (y)"):
+        return False
+    if not send_menu_keys(window, "y", heading, rows):
+        return False
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if not inspect_screen(read_text(window) or "").permission:
+            return True
+        time.sleep(.1)
     return False

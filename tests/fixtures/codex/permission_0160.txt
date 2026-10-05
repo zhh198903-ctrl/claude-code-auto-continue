@@ -1,0 +1,59 @@
+
+
+
+
+› continue
+
+
+
+
+
+• NATIVE_OK_23
+
+
+
+  Worked for <1s • 20:58
+
+
+
+
+
+› NATIVE_PERMISSION_DIALOG
+
+
+
+
+
+• Running Write-Output 'NATIVE_PERMISSION_PROBE'
+
+
+
+
+
+  Would you like to run the following command?
+
+
+
+  Environment: local
+
+
+
+  Reason: Isolated Auto-Continue test: do not approve; verify watchdog holds.
+
+
+
+  $ Write-Output 'NATIVE_PERMISSION_PROBE'
+
+
+
+
+
+› 1. Yes, proceed (y)
+
+  2. Yes, and don't ask again for commands that start with `Write-Output NATIVE_PERMISSION_PROBE` (p)
+
+  3. No, and tell Codex what to do differently (esc)
+
+
+
+  Press enter to confirm or esc to cancel

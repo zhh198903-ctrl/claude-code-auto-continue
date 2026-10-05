@@ -1,6 +1,6 @@
 # claude-code-auto-continue
 
-A Windows GUI watchdog for [Claude Code](https://github.com/anthropics/claude-code), Codex CLI in Windows Terminal, and the Codex desktop App. Choose Claude only, Codex only, or both; select CLI, Desktop App, or both for Codex. Each driver has independent detection, state, retries and configuration.
+A Windows GUI watchdog for [Claude Code](https://github.com/anthropics/claude-code), Codex CLI in Windows Terminal, and the Codex desktop App. Select any combination of Codex EXE, Codex CLI and Claude CLI; switch their settings with three equal tabs. Each driver has independent detection, state, retries and configuration.
 
 It resumes recoverable failures and can send a configured follow-up after a completed turn. Claude retains its existing behavior. Codex model and reasoning settings use the actual session's native controls.
 
@@ -12,19 +12,20 @@ It resumes recoverable failures and can send a configured follow-up after a comp
 
 Prefer source? See [Install](#install) below.
 
-## Codex CLI and desktop App (v2.3.2)
+## Codex CLI and desktop App (v3.0.0)
 
-- In **Watch**, select **Codex only** or **Claude + Codex**. Then set **Codex targets** to **CLI**, **Desktop App**, or **CLI + Desktop App**. The default remains Claude-only, with CLI as the default Codex target.
-- CLI and App each have their own **Poll**, **Buffer**, **Retry**, **Dry-run**, advanced retry limit, exclusions, model/effort overrides and after-finish prompts. Codex settings do not change Claude settings.
-- Per-window **Model**, **Effort**, **Now**, **Skip**, **Exclude** and **After finish…** controls use that row's driver. Model/effort settings apply to the current session through native menus. An unavailable value holds the send and logs a warning.
-- Native desktop quota errors after commentary/tool output are recognised. While the App retries internally, the row shows **Usage limit · App retrying** and automatic input remains held until the App is ready. Historical errors and message quotations do not schedule retries.
-- The desktop App retains its own staged follow-up while native **Send** is unavailable, then submits it when Send becomes usable. **Waiting for Send** and **Confirming submission** distinguish the two phases. Retry and after-finish counts are spent only after a new submitted user message appears. Editing the draft, switching conversations, Skip or Exclude cancels the pending send.
-- CLI usage limits resume at the parsed reset time. The desktop App may show a usage-limit message without a reset time; actual submissions retry at the configured **Retry** interval, up to **Maximum retries**. Waiting for a disabled Send button does not consume that limit. Recoverable network failures also use this bounded retry policy. Authentication, billing and unrecognised native errors require attention.
-- **After finish…** sends the configured prompt after a completed turn. Its remaining loop count is persisted immediately; a count of zero prevents further automatic follow-ups.
-- Draft input, active turns, permission dialogs, open menus, unreadable UI and a changed conversation hold automatic input. Codex approval dialogs require manual input.
-- Each CLI session needs a separate Windows Terminal window; only the active tab/pane is watched. For the desktop App, only the visible Codex conversation in each App window is watched. Hidden conversations and ChatGPT mode are not watched. The local companion API retains its existing Claude-only scope.
-- Verified against actual Codex CLI **0.159.3** and Codex desktop App **26.930.2377.0**. Failure injection used a loopback provider with the actual native renderer, including quota recovery, bounded network retries, one follow-up, native model/effort controls, drafts and menus.
-- Terminal routing requires positive provider identification. Unknown terminals are held, and switching a tab from Claude to Codex clears the retained Claude row. The App is identified from its installed executable, including builds whose native process is named `ChatGPT.exe`.
+> This section describes the 3.0.0 source update. On 2026-10-05 the public download remains v2.3.2; check the release version or build this source for the new interface.
+
+- Three equal tabs, **Codex EXE**, **Codex CLI** and **Claude CLI**, switch the settings and shared table. Enable any combination independently; disabled types show no settings. The activity log stays at the bottom. Global startup/keep-awake options live in **App settings**. Dry-run remains a saved diagnostic setting and is hidden from the GUI.
+- CLI and EXE share form construction for **Poll**, **Buffer**, **Retry**, exclusions, model/effort settings and **After finish**; their detection, state, retry limits and configuration remain independent. Claude recovery scripts, trigger expressions and slash commands are not applied to Codex.
+- Codex EXE lists the **five most recent Codex activities** by default; **Recent** accepts 1–100. It excludes CLI, subagent, archived, ChatGPT and ChatGPT Work conversations. Every activity has independent model, effort, exclusion and after-finish settings, keyed by thread identity rather than title, so duplicate titles stay independent.
+- Hidden activities can be listed and configured. Automatic input requires a verified match with a visible native Codex conversation; background conversations are never switched or typed into. CLI watches the active tab/pane of each Windows Terminal window.
+- Per-session **Model**, **Effort**, **Now**, **Skip**, **Exclude** and **After finish** use the corresponding driver. Model/effort are applied through the native session controls; an unavailable value holds the send. Open model menus and unfinished edits survive polling.
+- Each Codex **Advanced** dialog offers **Full access** (default), **Approve for me** or **Ask for approval**, plus **Automatically approve tool permissions** (default on). Turning automatic approval off holds a pending permission card. Approval does not answer ordinary choosers, model dialogs or login prompts. CLI and EXE settings are separate.
+- Native quota messages after commentary/tool output are recognised. During native internal retries, automatic input is held. Historical errors and quoted error text do not schedule retries. CLI waits for its parsed reset deadline plus Buffer; App quota messages without a deadline use bounded Retry attempts instead.
+- The App retains its own staged follow-up while native Send is unavailable and confirms a submitted user message before consuming retry or after-finish budgets. Editing the draft, changing conversations, Skip or Exclude cancels the pending send.
+- After-finish budgets are saved after a confirmed submission; zero prevents further follow-ups. Drafts, active turns, unreadable UI and unknown terminal identity hold input. Authentication, billing and unrecognised native errors require attention. The companion API retains its Claude-only scope.
+- Native verification used Codex CLI **0.160.0** and Codex App **26.930.3930.0** with its **0.160.0** runtime, isolated test homes and loopback fault injection: 13 CLI scenarios, seven App scenarios and three permission modes per driver. The source regression suite contains **122 checks**. See [verification details](docs/validation/codex-3.0.0.md) for methods and limits.
 
 The following sections describe the existing Claude watcher.
 
@@ -63,7 +64,7 @@ python gui.py
 
 Or double-click **`Auto-Continue.pyw`** — the `.pyw` extension launches under `pythonw.exe`, so no extra console window appears alongside the GUI.
 
-(There used to be a separate CLI runner in `auto_continue.py`. It was removed in v2.0.5: it was a second copy of the watcher loop that had to be fixed in lockstep with the GUI's — and more than once wasn't — while offering strictly fewer features. `auto_continue.py` is now the detection/keystroke library the GUI builds on. The GUI's **Dry-run** checkbox covers the old `--dry-run` use.)
+(There used to be a separate CLI runner in `auto_continue.py`. It was removed in v2.0.5: it was a second copy of the watcher loop that had to be fixed in lockstep with the GUI's — and more than once wasn't — while offering strictly fewer features. `auto_continue.py` is now the detection/keystroke library the GUI builds on. Dry-run remains a saved diagnostic setting and is hidden from the GUI.)
 
 ## GUI features
 
@@ -74,10 +75,10 @@ Or double-click **`Auto-Continue.pyw`** — the `.pyw` extension launches under 
   - **Skip** — cancel a pending continue for this row.
   - **Exclude** — never watch this window again (persisted across restarts).
   - **Clear cooldown** — reset the 15-min post-send suppression so the row can re-detect immediately (useful for testing).
-- **Reset** (v2.0.1+) — top-right, restores every setting to its shipped default: timings, per-window model/effort overrides, exclusions, trigger patterns, and model recovery (back to off). Asks first and names what it clears; dry-run, keep-awake and the start-up options are left alone.
+- **Reset Claude CLI settings** — in its More settings dialog, restores Claude settings to its shipped default: timings, per-window model/effort overrides, exclusions, trigger patterns, and model recovery (back to off). Asks first and names what it clears; dry-run, keep-awake and the start-up options are left alone.
 - **Model dropdown per row** — `(none)` / `default` / `opus` / `sonnet` / `haiku` / `fable`, matching Claude Code's `/model` aliases. The box is **editable**: type a family the list doesn't have yet and it is passed to `/model` verbatim, so a newly shipped model works without waiting for a new build. `(none)` leaves the session on whatever model it's already using; any other value prefixes the fire sequence with `/model <name>` + Enter so the session switches before continuing. Persisted per stable window title.
 - **Effort dropdown per row** — `(none)` / `low` / `medium` / `high` / `xhigh` / `max` / `ultracode`, matching Claude Code's own `/effort` slider. When set, the fire sequence becomes `/effort <level>` + Enter → wait 0.6 s → blank Enter (confirms the "Change effort level?" dialog) → wait 0.6 s → `continue` + Enter. (Model, if set, goes first: `/model <name>` → `/effort <level>` → `continue`.) Persisted per stable window title. (`ultracode` = xhigh + workflows; it's newer, so sessions on Claude Code older than 4.7 won't recognize it.)
-- **Dry-run** — detect, schedule, and log everything but never actually press keys. Useful for sanity-checking before going live.
+- **Diagnostic dry-run** — saved setting, hidden from the GUI; detects and logs without pressing keys.
 - **Keep awake** — calls `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)` so Windows Modern Standby doesn't kill the watcher process during a long unattended wait.
 - **Minimize to system tray** — minimize button hides the window to the right-side tray; X button fully exits. Right-click the tray icon for **Show window** / **Quit**.
 - **DPI awareness** set to per-monitor v2 before any Qt or UIA DLL loads, so high-DPI displays render correctly without a startup warning.

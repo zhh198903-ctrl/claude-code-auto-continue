@@ -36,12 +36,30 @@ class NativeScreens(unittest.TestCase):
         self.assertFalse(s.running)
         self.assertTrue(s.completion_id)
 
+    def test_native_ultra_composer_is_idle_and_keeps_draft_guard(self):
+        text = capture("ultra_native.txt")
+        screen = cli.inspect_screen(text)
+        self.assertTrue(screen.identified and screen.ready)
+        self.assertFalse(screen.draft or screen.blocked)
+        self.assertEqual(screen.effort, "ultra")
+        self.assertTrue(cli.inspect_screen(text.replace("» Ask Codex to do anything", "» UNSENT_NATIVE_DRAFT")).draft)
+
     def test_native_draft_and_all_pickers_hold(self):
         self.assertTrue(cli.inspect_screen(capture("draft.txt")).draft)
         for name in ("model_picker.txt", "effort_picker.txt", "advanced_effort.txt"):
             s = cli.inspect_screen(capture(name))
             self.assertTrue(s.identified and s.blocked, name)
             self.assertFalse(s.ready, name)
+
+    def test_native_permission_without_startup_header_stays_monitored(self):
+        text = capture("permission_0160.txt")
+        self.assertNotIn(">_ OpenAI Codex", text)
+        screen = cli.inspect_screen(text)
+        self.assertTrue(screen.identified and screen.blocked)
+        self.assertFalse(screen.ready or screen.running)
+        with patch.object(cli, "read_text", return_value=text), patch.object(cli.auto, "SendKeys") as send:
+            self.assertFalse(cli.send_prompt(object(), "continue"))
+            send.assert_not_called()
 
     def test_native_warning_footer_preserves_draft_guard(self):
         text = capture("warning_draft.txt")
@@ -122,9 +140,11 @@ class WatcherState(unittest.TestCase):
 
     def setUp(self):
         self.w = CodexWatcher()
+        self.w.now = lambda: NOW
         self.w.config["buffer"] = 20
         self.st = State(1, "probe")
         self.send = patch.object(cli, "send_prompt", return_value=True).start()
+        patch.object(cli, "apply_session_permissions", return_value=True).start()
         self.addCleanup(patch.stopall)
 
     def observe(self, name=None, **kwargs):
@@ -169,6 +189,16 @@ class WatcherState(unittest.TestCase):
         self.observe("network.txt")
         self.assertEqual(self.send.call_count, 2)
 
+    def test_retry_cooldown_starts_after_slow_permission_preparation(self):
+        self.w.config['retry'] = 5
+        self.w.now = lambda: NOW + timedelta(seconds=10)
+        self.observe('network.txt')
+        self.w._observe(self.st, object(), NOW + timedelta(seconds=12))
+        self.send.assert_called_once()
+        self.w.now = lambda: NOW + timedelta(seconds=15)
+        self.w._observe(self.st, object(), NOW + timedelta(seconds=15))
+        self.assertEqual(self.send.call_count, 2)
+
     def test_send_failure_does_not_consume_reset(self):
         self.send.return_value = False
         self.observe("quota.txt")
@@ -181,6 +211,26 @@ class WatcherState(unittest.TestCase):
         self.w.config["excluded"] = ["probe"]
         self.observe("quota.txt")
         self.send.assert_not_called()
+
+    def test_permission_switch_default_and_approval_guards(self):
+        self.assertTrue(self.w.config['auto_approve'])
+        self.assertEqual(self.w.config['permission_mode'], 'full-access')
+        with patch.object(cli, 'approve_permission', return_value=True) as approve:
+            self.w.config['auto_approve'] = False
+            self.observe('permission_0160.txt')
+            approve.assert_not_called()
+            self.w.config['auto_approve'] = True
+            self.observe('model_picker.txt')
+            self.w.config['excluded'] = ['probe']
+            self.observe('permission_0160.txt')
+            self.w.config['excluded'] = []
+            self.observe(permission=True, blocked=True, draft=True)
+            approve.assert_not_called()
+            self.observe('permission_0160.txt')
+            approve.assert_called_once()
+            self.assertEqual(self.st.status, 'approved')
+            self.assertEqual(self.st.retry_attempts, 0)
+            self.send.assert_not_called()
 
     def test_running_native_app_quota_is_displayed_and_held(self):
         self.observe(running=True, error_kind='quota_retry', error_id='actual-native-quota')

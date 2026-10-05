@@ -60,6 +60,13 @@ def native_task_quota():
     return window, native
 
 class DesktopScreens(unittest.TestCase):
+    def test_non_codex_page_without_composer_does_not_enter_monitor_list(self):
+        window = replay('onboarding_20261004')
+        view = app.read_text(window)
+        self.assertFalse(view.screen.identified)
+        self.assertTrue(view.screen.blocked)
+        self.assertIsNone(view.composer)
+
     def test_real_task_quota_after_commentary_is_detected(self):
         window, _ = native_task_quota()
         view = app.read_text(window)
@@ -99,6 +106,7 @@ class DesktopScreens(unittest.TestCase):
     def test_installed_app_identity_does_not_depend_on_chatgpt_title(self):
         self.assertTrue(app.is_desktop_executable(r'C:\Program Files\WindowsApps\OpenAI.Codex_26.930.0_x64__package\app\ChatGPT.exe'))
         self.assertFalse(app.is_desktop_executable(r'C:\Apps\ChatGPT\ChatGPT.exe'))
+        self.assertFalse(app.is_desktop_executable(r'C:\Program Files\WindowsApps\OpenAI.ChatGPT_26.930.0_x64__package\app\ChatGPT.exe'))
         self.assertFalse(app.is_desktop_executable(r'C:\Users\test\AppData\Local\OpenAI\Codex\bin\abc\codex.exe'))
         self.assertFalse(app.is_desktop_executable(r'C:\npm\node_modules\@openai\codex\vendor\bin\codex.exe'))
 
@@ -147,6 +155,32 @@ class DesktopScreens(unittest.TestCase):
         self.assertFalse(app.read_text(window).screen.identified)
         self.assertFalse(app.send_prompt(window, 'continue', dry_run=True))
 
+    def test_hidden_codex_mode_cannot_enable_chatgpt_or_work(self):
+        for mode in ('ChatGPT', 'Work', 'ChatGPT Work'):
+            with self.subTest(mode=mode):
+                window = replay('idle')
+                control = next(c for c in app.walk(window.control)
+                               if c.Name == '切换模式，当前模式：Codex')
+                control.IsOffscreen = True
+                data = dict(kind='ButtonControl', name='切换模式，当前模式：' + mode,
+                            id='', enabled=True, offscreen=False, runtime=[100, 1], value=None, children=[])
+                window.control.children.append(Node(data, window.control))
+                self.assertFalse(app.read_text(window).screen.identified)
+                self.assertFalse(app.send_prompt(window, 'continue', dry_run=True))
+        window = replay('idle')
+        for control in app.walk(window.control):
+            if control.Name == '切换模式，当前模式：Codex':
+                control.IsOffscreen = True
+        self.assertFalse(app.read_text(window).screen.identified)
+
+    def test_conflicting_visible_modes_do_not_enable_codex_sender(self):
+        window = replay('idle')
+        data = dict(kind='ButtonControl', name='Switch mode, current mode: ChatGPT',
+                    id='', enabled=True, offscreen=False, runtime=[100, 1], value=None, children=[])
+        window.control.children.append(Node(data, window.control))
+        self.assertFalse(app.read_text(window).screen.identified)
+        self.assertFalse(app.send_prompt(window, 'continue', dry_run=True))
+
     def test_assistant_quoting_quota_is_not_a_native_error(self):
         window = replay('idle')
         for c in app.walk(window.control):
@@ -172,6 +206,76 @@ class DesktopScreens(unittest.TestCase):
             if c.ControlTypeName == 'TextControl' and c.Name.startswith('unexpected status'):
                 c.Name = 'Unexpected authentication state. Sign in again.'
         self.assertEqual(app.read_text(window).screen.error_kind, 'attention')
+
+    def test_native_55_model_remains_identified_after_selection(self):
+        view = app.read_text(replay('model_55_20261004'))
+        self.assertEqual(view.screen.model, '5.5')
+        self.assertEqual(view.screen.effort, 'low')
+        self.assertIsNotNone(view.model_button)
+
+    def test_native_permission_card_replaces_composer_without_changing_chat_identity(self):
+        pending = app.read_text(replay('permission_request_20261004'))
+        approved = app.read_text(replay('permission_approved_20261004'))
+        self.assertTrue(pending.screen.identified and pending.screen.permission and pending.screen.blocked)
+        self.assertIsNone(pending.composer)
+        self.assertIsNotNone(pending.approval_button)
+        self.assertEqual(pending.identity, approved.identity)
+        self.assertEqual(pending.thread_hint, approved.thread_hint)
+        self.assertFalse(approved.screen.permission)
+        self.assertEqual(approved.permission_mode, 'ask-for-approval')
+
+    def test_permission_card_requires_native_structure_and_visible_once_only_button(self):
+        for change in ('offscreen', 'structure'):
+            with self.subTest(change=change):
+                window = replay('permission_request_20261004')
+                button = next(c for c in app.walk(window.control) if c.ControlTypeName == 'ButtonControl' and c.Name == '允许一次')
+                if change == 'offscreen':
+                    button.IsOffscreen = True
+                else:
+                    button.parent.ClassName = 'ordinary-message'
+                self.assertFalse(app.read_text(window).screen.permission)
+
+    def test_native_message_redraw_preserves_conversation_identity(self):
+        before = app.read_text(replay('permission_approved_20261004'))
+        later = app.read_text(replay('network_20261004'))
+        self.assertEqual(before.identity, later.identity)
+        self.assertEqual(before.thread_hint, later.thread_hint)
+
+    def test_native_sidebar_switch_changes_context_even_when_panel_is_reused(self):
+        before = app.read_text(replay('identity_before_switch_20261004'))
+        other = app.read_text(replay('identity_other_chat_20261004'))
+        returned = app.read_text(replay('identity_after_switch_20261004'))
+        self.assertNotEqual(before.thread_hint, other.thread_hint)
+        self.assertNotEqual(before.identity, returned.identity)
+
+    def test_native_identical_title_and_prompt_still_have_separate_contexts(self):
+        first = app.read_text(replay('identical_title_first_20261004'))
+        second_window = replay('identical_title_second_20261004')
+        second = app.read_text(second_window)
+        self.assertEqual(first.title, second.title)
+        self.assertNotEqual(first.thread_hint, second.thread_hint)
+        self.assertNotEqual(first.identity, second.identity)
+        app.prepare(second_window, first.identity)
+        self.assertIsNone(app._ready(second_window))
+
+    def test_permission_card_is_not_approved_in_chatgpt_mode(self):
+        window = replay('permission_request_20261004')
+        mode = next(c for c in app.walk(window.control) if c.ControlTypeName == 'ButtonControl' and '当前模式：Codex' in c.Name)
+        mode.Name = mode.Name.replace('Codex', 'ChatGPT')
+        view = app.read_text(window)
+        self.assertFalse(view.screen.identified or view.screen.permission)
+
+    def test_permission_mode_picker_and_full_access_confirmation_are_not_tool_approvals(self):
+        for fixture in ('permissions_menu_20261004', 'permissions_full_confirm_20261004'):
+            with self.subTest(fixture=fixture):
+                self.assertFalse(app.read_text(replay(fixture)).screen.permission)
+
+    def test_compact_layout_permission_picker_exposes_the_actual_checked_mode(self):
+        for fixture, wanted in (('full', 'full-access'), ('ask', 'ask-for-approval'), ('delegate', 'approve-for-me')):
+            with self.subTest(mode=wanted):
+                window = replay('permissions_checked_' + fixture + '_20261004')
+                menu = next(c for c in app.walk(window.control) if c.ControlTypeName == 'MenuControl')
+                self.assertEqual([mode for mode in app._PERMISSION_CHOICES if app._permission_selected(menu, mode)], [wanted])
 
     def test_an_unreadable_desktop_is_held(self):
         window = replay('idle')

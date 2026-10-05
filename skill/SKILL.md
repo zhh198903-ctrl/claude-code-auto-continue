@@ -11,19 +11,19 @@ Claude Code / Codex CLI / Codex 桌面 App 的 Windows 看门狗：监控故障�
 **先读日志再下结论。** 它是屏幕抓取工具，凭记忆猜它「应该」怎么做，
 十次有九次猜错——日志里写着它当时看见了什么、做了什么。
 
-## Codex CLI 与桌面 App（v2.3.1）
+## Codex CLI 与桌面 App（v3.0.0）
 
-Watch 可选 Claude CLI only、Codex only、Claude + Codex；Codex targets 再选 CLI、Desktop App 或 CLI + Desktop App。Claude、Codex CLI、Codex App 各用独立检测、状态与配置，先确认模式和表格前缀。
+Codex EXE、Codex CLI、Claude CLI 三个同级标签页切换设置与监测表；各类监测可独立勾选或多选。日志固定在底部，全局启动和保持唤醒设置放在 App settings。Dry-run 保留为内部诊断设置，不呈现在 GUI。
 
-Codex CLI 与 App 各有 Poll、Buffer、Retry、Dry-run 和 Advanced 设置。每个窗口独立设置 Model / Effort、Exclude、After finish 提示词与剩余次数。模型和强度通过当前会话的原生菜单应用，不支持的值会阻止发送并记日志。设置不影响 Claude。
+EXE 默认列出最近 5 条 Codex 活动，Recent 可调整为 1–100。排除 CLI、子代理、已归档、ChatGPT 普通聊天和 Work 会话。每条活动的 Model、Effort、Exclude、After finish 独立按 thread id 保存；同名会话也不能合并。隐藏活动可以配置，只有与当前可见原生 Codex 会话核对绑定后才可输入。
 
-任务中已有中间回复或工具输出后再触发的原生限额提示也会识别。App 内部重试时显示 Usage limit · App retrying，待 App 可输入后才继续；历史错误和对话中引用的提示不触发。
+CLI 和 EXE 各有 Poll、Buffer、Retry、Maximum retries 与独立 Advanced。权限模式可选完全访问（默认）、帮我批准、请求批准；自动批准工具权限默认开启，关闭后等待人工批准。普通选择框、模型对话框与登录提示不自动回答。不能把 Claude 的恢复脚本、正则、/model 或 /effort 命令直接发给 Codex。
 
-CLI 到额度重置时间发送 continue；桌面 App 若只显示额度限制而没有重置时间，按 Retry 间隔尝试，到 Maximum retries 后停止。网络错误同样限制重试次数。After finish 次数发送后立即扣减并保存，0 次不会再发送。登录、付费和未知错误需要人工处理。
+模型/强度通过原生会话菜单应用，不支持的值阻止发送并记日志。草稿、运行中、菜单、窗口不可读、未知终端身份会暂停自动输入。App 的 Send 不可用时保留自有草稿，提交确认后才扣减预算；编辑草稿、切换会话、Skip 或 Exclude 取消挂起发送。
 
-草稿、任务运行、确认对话框、菜单、窗口不可读、切换会话都会暂停自动输入。每个 CLI 会话使用独立 Windows Terminal 窗口，只监控活动标签页；桌面 App 只监控各窗口当前可见的 Codex 会话，不监控隐藏会话或 ChatGPT 模式。本地 API 保持原有 Claude 范围。
+CLI 到额度重置时间加 Buffer 后继续；App 没有重置时间的额度提示按 Retry 有限重试。App 原生内部重试时不输入；历史错误和引用内容不触发。After finish 次数提交后立即扣减并保存，0 次不会发送。认证、付费和未知错误需要人工处理。本地 API 保持 Claude 范围。
 
-已在真实 Codex CLI 0.159.3 和桌面 App 26.930.2377.0 验证。CLI 和 App 的日志分别以 Codex CLI watcher started / Codex App watcher started 表示启动，动作含窗口 id。未知终端不会默认识别成 Claude。
+已用真实 CLI 0.160.0、App 26.930.3930.0（runtime 0.160.0）在隔离测试环境及本地故障注入中验证。App 未显示额度重置时间，因此不声称原生定时重置验证通过；App 命令提权被测试策略拒绝，工具权限验证使用实际 request_permissions 卡片。完整方法和限制见 docs/validation/codex-3.0.0.md。
 
 以下原有故障类型、自动许可与选择框说明适用于 Claude Code。
 
@@ -33,7 +33,7 @@ CLI 到额度重置时间发送 continue；桌面 App 若只显示额度限制�
 |---|---|
 | 活动日志 | `%LOCALAPPDATA%\auto_continue\activity.log` |
 | 轮转 | 到约 1 MB 转成 `.log.old`，只留一份；事发第二天排查记得连 `.old` 一起看 |
-| 设置 | 注册表，随 GUI 保存；Claude 用 **Advanced…**，Codex 用 **Codex Advanced…** 和窗口表格 |
+| 设置 | 注册表，随 GUI 保存；三类各用自己的标签页、Advanced/More settings 和会话表；全局选项在 App settings |
 | 日志本体 | 只记它自己的判断和动作，**从不记录终端内容** |
 
 ```bash

@@ -68,7 +68,7 @@ jobs:
           python test_selftrigger.py
 
       - name: Codex routing, CLI, desktop and GUI checks
-        run: python -m unittest test_cli_routing test_codex_cli test_codex_gui test_codex_app test_codex_submission -v
+        run: python -m unittest test_cli_routing test_codex_activity test_codex_cli test_codex_gui test_codex_app test_codex_sessions test_codex_submission -v
 
       - name: Build onefile exe
         run: python build_release.py
