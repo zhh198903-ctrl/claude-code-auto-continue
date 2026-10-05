@@ -6138,7 +6138,7 @@ the exe. Only the packaged exe updates itself; running from source just
 reports what is available.</li>
 </ul>
 
-<p><a href="https://github.com/zhh198903-ctrl/claude-code-auto-continue">Project page on GitHub</a></p>
+<p><a href="https://github.com/zhh198903-ctrl/codex-cc-auto-continue">Project page on GitHub</a></p>
 """
 
 

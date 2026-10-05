@@ -1,4 +1,4 @@
-# claude-code-auto-continue
+# Codex/CC Auto-Continue
 
 A Windows GUI watchdog for [Claude Code](https://github.com/anthropics/claude-code), Codex CLI in Windows Terminal, and the Codex desktop App. Select any combination of Codex EXE, Codex CLI and Claude CLI; switch their settings with three equal tabs. Each driver has independent detection, state, retries and configuration.
 
@@ -8,13 +8,13 @@ It resumes recoverable failures and can send a configured follow-up after a comp
 
 ## Download
 
-**[⬇️ Auto-Continue.exe (latest release)](https://github.com/zhh198903-ctrl/claude-code-auto-continue/releases/latest)** — single-file Windows executable, no Python or dependencies required. Double-click to run.
+**[⬇️ Auto-Continue.exe (latest release)](https://github.com/zhh198903-ctrl/codex-cc-auto-continue/releases/latest)** — single-file Windows executable, no Python or dependencies required. Double-click to run.
 
 Prefer source? See [Install](#install) below.
 
 ## Codex CLI and desktop App (v3.0.0)
 
-> This section describes the 3.0.0 source update. On 2026-10-05 the public download remains v2.3.2; check the release version or build this source for the new interface.
+> Version 3.0.0 supports Codex desktop, Codex CLI and Claude CLI. Download the matching binary from the release page.
 
 - Three equal tabs, **Codex EXE**, **Codex CLI** and **Claude CLI**, switch the settings and shared table. Enable any combination independently; disabled types show no settings. The activity log stays at the bottom. Global startup/keep-awake options live in **App settings**. Dry-run remains a saved diagnostic setting and is hidden from the GUI.
 - CLI and EXE share form construction for **Poll**, **Buffer**, **Retry**, exclusions, model/effort settings and **After finish**; their detection, state, retry limits and configuration remain independent. Claude recovery scripts, trigger expressions and slash commands are not applied to Codex.
@@ -42,13 +42,13 @@ The watcher runs on a Qt worker thread so UIA reads (which take 100 ms+) never b
 
 ### Option A — Prebuilt exe (recommended)
 
-Grab **`Auto-Continue.exe`** from the [latest release](https://github.com/zhh198903-ctrl/claude-code-auto-continue/releases/latest) and double-click it. That's it.
+Grab **`Auto-Continue.exe`** from the [latest release](https://github.com/zhh198903-ctrl/codex-cc-auto-continue/releases/latest) and double-click it. That's it.
 
 ### Option B — From source
 
 ```powershell
-git clone https://github.com/zhh198903-ctrl/claude-code-auto-continue.git
-cd claude-code-auto-continue
+git clone https://github.com/zhh198903-ctrl/codex-cc-auto-continue.git
+cd codex-cc-auto-continue
 pip install -r requirements.txt
 ```
 

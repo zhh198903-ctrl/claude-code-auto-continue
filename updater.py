@@ -24,7 +24,7 @@ import urllib.request
 from typing import Callable, Optional
 
 GITHUB_OWNER = "zhh198903-ctrl"
-GITHUB_REPO = "claude-code-auto-continue"
+GITHUB_REPO = "codex-cc-auto-continue"
 ASSET_NAME = "Auto-Continue.exe"
 
 # Second source for the same build. GitHub is the release of record, but the

@@ -157,4 +157,4 @@ Claude Code 的窗口是按对话内容命名的。所以要发的话用这个�
 ## 授权
 
 MIT 开源，免费，可商用。源码与发布：
-`https://github.com/zhh198903-ctrl/claude-code-auto-continue`
+`https://github.com/zhh198903-ctrl/codex-cc-auto-continue`
